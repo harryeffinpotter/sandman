@@ -1,0 +1,42 @@
+# Build artifacts
+*.obj
+*.dll
+*.exe
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.pch
+
+# Il2CppDumper tool + output
+il2cpp_dumper/Il2CppDumper/
+
+# Dumper output (runtime-generated)
+il2cpp_dumper/dumps/
+il2cpp_dumper/dump_static/
+il2cpp_dumper/Sand_RoS_*/
+il2cpp_dumper/entity_diag.txt
+il2cpp_dumper/entity_dump.txt
+il2cpp_dumper/fields.txt
+il2cpp_dumper/probe.txt
+il2cpp_dumper/component_names.txt
+
+# Backup directory (exact copy, no reason to track)
+il2cpp_dumper_backup/
+
+# sand_cheat build output
+sand_cheat/*.dll
+sand_cheat/*.obj
+sand_cheat/*.pdb
+sand_cheat/*.ilk
+
+# Dear ImGui vendored source (large, pull from upstream)
+il2cpp_dumper/imgui/
+sand_cheat/imgui/
+
+# OS / editor junk
+Thumbs.db
+*.suo
+*.user
+*.vs/
+.vs/
