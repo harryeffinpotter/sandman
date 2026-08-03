@@ -236,15 +236,28 @@ static bool key_pressed(int vk) {
     return down && !wasDown;
 }
 
+static bool is_readable(const void* ptr, size_t len) {
+    if (!ptr) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    const DWORD mask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                       PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(mbi.Protect & mask)) return false;
+    if (mbi.Protect & PAGE_GUARD) return false;
+    uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    return ((uintptr_t)ptr + len) <= regionEnd;
+}
+
 // ---------------------------------------------------------------------------
 // IL2CPP string reader
 // ---------------------------------------------------------------------------
 static std::string read_il2cpp_string(void* str) {
-    if (!str || IsBadReadPtr(str, 0x14)) return "";
+    if (!is_readable(str, 0x14)) return "";
     int len = *(int*)((uintptr_t)str + 0x10);
     if (len <= 0 || len > 1024) return "";
     wchar_t* wchars = (wchar_t*)((uintptr_t)str + 0x14);
-    if (IsBadReadPtr(wchars, len * 2)) return "";
+    if (!is_readable(wchars, len * 2)) return "";
     std::string result;
     result.reserve(len);
     for (int i = 0; i < len; i++) result += (char)wchars[i];
@@ -255,7 +268,7 @@ static std::string read_il2cpp_string(void* str) {
 // DictionarySlim lookup
 // ---------------------------------------------------------------------------
 static void* dict_slim_lookup(void* dict, int key) {
-    if (!dict || IsBadReadPtr(dict, 0x28)) return nullptr;
+    if (!is_readable(dict, 0x28)) return nullptr;
 
     void* buckets_arr = *(void**)((uintptr_t)dict + 0x10);
     void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
@@ -288,7 +301,7 @@ static void* dict_slim_lookup(void* dict, int key) {
 // dict_slim_null_value — same traversal, writes nullptr to the value slot
 // ---------------------------------------------------------------------------
 static bool dict_slim_null_value(void* dict, int key) {
-    if (!dict || IsBadReadPtr(dict, 0x28)) return false;
+    if (!is_readable(dict, 0x28)) return false;
 
     void* buckets_arr = *(void**)((uintptr_t)dict + 0x10);
     void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
@@ -325,7 +338,7 @@ static bool dict_slim_null_value(void* dict, int key) {
 static bool strip_component(void* entity, int componentIndex) {
     __try {
         if (!entity || componentIndex < 0) return false;
-        if (IsBadReadPtr(entity, 0x58)) return false;
+        if (!is_readable(entity, 0x58)) return false;
         void* dict = *(void**)((uintptr_t)entity + 0x50);
         return dict_slim_null_value(dict, componentIndex);
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
@@ -383,7 +396,7 @@ static bool safe_read_sizet(void* addr, size_t* out) {
 // ---------------------------------------------------------------------------
 static bool discover_component_indices(void* gameContextModule) {
     void* componentNames = *(void**)((uintptr_t)gameContextModule + 0x20);
-    if (!componentNames || IsBadReadPtr(componentNames, 0x20)) return false;
+    if (!is_readable(componentNames, 0x20)) return false;
 
     void* items_arr = *(void**)((uintptr_t)componentNames + 0x10);
     int size = *(int*)((uintptr_t)componentNames + 0x18);
@@ -397,7 +410,7 @@ static bool discover_component_indices(void* gameContextModule) {
 
     for (int i = 0; i < count; i++) {
         void* str = elements[i];
-        if (!str || IsBadReadPtr(str, 0x14)) continue;
+        if (!is_readable(str, 0x14)) continue;
         int len = *(int*)((uintptr_t)str + 0x10);
         if (len <= 0 || len > 200) continue;
         wchar_t* wchars = (wchar_t*)((uintptr_t)str + 0x14);
@@ -428,7 +441,7 @@ static void probe_context(void* ctx) {
     for (int off = 0x10; off <= 0x70; off += 8) {
         void* val = *(void**)((uintptr_t)ctx + off);
         printf("  +0x%02X: %p", off, val);
-        if (val && !IsBadReadPtr(val, 8)) {
+        if (is_readable(val, 8)) {
             __try {
                 int count = *(int*)((uintptr_t)val + 0x20);
                 if (count > 0 && count < 100000) {
@@ -521,7 +534,7 @@ static void scan_entities() {
     {
         void* context = nullptr;
         if (!safe_read_ptr((void*)((uintptr_t)gcm + 0x10), &context)) return;
-        if (!context || IsBadReadPtr(context, 0xA0)) return;
+        if (!is_readable(context, 0xA0)) return;
 
         void* cache = *(void**)((uintptr_t)context + 0x98);
         void** entityPtrs = nullptr;
@@ -529,12 +542,12 @@ static void scan_entities() {
 
         static std::vector<void*> tempEntities;
 
-        if (cache && !IsBadReadPtr(cache, 0x20)) {
+        if (is_readable(cache, 0x20)) {
             entityCount = (int)*(size_t*)((uintptr_t)cache + 0x18);
             entityPtrs = (void**)((uintptr_t)cache + 0x20);
         } else {
             void* hashSet = *(void**)((uintptr_t)context + 0x58);
-            if (!hashSet || IsBadReadPtr(hashSet, 0x30)) return;
+            if (!is_readable(hashSet, 0x30)) return;
 
             void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
             int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
@@ -572,7 +585,7 @@ static void scan_entities() {
                  cache ? "entitiesCache(+0x98)" : "hashSet(+0x58)");
 
             auto dump_entity = [&](const char* label, void* ent) {
-                if (!ent || IsBadReadPtr(ent, 0x68)) { dout("  %s: INVALID ptr %p\n", label, ent); return; }
+                if (!is_readable(ent, 0x68)) { dout("  %s: INVALID ptr %p\n", label, ent); return; }
 
                 int cIdx = *(int*)((uintptr_t)ent + 0x48);
                 bool enabled = *(bool*)((uintptr_t)ent + 0x4C);
@@ -580,7 +593,7 @@ static void scan_entities() {
 
                 void* dictPtr = *(void**)((uintptr_t)ent + 0x50);
                 dout("  dict ptr=%p\n", dictPtr);
-                if (!dictPtr || IsBadReadPtr(dictPtr, 0x28)) { dout("  dict INVALID\n"); return; }
+                if (!is_readable(dictPtr, 0x28)) { dout("  dict INVALID\n"); return; }
 
                 void* bucketsArr = *(void**)((uintptr_t)dictPtr + 0x10);
                 void* entriesArr = *(void**)((uintptr_t)dictPtr + 0x18);
@@ -589,7 +602,7 @@ static void scan_entities() {
                 dout("  _buckets=%p, _entries=%p, count=%d, freeList=%d\n",
                      bucketsArr, entriesArr, dCount, dFree);
 
-                if (bucketsArr && !IsBadReadPtr(bucketsArr, 0x20)) {
+                if (is_readable(bucketsArr, 0x20)) {
                     size_t bLen = *(size_t*)((uintptr_t)bucketsArr + 0x18);
                     dout("  buckets arr_len=%zu\n", bLen);
                     int* bData = (int*)((uintptr_t)bucketsArr + 0x20);
@@ -599,7 +612,7 @@ static void scan_entities() {
                     dout("\n");
                 }
 
-                if (entriesArr && !IsBadReadPtr(entriesArr, 0x20)) {
+                if (is_readable(entriesArr, 0x20)) {
                     size_t eLen = *(size_t*)((uintptr_t)entriesArr + 0x18);
                     dout("  entries arr_len=%zu\n", eLen);
                     if (eLen > 0 && eLen < 10000) {
@@ -631,7 +644,7 @@ static void scan_entities() {
                         }
 
                         int key47 = g_idx_blueprint;
-                        if (bucketsArr && !IsBadReadPtr(bucketsArr, 0x20)) {
+                        if (is_readable(bucketsArr, 0x20)) {
                             size_t bLen = *(size_t*)((uintptr_t)bucketsArr + 0x18);
                             if (bLen > 0) {
                                 int* bData = (int*)((uintptr_t)bucketsArr + 0x20);
@@ -682,13 +695,13 @@ static void scan_entities() {
             int nValid=0, nEnabled=0, nHasDict=0, nHasIA=0, nHasINA=0, nHasIntrs=0, nHasBP=0, nHasPos=0;
             for (int e = 0; e < entityCount; e++) {
                 void* ent = entityPtrs[e];
-                if (!ent || IsBadReadPtr(ent, 0x68)) continue;
+                if (!is_readable(ent, 0x68)) continue;
                 nValid++;
                 bool en = *(bool*)((uintptr_t)ent + 0x4C);
                 if (!en) continue;
                 nEnabled++;
                 void* dp = *(void**)((uintptr_t)ent + 0x50);
-                if (dp && !IsBadReadPtr(dp, 0x28)) nHasDict++;
+                if (is_readable(dp, 0x28)) nHasDict++;
                 if (get_component(ent, g_idx_interactible)) nHasIA++;
                 if (get_component(ent, g_idx_interact_not_active)) nHasINA++;
                 if (get_component(ent, g_idx_interactions)) nHasIntrs++;
@@ -702,7 +715,7 @@ static void scan_entities() {
                 dout("\n[FIRST BP ENTITY] searching...\n");
                 for (int e = 0; e < entityCount; e++) {
                     void* ent = entityPtrs[e];
-                    if (!ent || IsBadReadPtr(ent, 0x68)) continue;
+                    if (!is_readable(ent, 0x68)) continue;
                     if (!*(bool*)((uintptr_t)ent + 0x4C)) continue;
                     void* bp = get_component(ent, g_idx_blueprint);
                     if (bp) {
@@ -763,7 +776,7 @@ static void scan_entities() {
         if (g_idx_id >= 0) {
             for (int e = 0; e < entityCount; e++) {
                 void* ent = entityPtrs[e];
-                if (!ent || IsBadReadPtr(ent, 0x58)) continue;
+                if (!is_readable(ent, 0x58)) continue;
                 if (!*(bool*)((uintptr_t)ent + 0x4C)) continue;
                 void* idComp = get_component(ent, g_idx_id);
                 if (idComp) {
@@ -777,7 +790,7 @@ static void scan_entities() {
 
         for (int e = 0; e < entityCount; e++) {
             void* entity = entityPtrs[e];
-            if (!entity || IsBadReadPtr(entity, 0x68)) continue;
+            if (!is_readable(entity, 0x68)) continue;
 
             bool isEnabled = *(bool*)((uintptr_t)entity + 0x4C);
             if (!isEnabled) continue;
@@ -1165,19 +1178,19 @@ static void handle_input() {
         if (!gcm) break;
         void* context = nullptr;
         if (!safe_read_ptr((void*)((uintptr_t)gcm + 0x10), &context)) break;
-        if (!context || IsBadReadPtr(context, 0xA0)) break;
+        if (!is_readable(context, 0xA0)) break;
 
         void** entityPtrs = nullptr;
         int entityCount = 0;
         std::vector<void*> tempEnts;
 
         void* cache = *(void**)((uintptr_t)context + 0x98);
-        if (cache && !IsBadReadPtr(cache, 0x20)) {
+        if (is_readable(cache, 0x20)) {
             entityCount = (int)*(size_t*)((uintptr_t)cache + 0x18);
             entityPtrs = (void**)((uintptr_t)cache + 0x20);
         } else {
             void* hashSet = *(void**)((uintptr_t)context + 0x58);
-            if (!hashSet || IsBadReadPtr(hashSet, 0x30)) break;
+            if (!is_readable(hashSet, 0x30)) break;
             void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
             int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
             if (!slots_arr || lastIndex <= 0) break;
@@ -1208,7 +1221,7 @@ static void handle_input() {
 
         for (int e = 0; e < entityCount; e++) {
             void* ent = entityPtrs[e];
-            if (!ent || IsBadReadPtr(ent, 0x68)) continue;
+            if (!is_readable(ent, 0x68)) continue;
             bool en = *(bool*)((uintptr_t)ent + 0x4C);
             if (!en) continue;
 
@@ -1388,10 +1401,10 @@ static DWORD WINAPI worker_thread(LPVOID) {
     {
         void* gcm = (void*)g_gameContextModule;
         void* componentNames = *(void**)((uintptr_t)gcm + 0x20);
-        if (componentNames && !IsBadReadPtr(componentNames, 0x20)) {
+        if (is_readable(componentNames, 0x20)) {
             void* items_arr = *(void**)((uintptr_t)componentNames + 0x10);
             int size = *(int*)((uintptr_t)componentNames + 0x18);
-            if (items_arr && !IsBadReadPtr(items_arr, 0x20) && size > 0) {
+            if (is_readable(items_arr, 0x20) && size > 0) {
                 size_t arr_len = *(size_t*)((uintptr_t)items_arr + 0x18);
                 void** elements = (void**)((uintptr_t)items_arr + 0x20);
                 int count = (size < (int)arr_len) ? size : (int)arr_len;
