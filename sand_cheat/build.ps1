@@ -18,10 +18,12 @@ $sources = @(
     "imgui\imgui_impl_win32.cpp"
 )
 
-cl /EHsc /O2 /LD @sources /Fe:sand_cheat.dll /link user32.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib
+cl /EHa /O2 /MT /LD /std:c++17 /Zi @sources /Fe:sand_cheat.dll /link /DEBUG /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "Build succeeded: sand_cheat.dll" -ForegroundColor Green
+    Copy-Item -Force "sand_cheat.dll" "launcher\sand_cheat.dll"
+    Copy-Item -Force "sand_cheat.pdb" "launcher\sand_cheat.pdb"
+    Write-Host "Build succeeded: sand_cheat.dll (copied to launcher/)" -ForegroundColor Green
 } else {
     Write-Host "Build FAILED" -ForegroundColor Red
     exit 1

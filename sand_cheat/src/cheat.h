@@ -33,6 +33,9 @@ typedef uint32_t    (*fn_il2cpp_class_instance_size)(void* klass);
 typedef void*       (*fn_il2cpp_class_get_methods)(void* klass, void** iter);
 typedef const char* (*fn_il2cpp_method_get_name)(void* method);
 typedef uint32_t    (*fn_il2cpp_method_get_param_count)(void* method);
+typedef void*       (*fn_il2cpp_class_get_type)(void* klass);
+typedef void*       (*fn_il2cpp_type_get_object)(void* type);
+typedef void*       (*fn_il2cpp_string_new)(const char* str);
 
 // ---------------------------------------------------------------------------
 // IL2CPP API struct
@@ -60,6 +63,9 @@ struct IL2CPP_API {
     fn_il2cpp_class_get_methods         il2cpp_class_get_methods;
     fn_il2cpp_method_get_name           il2cpp_method_get_name;
     fn_il2cpp_method_get_param_count    il2cpp_method_get_param_count;
+    fn_il2cpp_class_get_type        il2cpp_class_get_type;
+    fn_il2cpp_type_get_object       il2cpp_type_get_object;
+    fn_il2cpp_string_new            il2cpp_string_new;
 };
 
 // ---------------------------------------------------------------------------
@@ -68,6 +74,13 @@ struct IL2CPP_API {
 struct WorldVector {
     float x, y, z;
     int cx, cy;
+};
+
+struct Vec3 { float x, y, z; };
+
+struct BoneWorldPos {
+    Vec3 pos;
+    bool valid;
 };
 
 struct ItemInfo {
@@ -80,6 +93,17 @@ struct ItemInfo {
     bool isWeapon;
     bool isHeavy;
     bool isHeldByPlayer;
+    bool hasOwnPosition;
+    WorldVector viewPos;
+    bool hasViewPos;
+    bool isCreature;
+    Vec3 transformWorldPos;
+    bool hasTransformPos;
+    BoneWorldPos bonePositions[55];
+    bool hasBones;
+    std::string displayName;
+    float velX, velY, velZ;
+    DWORD lastPosTime;
 };
 
 struct Hook {
@@ -101,6 +125,15 @@ static const float CHUNK_SIZE = 256.0f;
 // ---------------------------------------------------------------------------
 typedef void (*fn_execute)(void* thisPtr);
 typedef bool (*fn_is_too_far)(void* thisPtr, int32_t targetId, void* avatar);
+typedef void* (*fn_camera_get_main)(void* method);
+typedef Vec3* (*fn_camera_w2s)(Vec3* ret, void* camera, Vec3* position, void* method);
+typedef void* (*fn_get_transform)(void* component, void* method);
+typedef Vec3* (*fn_get_forward)(Vec3* ret, void* transform, void* method);
+typedef Vec3* (*fn_get_position)(Vec3* ret, void* transform, void* method);
+typedef void* (*fn_get_parent)(void* transform, void* method);
+typedef void* (*fn_get_bone_transform)(void* animator, int boneIndex, void* method);
+typedef void* (*fn_get_component_by_type)(void* component, void* type, void* method);
+typedef void* (*fn_get_component_in_children)(void* component, void* type, void* method);
 
 // ---------------------------------------------------------------------------
 // Globals (defined in cheat.cpp)
@@ -119,6 +152,35 @@ extern int g_idx_interact_not_active;
 extern int g_idx_interactions;
 extern int g_idx_id;
 extern int g_idx_large_item;
+extern int g_idx_overheated;
+extern int g_idx_recoil_look;
+extern int g_idx_stationary_auto;
+extern int g_idx_stationary_data;
+extern int g_idx_weapon_overheat;
+extern int g_idx_weapon_overheat_data;
+extern int g_idx_auto_turret;
+extern int g_idx_bullet_projectile_data;
+extern int g_idx_health_data;
+extern int g_idx_invincible;
+extern int g_idx_speed_data;
+extern int g_idx_jump;
+extern int g_idx_cheat_walker_fly;
+extern int g_idx_cheat_walker_speed;
+extern int g_idx_shot_info;
+extern int g_idx_nice_name;
+extern int g_idx_account_id;
+extern int g_idx_view;
+extern int g_idx_view_position;
+extern int g_idx_view_data;
+extern int g_idx_char_ctrl_vb;
+extern int g_idx_fps_ctrl_vb;
+extern int g_idx_mob_vb;
+extern int g_idx_simple_anim_vb;
+extern int g_idx_mob_state;
+extern int g_idx_mob_ghoul;
+extern int g_idx_mob_living_sand;
+extern int g_idx_mob_living_sand_jr;
+extern int g_idx_ai_agent;
 
 extern std::vector<ItemInfo> g_items;
 extern CRITICAL_SECTION g_itemsLock;
@@ -130,8 +192,25 @@ extern std::atomic<bool> g_dupeMode;
 extern std::atomic<bool> g_stickyLock;
 extern std::atomic<bool> g_weaponFilter;
 extern std::atomic<bool> g_heavyBypass;
+extern std::atomic<bool> g_turretNoOverheat;
+extern std::atomic<bool> g_turretRapidFire;
+extern std::atomic<bool> g_turretNoRecoil;
+extern std::atomic<bool> g_weaponModsEnabled;
+extern std::atomic<bool> g_weaponNoDrop;
+extern std::atomic<bool> g_weaponNoBloom;
+extern std::atomic<float> g_weaponVelocityMult;
 extern std::atomic<uintptr_t> g_lockedEntityPtr;
+extern std::atomic<uintptr_t> g_cachedRecoilEntity;
 extern std::atomic<bool> g_running;
+extern volatile DWORD g_workerThreadId;
+extern volatile DWORD g_renderThreadId;
+extern volatile bool g_workerVehActive;
+extern CONTEXT g_vehSavedCtx;
+extern volatile bool g_vehCrashRecovered;
+extern CONTEXT g_vehInnerCtx;
+extern volatile bool g_vehInnerActive;
+extern CONTEXT g_vehEntityCtx;
+extern volatile bool g_vehEntityActive;
 
 extern WorldVector g_playerPos;
 extern std::atomic<int> g_entityCount;
@@ -145,6 +224,87 @@ extern Hook g_farHook;
 
 extern std::atomic<bool> g_dumpEntities;
 extern std::atomic<bool> g_probeContext;
+extern std::atomic<bool> g_dumpShopClasses;
+extern std::atomic<int> g_executeHookCalls;
+extern std::atomic<int> g_forceInteractWrites;
+extern std::atomic<int> g_turretEntitiesFound;
+extern std::atomic<int> g_turretModsApplied;
+extern std::atomic<int> g_dbgHasWeaponHeat;
+extern std::atomic<int> g_dbgHasStationaryAuto;
+extern std::atomic<int> g_dbgHasRecoilLook;
+extern std::atomic<int> g_dbgHasOverheated;
+
+extern std::atomic<bool> g_espEnabled;
+extern float g_radarRange;
+extern std::atomic<bool> g_espShowMobs;
+extern fn_camera_get_main g_cameraGetMain;
+extern fn_camera_w2s g_cameraW2S;
+extern std::atomic<bool> g_esp3DEnabled;
+extern float g_espMaxDist;
+extern float g_espPlayerDist;
+extern float g_espMobDist;
+extern float g_espWalkerDist;
+extern float g_espItemDist;
+extern std::atomic<bool> g_espShowItems;
+extern std::atomic<bool> g_espShowSelf;
+extern std::atomic<bool> g_espShowPlayers;
+extern fn_get_transform g_getTransform;
+extern fn_get_forward g_getForward;
+extern fn_get_position g_getPosition;
+extern fn_get_parent g_getParent;
+extern std::atomic<bool> g_espShowWalkers;
+extern fn_get_bone_transform g_getBoneTransform;
+extern fn_get_component_by_type g_getComponentByType;
+extern fn_get_component_in_children g_getComponentInChildren;
+extern void* g_animatorType;
+extern std::atomic<bool> g_espShowSkeleton;
+extern uintptr_t g_gaBase;
+extern uintptr_t g_gaSize;
+extern void* g_userNameKlass;
+extern void* g_userNameType;
+
+struct AimbotProfile {
+    bool realityAim = true;
+    float magnetism = 0.5f;
+    bool magnetismRandomize = false;
+    float magnetismRandomAmt = 0.1f;
+    float boneWeightHead = 50.0f;
+    float boneWeightTorso = 50.0f;
+    bool boneWeightRandomize = false;
+    float boneWeightRandomAmt = 10.0f;
+    float feather = 15.0f;
+    bool featherRandomize = false;
+    float featherRandomAmt = 5.0f;
+    bool prediction = false;
+    float bulletVelocity = 300.0f;
+    bool closestBone = false;
+    float closestBoneStrength = 0.5f;
+    bool closestBoneStrengthRandomize = false;
+    float closestBoneStrengthRandomAmt = 0.1f;
+    float centerPull = 0.0f;
+    bool centerPullRandomize = false;
+    float centerPullRandomAmt = 0.1f;
+    float smooth = 5.0f;
+
+    float rt_magOff = 0; DWORD rt_magT = 0;
+    float rt_bwOff = 0; DWORD rt_bwT = 0;
+    float rt_featherOff = 0; DWORD rt_featherT = 0;
+    float rt_cpOff = 0; DWORD rt_cpT = 0;
+    float rt_cbsOff = 0; DWORD rt_cbsT = 0;
+    int rt_currentBone = -1;
+};
+
+extern std::atomic<bool> g_aimbotEnabled;
+extern std::atomic<bool> g_aimbotActive;
+extern float g_aimbotFOV;
+extern float g_aimbotMaxDist;
+extern std::atomic<bool> g_aimbotDrawFOV;
+extern std::atomic<bool> g_aimbotTargetPlayers;
+extern std::atomic<bool> g_aimbotTargetMobs;
+extern int g_aimbotActivationKey;
+extern AimbotProfile g_aimPlayer;
+extern AimbotProfile g_aimMob;
+extern bool g_mobAimbotSame;
 
 // ---------------------------------------------------------------------------
 // Functions
@@ -153,6 +313,7 @@ void resolve_all(HMODULE ga, IL2CPP_API& api);
 bool install_hook(Hook& h, void* target, void* detour, int steal_count = 16);
 bool discover_component_indices(void* gameContextModule);
 void scan_entities();
+void scan_entities_fast();
 std::string read_il2cpp_string(void* str);
 void* get_component(void* entity, int componentIndex);
 bool strip_component(void* entity, int componentIndex);
@@ -166,5 +327,8 @@ bool safe_read_sizet(void* addr, size_t* out);
 void force_interact_target(void* systemPtr, int targetId);
 void dump_entities_to_file();
 void probe_context_to_file();
+void apply_turret_mods();
+void apply_weapon_mods();
 void __fastcall hooked_execute(void* thisPtr);
 bool __fastcall hooked_is_too_far(void* thisPtr, int32_t targetId, void* avatar);
+void dump_shop_classes(IL2CPP_API& api);
