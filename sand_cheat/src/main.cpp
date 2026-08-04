@@ -6,14 +6,20 @@
 #include <exception>
 #include <dbghelp.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 
 #pragma comment(lib, "dbghelp.lib")
+
+#ifndef WT_EXECUTELONGFUNCTION
+#define WT_EXECUTELONGFUNCTION 0x00000010
+#endif
 
 #define CRASH_DIR "C:\\Users\\ysg\\projects\\sand_cheat\\"
 
 static void wlog(const char* fmt, ...) {
     FILE* f = fopen(CRASH_DIR "worker_debug.txt", "a");
     if (!f) return;
+    fprintf(f, "[%lu] ", GetTickCount());
     va_list a; va_start(a, fmt);
     vfprintf(f, fmt, a);
     va_end(a);
@@ -212,12 +218,18 @@ static void write_minidump(EXCEPTION_POINTERS* ep) {
 }
 
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
+    if (hwbp_handle_exception(ep))
+        return EXCEPTION_CONTINUE_EXECUTION;
+
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     if (code == 0x406D1388) return EXCEPTION_CONTINUE_SEARCH;
 
     g_exceptionCount++;
 
     if (code == 0xe06d7363) return EXCEPTION_CONTINUE_SEARCH;
+    if (code == 0x40010006) return EXCEPTION_CONTINUE_SEARCH;
+    if (code == 0x80000003) return EXCEPTION_CONTINUE_SEARCH;
+    if (code == 0x80000004) return EXCEPTION_CONTINUE_SEARCH;
 
     if (code == 0xC0000005 && GetCurrentThreadId() == g_workerThreadId && g_workerVehActive) {
         g_workerVehActive = false;
@@ -286,12 +298,9 @@ static void safe_scan_tick(int scanCounter) {
     DWORD now = GetTickCount();
     if (now < s_cooldownUntil) return;
 
+
     __try {
-        if (scanCounter % 30 == 0) {
-            scan_entities();
-        } else {
-            scan_entities_fast();
-        }
+        scan_entities();
         if (scanCounter % 5 == 0) {
             if (g_turretRapidFire.load() || g_turretNoRecoil.load()) apply_turret_mods();
             if (g_weaponModsEnabled.load()) apply_weapon_mods();
@@ -307,15 +316,7 @@ static void safe_scan_tick(int scanCounter) {
 
 static bool is_readable(const void* ptr, size_t len) {
     if (!ptr) return false;
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    const DWORD mask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                       PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (!(mbi.Protect & mask)) return false;
-    if (mbi.Protect & PAGE_GUARD) return false;
-    uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    return ((uintptr_t)ptr + len) <= regionEnd;
+    return !IsBadReadPtr(ptr, len);
 }
 
 static void* safe_find_execute(const IL2CPP_API* api, uintptr_t ga_base) {
@@ -369,7 +370,10 @@ static void* safe_find_execute(const IL2CPP_API* api, uintptr_t ga_base) {
 
 static bool safe_overlay_init() {
     __try {
-        return overlay_init();
+        tlog("safe_overlay_init: entering overlay_init()\n");
+        bool result = overlay_init();
+        tlog("safe_overlay_init: overlay_init returned %d\n", result);
+        return result;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         wlog("[worker] overlay_init crashed: 0x%08lX\n", GetExceptionCode());
         tlog("overlay_init CRASHED: 0x%08lX\n", GetExceptionCode());
@@ -380,20 +384,24 @@ static bool safe_overlay_init() {
 static DWORD WINAPI worker_thread(LPVOID) {
     g_workerThreadId = GetCurrentThreadId();
     tlog("worker_thread ENTERED tid=%lu pid=%lu\n", g_workerThreadId, GetCurrentProcessId());
-    AddVectoredExceptionHandler(1, crash_handler);
-    tlog("VEH registered\n");
+    tlog("worker thread start addr check: NtCurrentTeb=%p\n", NtCurrentTeb());
     SetUnhandledExceptionFilter(final_crash_handler);
-    tlog("UEF set\n");
     std::set_terminate(on_terminate);
     signal(SIGABRT, on_abort_signal);
+    tlog("exception handlers installed\n");
+    AddVectoredExceptionHandler(1, crash_handler);
+    tlog("VEH crash_handler installed\n");
     {
         FILE* f = fopen(CRASH_DIR "crash_info.txt", "w");
         if (f) { fprintf(f, "=== Session started ===\n\n"); fflush(f); fclose(f); }
     }
     tlog("crash_info.txt session file written\n");
     wlog("[worker] PID=%lu\n", GetCurrentProcessId());
+    tlog("initializing critical section\n");
     InitializeCriticalSection(&g_itemsLock);
+    tlog("critical section initialized\n");
 
+    tlog("waiting for GameAssembly.dll...\n");
     HMODULE ga = nullptr;
     while (!ga && g_running.load()) {
         ga = GetModuleHandleA("GameAssembly.dll");
@@ -403,6 +411,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
     tlog("GameAssembly.dll found at %p\n", ga);
 
     IL2CPP_API api;
+    tlog("calling resolve_all...\n");
     resolve_all(ga, api);
     tlog("resolve_all done. domain_get=%p thread_attach=%p domain_get_assemblies=%p assembly_get_image=%p image_get_class_count=%p image_get_class=%p class_get_name=%p class_from_name=%p class_get_methods=%p method_get_name=%p method_get_param_count=%p image_get_name=%p class_get_type=%p type_get_object=%p string_new=%p\n",
         (void*)api.il2cpp_domain_get, (void*)api.il2cpp_thread_attach,
@@ -414,8 +423,23 @@ static DWORD WINAPI worker_thread(LPVOID) {
         (void*)api.il2cpp_class_get_type, (void*)api.il2cpp_type_get_object,
         (void*)api.il2cpp_string_new);
 
+    tlog("checking API validity...\n");
+    int api_null_count = 0;
+    if (!api.il2cpp_domain_get) api_null_count++;
+    if (!api.il2cpp_thread_attach) api_null_count++;
+    if (!api.il2cpp_domain_get_assemblies) api_null_count++;
+    if (!api.il2cpp_assembly_get_image) api_null_count++;
+    if (!api.il2cpp_image_get_class_count) api_null_count++;
+    if (!api.il2cpp_image_get_class) api_null_count++;
+    if (!api.il2cpp_class_get_name) api_null_count++;
+    if (!api.il2cpp_class_get_methods) api_null_count++;
+    if (!api.il2cpp_method_get_name) api_null_count++;
+    tlog("API check: %d null pointers out of 9 critical\n", api_null_count);
+
+    tlog("calling il2cpp_domain_get at %p\n", (void*)api.il2cpp_domain_get);
     if (api.il2cpp_domain_get && api.il2cpp_thread_attach) {
         void* domain = api.il2cpp_domain_get();
+        tlog("domain=%p, calling thread_attach at %p\n", domain, (void*)api.il2cpp_thread_attach);
         if (domain) api.il2cpp_thread_attach(domain);
     }
     tlog("il2cpp thread attached\n");
@@ -426,7 +450,16 @@ static DWORD WINAPI worker_thread(LPVOID) {
     GetModuleInformation(GetCurrentProcess(), ga, &gaInfo, sizeof(gaInfo));
     g_gaSize = gaInfo.SizeOfImage;
     tlog("GA base=%p size=0x%llX\n", (void*)ga_base, (unsigned long long)g_gaSize);
-    void* executeAddr = safe_find_execute(&api, ga_base);
+    tlog("calling safe_find_execute...\n");
+    void* executeAddr = nullptr;
+    for (int attempt = 0; attempt < 30 && g_running.load(); attempt++) {
+        executeAddr = safe_find_execute(&api, ga_base);
+        if (executeAddr) break;
+        tlog("safe_find_execute attempt %d: not found, retrying in 1s\n", attempt);
+        wlog("[worker] Execute not found (attempt %d), IL2CPP may not be ready — retrying in 1s\n", attempt);
+        Sleep(1000);
+    }
+    tlog("safe_find_execute result: %p\n", executeAddr);
 
     if (!executeAddr) {
         wlog("[worker] Execute method not found dynamically, falling back to hardcoded RVA\n");
@@ -435,24 +468,38 @@ static DWORD WINAPI worker_thread(LPVOID) {
         wlog("[worker] Execute method found at %p\n", executeAddr);
     }
 
+    tlog("=== CHECKPOINT: pre-overlay tick=%lu ===\n", GetTickCount());
+    tlog("calling overlay_init...\n");
     wlog("[worker] calling overlay_init\n");
-    tlog("about to call overlay_init, dxgi.dll=%p\n", GetModuleHandleA("dxgi.dll"));
-    if (!safe_overlay_init()) {
-        wlog("[worker] overlay_init FAILED\n");
-        tlog("overlay_init FAILED\n");
-        g_running.store(false);
-        goto cleanup;
+    {
+        bool overlayOk = false;
+        for (int attempt = 0; attempt < 20 && g_running.load(); attempt++) {
+            tlog("overlay_init attempt %d, dxgi.dll=%p\n", attempt, GetModuleHandleA("dxgi.dll"));
+            if (safe_overlay_init()) { overlayOk = true; break; }
+            wlog("[worker] overlay_init attempt %d failed, retrying in 500ms\n", attempt);
+            Sleep(500);
+        }
+        if (!overlayOk) {
+            wlog("[worker] overlay_init FAILED after retries\n");
+            g_running.store(false);
+            goto cleanup;
+        }
     }
     wlog("[worker] overlay_init OK\n");
     tlog("overlay_init SUCCEEDED\n");
+    tlog("=== CHECKPOINT: post-overlay tick=%lu ===\n", GetTickCount());
 
-    wlog("[worker] installing execute hook at %p\n", executeAddr);
-    if (!install_hook(g_executeHook, executeAddr, (void*)hooked_execute)) {
-        wlog("[worker] execute hook FAILED\n");
+    tlog("installing HWBP hook...\n");
+    wlog("[worker] installing HWBP execute hook at %p\n", executeAddr);
+    if (!install_hwbp_hook(0, executeAddr, (void*)hooked_execute, 16)) {
+        wlog("[worker] HWBP execute hook FAILED\n");
+        tlog("HWBP hook FAILED\n");
     } else {
         g_hooked = true;
-        wlog("[worker] execute hook OK, trampoline=%p\n", g_executeHook.trampoline_exec);
+        wlog("[worker] HWBP execute hook OK on DR0\n");
+        tlog("HWBP hook installed\n");
     }
+    tlog("=== CHECKPOINT: hooks-installed tick=%lu ===\n", GetTickCount());
 
     wlog("[worker] waiting for game context\n");
 
@@ -588,7 +635,15 @@ static DWORD WINAPI worker_thread(LPVOID) {
                         wlog("[worker] IsTooFarAway hook FAILED at %p\n", isTooFarAddr);
                     }
                 } else {
-                    wlog("[worker] IsTooFarAway method not found on FindInteractTargetSystem\n");
+                    wlog("[worker] IsTooFarAway method not found, dumping all methods on FindInteractTargetSystem:\n");
+                    void* iter2 = nullptr;
+                    void* m2;
+                    while ((m2 = api.il2cpp_class_get_methods(fitKlass, &iter2)) != nullptr) {
+                        const char* mn2 = api.il2cpp_method_get_name(m2);
+                        int pc = api.il2cpp_method_get_param_count(m2);
+                        void* addr = *(void**)m2;
+                        wlog("[worker]   method: %s (params=%d) at %p\n", mn2 ? mn2 : "(null)", pc, addr);
+                    }
                 }
             } else {
                 wlog("[worker] FindInteractTargetSystem class not found\n");
@@ -597,9 +652,14 @@ static DWORD WINAPI worker_thread(LPVOID) {
     }
 
     tlog("entering main scan loop\n");
+    tlog("=== ENTERING MAIN LOOP tick=%lu ===\n", GetTickCount());
     {
         int scanCounter = 0;
         while (g_running.load()) {
+            static int heartbeat = 0;
+            if (++heartbeat % 10 == 0) {
+                tlog("heartbeat #%d tick=%lu\n", heartbeat, GetTickCount());
+            }
             void* gcm = (void*)g_gameContextModule;
             if (!is_readable(gcm, 0x18)) {
                 g_entityCount.store(0);
@@ -618,11 +678,15 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
 
             g_workerVehActive = true;
-            safe_scan_tick(scanCounter);
+            if (scanCounter % 5 == 0) {
+                safe_scan_tick(scanCounter);
+            }
             if (g_dumpShopClasses.load()) { dump_shop_classes(api); g_dumpShopClasses.store(false); }
             g_workerVehActive = false;
+
+
             scanCounter++;
-            Sleep(16);
+            Sleep(100);
         }
     }
 
@@ -630,11 +694,29 @@ cleanup:
     overlay_shutdown();
 
     if (g_hooked) {
-        DWORD old;
-        VirtualProtect(g_executeHook.target, g_executeHook.stolen_bytes, PAGE_EXECUTE_READWRITE, &old);
-        memcpy(g_executeHook.target, g_executeHook.original_bytes, g_executeHook.stolen_bytes);
-        VirtualProtect(g_executeHook.target, g_executeHook.stolen_bytes, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), g_executeHook.target, g_executeHook.stolen_bytes);
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 te = {sizeof(te)};
+            DWORD pid = GetCurrentProcessId();
+            if (Thread32First(snap, &te)) {
+                do {
+                    if (te.th32OwnerProcessID != pid) continue;
+                    HANDLE ht = OpenThread(THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+                    if (ht) {
+                        CONTEXT ctx = {};
+                        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                        SuspendThread(ht);
+                        GetThreadContext(ht, &ctx);
+                        ctx.Dr0 = 0;
+                        ctx.Dr7 &= ~3ULL;
+                        SetThreadContext(ht, &ctx);
+                        ResumeThread(ht);
+                        CloseHandle(ht);
+                    }
+                } while (Thread32Next(snap, &te));
+            }
+            CloseHandle(snap);
+        }
         Sleep(500);
     }
 
@@ -661,11 +743,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
                 fflush(f); fclose(f);
             }
         }
+        {
+            FILE* fw = fopen(CRASH_DIR "worker_debug.txt", "w");
+            if (fw) fclose(fw);
+        }
         DisableThreadLibraryCalls(hModule);
         tlog("DisableThreadLibraryCalls done\n");
         DWORD tid = 0;
         HANDLE h = CreateThread(nullptr, 0, worker_thread, nullptr, 0, &tid);
         tlog("CreateThread returned handle=%p tid=%lu err=%lu\n", h, tid, GetLastError());
+        tlog("our DLL base=%p\n", hModule);
     }
     return TRUE;
 }

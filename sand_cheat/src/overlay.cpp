@@ -197,7 +197,7 @@ static IDXGISwapChain* g_initSwapChain = nullptr;
 bool g_menuVisible = true;
 
 static std::unordered_set<std::string> g_hiddenNames;
-static std::vector<std::string> g_hiddenPrefixes = { "Mob", "walker_" };
+static std::vector<std::string> g_hiddenPrefixes = { "Mob", "walker_", "EXPEDITION_WALKER" };
 
 typedef HRESULT(STDMETHODCALLTYPE* fn_Present)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 typedef HRESULT(STDMETHODCALLTYPE* fn_ResizeBuffers)(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
@@ -280,147 +280,183 @@ static const int SKELETON_CONNECTIONS[][2] = {
 };
 static const int SKELETON_CONNECTION_COUNT = sizeof(SKELETON_CONNECTIONS) / sizeof(SKELETON_CONNECTIONS[0]);
 
-static void seh_project_entities(std::vector<ESP3DEntry>& out, float maxDist) {
+struct ESPSnapshot {
+    WorldVector pos;
+    Vec3 transformWorldPos;
+    float distance;
+    float velX, velY, velZ;
+    char displayName[96];
+    BoneWorldPos bonePositions[55];
+    bool hasTransformPos;
+    bool hasBones;
+    bool isCreature;
+    int type;
+};
+static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDist, volatile bool& csHeld) {
     if (!g_cameraGetMain || !g_cameraW2S || !g_getTransform || !g_getPosition) return;
+
+    void* camera = g_cameraGetMain(nullptr);
+    if (!camera) return;
+    void* camTf = g_getTransform(camera, nullptr);
+    if (!camTf) return;
+    Vec3 camPos;
+    g_getPosition(&camPos, camTf, nullptr);
+
+    Vec3 refPos = camPos;
+    if (g_getParent) {
+        void* parentTf = g_getParent(camTf, nullptr);
+        if (parentTf) {
+            g_getPosition(&refPos, parentTf, nullptr);
+        }
+    }
+
+    ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+
+    static std::vector<ESPSnapshot> snapshots;
+    snapshots.clear();
+
+    float playerAbsX, playerAbsY, playerAbsZ;
+    bool aimbotActive = g_aimbotEnabled.load();
+    bool showSkeleton = g_espShowSkeleton.load();
+
+    EnterCriticalSection(&g_itemsLock);
+    csHeld = true;
+
+    playerAbsX = g_playerPos.cx * CHUNK_SIZE + g_playerPos.x;
+    playerAbsY = g_playerPos.y;
+    playerAbsZ = g_playerPos.cy * CHUNK_SIZE + g_playerPos.z;
+
+    for (auto& item : g_items) {
+        bool isPlayer = (item.name.rfind("PlayerAvatar", 0) == 0);
+        bool isMob = item.isCreature;
+        bool isWalker = (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
+        bool isItem = (!isPlayer && !isMob && !isWalker);
+
+        if (isPlayer && !g_espShowPlayers.load()) continue;
+        if (isMob && !g_espShowMobs.load()) continue;
+        if (isWalker && !g_espShowWalkers.load()) continue;
+        if (isItem && !g_espShowItems.load()) continue;
+
+        float catDist = isPlayer ? g_espPlayerDist : (isMob ? g_espMobDist : (isWalker ? g_espWalkerDist : g_espItemDist));
+        if (item.distance >= 0 && item.distance > catDist) continue;
+
+        ESPSnapshot snap;
+        snap.pos = item.pos;
+        snap.transformWorldPos = item.transformWorldPos;
+        snap.hasTransformPos = item.hasTransformPos;
+        snap.distance = item.distance;
+        snap.velX = item.velX;
+        snap.velY = item.velY;
+        snap.velZ = item.velZ;
+        snap.isCreature = item.isCreature;
+        snap.type = isWalker ? 2 : (isPlayer ? 0 : (isMob ? 1 : 3));
+
+        const char* dn = item.displayName.empty() ? item.name.c_str() : item.displayName.c_str();
+        if (snap.type == 0 && item.displayName.empty()) dn = "PLAYER";
+        else if (snap.type == 2 && item.displayName.empty()) dn = "WALKER";
+        snprintf(snap.displayName, sizeof(snap.displayName), "%s", dn);
+
+        snap.hasBones = false;
+        if (!isWalker && !isItem && showSkeleton && item.hasBones) {
+            memcpy(snap.bonePositions, item.bonePositions, sizeof(snap.bonePositions));
+            snap.hasBones = true;
+        }
+
+        snapshots.push_back(snap);
+    }
+
+    LeaveCriticalSection(&g_itemsLock);
+    csHeld = false;
+
+    for (auto& snap : snapshots) {
+        Vec3 worldPos;
+        if (snap.hasTransformPos) {
+            worldPos = snap.transformWorldPos;
+        } else {
+            float entityAbsX = snap.pos.cx * CHUNK_SIZE + snap.pos.x;
+            float entityAbsY = snap.pos.y;
+            float entityAbsZ = snap.pos.cy * CHUNK_SIZE + snap.pos.z;
+            worldPos.x = refPos.x + (entityAbsX - playerAbsX);
+            worldPos.y = refPos.y + (entityAbsY - playerAbsY);
+            worldPos.z = refPos.z + (entityAbsZ - playerAbsZ);
+        }
+
+        if (aimbotActive) {
+            bool isMob = (snap.type == 1);
+            const AimbotProfile& pp = (isMob && !g_mobAimbotSame) ? g_aimMob : g_aimPlayer;
+            if (pp.prediction && pp.bulletVelocity > 1.0f && snap.distance > 0.1f) {
+                float predTime = snap.distance / pp.bulletVelocity;
+                worldPos.x += snap.velX * predTime;
+                worldPos.y += snap.velY * predTime;
+                worldPos.z += snap.velZ * predTime;
+            }
+        }
+
+        Vec3 screenPos;
+        g_cameraW2S(&screenPos, camera, &worldPos, nullptr);
+        if (screenPos.z <= 0) continue;
+        if (std::isnan(screenPos.x) || std::isnan(screenPos.y)) continue;
+
+        float sx = screenPos.x;
+        float sy = displaySize.y - screenPos.y;
+        if (sx < -200 || sx > displaySize.x + 200) continue;
+        if (sy < -200 || sy > displaySize.y + 200) continue;
+
+        ESP3DEntry e;
+        e.sx = sx; e.sy = sy;
+        e.hasHead = false;
+        e.hasSkeleton = false;
+
+        if (snap.type != 2 && snap.type != 3) {
+            Vec3 headWorldPos = worldPos;
+            headWorldPos.y += 1.8f;
+            Vec3 headScreenPos;
+            g_cameraW2S(&headScreenPos, camera, &headWorldPos, nullptr);
+            if (headScreenPos.z > 0 && !std::isnan(headScreenPos.x) && !std::isnan(headScreenPos.y)) {
+                e.headSX = headScreenPos.x;
+                e.headSY = displaySize.y - headScreenPos.y;
+                e.hasHead = true;
+            }
+        }
+
+        e.type = snap.type;
+        e.dist = snap.distance >= 0 ? snap.distance : 0.0f;
+        snprintf(e.label, sizeof(e.label), "%s [%.0fm]", snap.displayName, e.dist);
+
+        e.hasSkeleton = false;
+        if (snap.type != 2 && snap.type != 3 && showSkeleton && snap.hasBones) {
+            static const int USED_BONES[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,54};
+            bool anyBone = false;
+            for (int ub = 0; ub < 20; ub++) {
+                int bi = USED_BONES[ub];
+                e.bones[bi].valid = false;
+                if (!snap.bonePositions[bi].valid) continue;
+                Vec3 boneWorldPos = snap.bonePositions[bi].pos;
+                Vec3 boneScreen;
+                g_cameraW2S(&boneScreen, camera, &boneWorldPos, nullptr);
+                if (boneScreen.z > 0 && !std::isnan(boneScreen.x) && !std::isnan(boneScreen.y)) {
+                    e.bones[bi].x = boneScreen.x;
+                    e.bones[bi].y = displaySize.y - boneScreen.y;
+                    e.bones[bi].valid = true;
+                    anyBone = true;
+                }
+            }
+            e.hasSkeleton = anyBone;
+            if (anyBone && e.bones[10].valid) {
+                e.headSX = e.bones[10].x;
+                e.headSY = e.bones[10].y;
+                e.hasHead = true;
+            }
+        }
+
+        out.push_back(e);
+    }
+}
+
+static void seh_project_entities(std::vector<ESP3DEntry>& out, float maxDist) {
     volatile bool csHeld = false;
     __try {
-        void* camera = g_cameraGetMain(nullptr);
-        if (!camera) return;
-        void* camTf = g_getTransform(camera, nullptr);
-        if (!camTf) return;
-        Vec3 camPos;
-        g_getPosition(&camPos, camTf, nullptr);
-
-        Vec3 refPos = camPos;
-        if (g_getParent) {
-            void* parentTf = g_getParent(camTf, nullptr);
-            if (parentTf) {
-                g_getPosition(&refPos, parentTf, nullptr);
-            }
-        }
-
-        ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-
-        EnterCriticalSection(&g_itemsLock);
-        csHeld = true;
-
-        float playerAbsX = g_playerPos.cx * CHUNK_SIZE + g_playerPos.x;
-        float playerAbsY = g_playerPos.y;
-        float playerAbsZ = g_playerPos.cy * CHUNK_SIZE + g_playerPos.z;
-
-        for (auto& item : g_items) {
-            bool isPlayer = (item.name.rfind("PlayerAvatar", 0) == 0);
-            bool isMob = item.isCreature;
-            bool isWalker = (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
-            bool isItem = (!isPlayer && !isMob && !isWalker);
-
-            if (isPlayer && !g_espShowPlayers.load()) continue;
-            if (isMob && !g_espShowMobs.load()) continue;
-            if (isWalker && !g_espShowWalkers.load()) continue;
-            if (isItem && !g_espShowItems.load()) continue;
-
-            float catDist = isPlayer ? g_espPlayerDist : (isMob ? g_espMobDist : (isWalker ? g_espWalkerDist : g_espItemDist));
-            if (item.distance >= 0 && item.distance > catDist) continue;
-
-            Vec3 worldPos;
-            if (item.hasTransformPos) {
-                worldPos = item.transformWorldPos;
-            } else {
-                float entityAbsX, entityAbsY, entityAbsZ;
-                if (item.hasViewPos) {
-                    entityAbsX = item.viewPos.cx * CHUNK_SIZE + item.viewPos.x;
-                    entityAbsY = item.viewPos.y;
-                    entityAbsZ = item.viewPos.cy * CHUNK_SIZE + item.viewPos.z;
-                } else {
-                    entityAbsX = item.pos.cx * CHUNK_SIZE + item.pos.x;
-                    entityAbsY = item.pos.y;
-                    entityAbsZ = item.pos.cy * CHUNK_SIZE + item.pos.z;
-                }
-                worldPos.x = refPos.x + (entityAbsX - playerAbsX);
-                worldPos.y = refPos.y + (entityAbsY - playerAbsY);
-                worldPos.z = refPos.z + (entityAbsZ - playerAbsZ);
-            }
-
-            if (g_aimbotEnabled.load()) {
-                const AimbotProfile& pp = (isMob && !g_mobAimbotSame) ? g_aimMob : g_aimPlayer;
-                if (pp.prediction && pp.bulletVelocity > 1.0f && item.distance > 0.1f) {
-                    float predTime = item.distance / pp.bulletVelocity;
-                    worldPos.x += item.velX * predTime;
-                    worldPos.y += item.velY * predTime;
-                    worldPos.z += item.velZ * predTime;
-                }
-            }
-
-            Vec3 screenPos;
-            g_cameraW2S(&screenPos, camera, &worldPos, nullptr);
-            if (screenPos.z <= 0) continue;
-            if (std::isnan(screenPos.x) || std::isnan(screenPos.y)) continue;
-
-            float sx = screenPos.x;
-            float sy = displaySize.y - screenPos.y;
-            if (sx < -200 || sx > displaySize.x + 200) continue;
-            if (sy < -200 || sy > displaySize.y + 200) continue;
-
-            ESP3DEntry e;
-            e.sx = sx; e.sy = sy;
-            e.hasHead = false;
-            e.hasSkeleton = false;
-            if (!isWalker && !isItem) {
-                Vec3 headWorldPos = worldPos;
-                headWorldPos.y += 1.8f;
-                Vec3 headScreenPos;
-                g_cameraW2S(&headScreenPos, camera, &headWorldPos, nullptr);
-                if (headScreenPos.z > 0 && !std::isnan(headScreenPos.x) && !std::isnan(headScreenPos.y)) {
-                    e.headSX = headScreenPos.x;
-                    e.headSY = displaySize.y - headScreenPos.y;
-                    e.hasHead = true;
-                }
-            }
-            e.type = isWalker ? 2 : (isPlayer ? 0 : (isMob ? 1 : 3));
-            e.dist = item.distance >= 0 ? item.distance : 0.0f;
-            if (isPlayer) {
-                if (!item.displayName.empty())
-                    snprintf(e.label, sizeof(e.label), "%s [%.0fm]", item.displayName.c_str(), e.dist);
-                else
-                    snprintf(e.label, sizeof(e.label), "PLAYER [%.0fm]", e.dist);
-            } else if (isWalker) {
-                if (!item.displayName.empty())
-                    snprintf(e.label, sizeof(e.label), "%s [%.0fm]", item.displayName.c_str(), e.dist);
-                else
-                    snprintf(e.label, sizeof(e.label), "WALKER [%.0fm]", e.dist);
-            } else {
-                snprintf(e.label, sizeof(e.label), "%s [%.0fm]",
-                    item.displayName.empty() ? item.name.c_str() : item.displayName.c_str(), e.dist);
-            }
-            e.hasSkeleton = false;
-            if (!isWalker && !isItem && g_espShowSkeleton.load() && item.hasBones) {
-                static const int USED_BONES[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,54};
-                bool anyBone = false;
-                for (int ub = 0; ub < 20; ub++) {
-                    int bi = USED_BONES[ub];
-                    e.bones[bi].valid = false;
-                    if (!item.bonePositions[bi].valid) continue;
-                    Vec3 boneWorldPos = item.bonePositions[bi].pos;
-                    Vec3 boneScreen;
-                    g_cameraW2S(&boneScreen, camera, &boneWorldPos, nullptr);
-                    if (boneScreen.z > 0 && !std::isnan(boneScreen.x) && !std::isnan(boneScreen.y)) {
-                        e.bones[bi].x = boneScreen.x;
-                        e.bones[bi].y = displaySize.y - boneScreen.y;
-                        e.bones[bi].valid = true;
-                        anyBone = true;
-                    }
-                }
-                e.hasSkeleton = anyBone;
-                if (anyBone && e.bones[10].valid) {
-                    e.headSX = e.bones[10].x;
-                    e.headSY = e.bones[10].y;
-                    e.hasHead = true;
-                }
-            }
-            out.push_back(e);
-        }
-        LeaveCriticalSection(&g_itemsLock);
-        csHeld = false;
+        seh_project_entities_impl(out, maxDist, csHeld);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (csHeld) LeaveCriticalSection(&g_itemsLock);
         dbglog("[seh_project] SEH exception: 0x%08lX\n", GetExceptionCode());
@@ -749,6 +785,7 @@ static void render_aimbot_profile(AimbotProfile& p, const char* suffix) {
 }
 
 static void create_stream_proof_overlay() {
+    dbglog("[stream-proof] attempting creation, g_gameHwnd=%p\n", g_gameHwnd);
     RECT gameRect;
     GetWindowRect(g_gameHwnd, &gameRect);
 
@@ -765,7 +802,7 @@ static void create_stream_proof_overlay() {
     UINT h = gameRect.bottom - gameRect.top;
 
     g_overlayHwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
         className, nullptr,
         WS_POPUP,
         gameRect.left, gameRect.top, w, h,
@@ -775,8 +812,6 @@ static void create_stream_proof_overlay() {
         dbglog("[stream-proof] CreateWindowExW failed: %lu\n", GetLastError());
         return;
     }
-
-    SetLayeredWindowAttributes(g_overlayHwnd, 0, 255, LWA_ALPHA);
 
     MARGINS margins = {-1, -1, -1, -1};
     DwmExtendFrameIntoClientArea(g_overlayHwnd, &margins);
@@ -1210,10 +1245,15 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         }
 
                         ImGui::TableSetColumnIndex(1);
-                        ImGui::TextUnformatted(item.name.c_str());
+                        if (item.isHeldByPlayer)
+                            ImGui::Text("%s (held)", item.name.c_str());
+                        else
+                            ImGui::TextUnformatted(item.name.c_str());
 
                         ImGui::TableSetColumnIndex(2);
-                        if (item.distance >= 0)
+                        if (item.isHeldByPlayer)
+                            ImGui::TextUnformatted("held");
+                        else if (item.distance >= 0)
                             ImGui::Text("%.1fm", item.distance);
                         else
                             ImGui::TextUnformatted("---");
@@ -1313,7 +1353,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     }
                     {
                         float velMult = g_weaponVelocityMult.load();
-                        if (ImGui::SliderFloat("Bullet Velocity", &velMult, 1.0f, 5.0f, "x%.1f"))
+                        if (ImGui::SliderFloat("Bullet Velocity", &velMult, 1.0f, 100.0f, "x%.1f"))
                             g_weaponVelocityMult.store(velMult);
                     }
 
@@ -1532,7 +1572,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         ImGui::End();
     }
 
-    std::vector<ESP3DEntry> espEntries;
+    static std::vector<ESP3DEntry> espEntries;
+    espEntries.clear();
     if ((g_esp3DEnabled.load() || g_aimbotEnabled.load()) && g_cameraGetMain && g_cameraW2S) {
         static bool s_renderThreadAttached = false;
         if (!s_renderThreadAttached) {
@@ -2016,6 +2057,7 @@ static int x64_insn_len(const uint8_t* code) {
 }
 
 static void* build_disk_trampoline(uint8_t* hookedFunc, uint8_t* relayPage, int relayOffset) {
+    tlog("build_disk_trampoline: hookedFunc=%p relayOffset=%d\n", hookedFunc, relayOffset);
     HMODULE dxgi = GetModuleHandleA("dxgi.dll");
     if (!dxgi) return nullptr;
 
@@ -2058,6 +2100,7 @@ static void* build_disk_trampoline(uint8_t* hookedFunc, uint8_t* relayPage, int 
     uint8_t origBytes[32];
     SetFilePointer(hFile, fileOffset, nullptr, FILE_BEGIN);
     ReadFile(hFile, origBytes, sizeof(origBytes), &br, nullptr);
+    tlog("build_disk_trampoline: fileOffset=0x%lX, read %lu bytes from disk\n", (unsigned long)fileOffset, (unsigned long)br);
     CloseHandle(hFile);
 
     dbglog("[trampoline] RVA 0x%X original bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
@@ -2156,8 +2199,8 @@ bool overlay_init() {
     tlog("overlay_init: dxgi=%p\n", dxgi);
 
     uintptr_t dxgiBase = (uintptr_t)dxgi;
-    uint8_t* fnPresent = (uint8_t*)(dxgiBase + 0x31000);
-    uint8_t* fnResize  = (uint8_t*)(dxgiBase + 0x2F860);
+    uint8_t* fnPresent = (uint8_t*)(dxgiBase + 0xDAD0);
+    uint8_t* fnResize  = (uint8_t*)(dxgiBase + 0x388C0);
     tlog("overlay_init: fnPresent=%p byte=%02X fnResize=%p byte=%02X\n", fnPresent, fnPresent[0], fnResize, fnResize[0]);
 
     if (fnPresent[0] != 0xE9 || fnResize[0] != 0xE9) {
@@ -2186,12 +2229,15 @@ bool overlay_init() {
     relay[1] = 0x25;
     *(uint32_t*)(relay + 2) = 0;
     *(uintptr_t*)(relay + 6) = (uintptr_t)hooked_present;
+    tlog("overlay_init: relay present stub written, hooked_present=%p\n", (void*)hooked_present);
 
     relay[14] = 0xFF;
     relay[15] = 0x25;
     *(uint32_t*)(relay + 16) = 0;
     *(uintptr_t*)(relay + 20) = (uintptr_t)hooked_resize_buffers;
+    tlog("overlay_init: relay resize stub written, hooked_resize=%p\n", (void*)hooked_resize_buffers);
 
+    tlog("overlay_init: calling build_disk_trampoline for Present...\n");
     void* presentTramp = build_disk_trampoline(fnPresent, relay, 32);
     if (!presentTramp) {
         dbglog("[overlay_init] Present trampoline build FAILED\n");
@@ -2200,6 +2246,7 @@ bool overlay_init() {
     g_originalPresent = (fn_Present)presentTramp;
     tlog("overlay_init: presentTramp=%p\n", presentTramp);
 
+    tlog("overlay_init: calling build_disk_trampoline for Resize...\n");
     void* resizeTramp = build_disk_trampoline(fnResize, relay, 128);
     if (!resizeTramp) {
         dbglog("[overlay_init] Resize trampoline build FAILED\n");

@@ -792,7 +792,6 @@ static void scan_entities() {
             int eid = *(int*)((uintptr_t)entity + 0x48);
             if (eid == playerEntityId) continue;
 
-            if (name.rfind("item_", 0) != 0) continue;
             if (name.rfind("item_containerBox", 0) == 0) continue;
 
             void* posComp = get_component(entity, g_idx_position);

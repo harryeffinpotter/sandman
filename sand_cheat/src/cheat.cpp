@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <unordered_map>
+#include <tlhelp32.h>
 
 // ---------------------------------------------------------------------------
 // RESOLVE macro
@@ -22,6 +23,7 @@
 volatile void* g_gameContextModule = nullptr;
 volatile void* g_findInteractSystem = nullptr;
 volatile bool g_hooked = false;
+std::atomic<bool> g_hwbpActive{false};
 
 int g_idx_blueprint = -1;
 int g_idx_position = -1;
@@ -94,6 +96,8 @@ int g_scrollOffset = 0;
 Hook g_executeHook;
 fn_execute g_original_execute = nullptr;
 Hook g_farHook;
+
+HWBPHook g_hwbpHooks[4] = {};
 
 std::atomic<bool> g_dumpEntities{false};
 std::atomic<bool> g_probeContext{false};
@@ -185,15 +189,7 @@ void resolve_all(HMODULE ga, IL2CPP_API& api) {
 
 static bool is_readable(const void* ptr, size_t len) {
     if (!ptr) return false;
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    const DWORD mask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                       PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (!(mbi.Protect & mask)) return false;
-    if (mbi.Protect & PAGE_GUARD) return false;
-    uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    return ((uintptr_t)ptr + len) <= regionEnd;
+    return !IsBadReadPtr(ptr, len);
 }
 
 static bool is_valid_obj(void* ptr) {
@@ -228,6 +224,134 @@ bool install_hook(Hook& h, void* target, void* detour, int steal_count) {
     VirtualProtect(target, steal_count, old_prot, &old_prot);
     FlushInstructionCache(GetCurrentProcess(), target, steal_count);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// HWBP hooks
+// ---------------------------------------------------------------------------
+static void set_dr_on_thread(HANDLE hThread, int drIndex, void* address) {
+    CONTEXT ctx = {};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    SuspendThread(hThread);
+    GetThreadContext(hThread, &ctx);
+    switch (drIndex) {
+        case 0: ctx.Dr0 = (DWORD64)address; break;
+        case 1: ctx.Dr1 = (DWORD64)address; break;
+        case 2: ctx.Dr2 = (DWORD64)address; break;
+        case 3: ctx.Dr3 = (DWORD64)address; break;
+    }
+    ctx.Dr7 |= (1ULL << (drIndex * 2));
+    int condOff = 16 + drIndex * 4;
+    ctx.Dr7 &= ~(0xFULL << condOff);
+    ctx.Dr6 = 0;
+    SetThreadContext(hThread, &ctx);
+    ResumeThread(hThread);
+}
+
+bool install_hwbp_hook(int drIndex, void* target, void* detour, int steal_count) {
+    if (drIndex < 0 || drIndex > 3) return false;
+    g_hwbpHooks[drIndex].target = target;
+    g_hwbpHooks[drIndex].detour = detour;
+    g_hwbpHooks[drIndex].drIndex = drIndex;
+
+    uint8_t* tramp = (uint8_t*)VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(tramp, target, steal_count);
+    uint8_t* j = tramp + steal_count;
+    uintptr_t ret_addr = (uintptr_t)target + steal_count;
+    j[0] = 0xFF; j[1] = 0x25; *(uint32_t*)(j + 2) = 0; *(uintptr_t*)(j + 6) = ret_addr;
+    g_hwbpHooks[drIndex].trampoline = tramp;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    THREADENTRY32 te = {sizeof(te)};
+    DWORD pid = GetCurrentProcessId();
+    DWORD myTid = GetCurrentThreadId();
+    int count = 0;
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) continue;
+            if (te.th32ThreadID == myTid) continue;
+            HANDLE ht = OpenThread(THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            if (ht) {
+                set_dr_on_thread(ht, drIndex, target);
+                CloseHandle(ht);
+                count++;
+            }
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+
+    CONTEXT myCtx = {};
+    myCtx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    GetThreadContext(GetCurrentThread(), &myCtx);
+    switch (drIndex) {
+        case 0: myCtx.Dr0 = (DWORD64)target; break;
+        case 1: myCtx.Dr1 = (DWORD64)target; break;
+        case 2: myCtx.Dr2 = (DWORD64)target; break;
+        case 3: myCtx.Dr3 = (DWORD64)target; break;
+    }
+    myCtx.Dr7 |= (1ULL << (drIndex * 2));
+    int condOff = 16 + drIndex * 4;
+    myCtx.Dr7 &= ~(0xFULL << condOff);
+    myCtx.Dr6 = 0;
+    SetThreadContext(GetCurrentThread(), &myCtx);
+
+    g_hwbpActive.store(true);
+    return count > 0;
+}
+
+void set_hwbp_active(bool enabled) {
+    if (enabled == g_hwbpActive.load()) return;
+    if (!g_hwbpHooks[0].target) return;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+
+    THREADENTRY32 te = {sizeof(te)};
+    DWORD pid = GetCurrentProcessId();
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) continue;
+            HANDLE ht = OpenThread(THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            if (ht) {
+                CONTEXT ctx = {};
+                ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                SuspendThread(ht);
+                GetThreadContext(ht, &ctx);
+                if (enabled) {
+                    ctx.Dr0 = (DWORD64)g_hwbpHooks[0].target;
+                    ctx.Dr7 |= 1;
+                } else {
+                    ctx.Dr0 = 0;
+                    ctx.Dr7 &= ~1ULL;
+                }
+                SetThreadContext(ht, &ctx);
+                ResumeThread(ht);
+                CloseHandle(ht);
+            }
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    g_hwbpActive.store(enabled);
+}
+
+bool hwbp_handle_exception(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return false;
+
+    CONTEXT* ctx = ep->ContextRecord;
+
+    for (int i = 0; i < 4; i++) {
+        if (!(ctx->Dr6 & (1 << i))) continue;
+        if (!g_hwbpHooks[i].target) continue;
+
+        ctx->Dr6 &= ~(1 << i);
+        ctx->Rip = (DWORD64)g_hwbpHooks[i].detour;
+        return true;
+    }
+
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +616,50 @@ bool discover_component_indices(void* gameContextModule) {
 // ---------------------------------------------------------------------------
 // apply_turret_mods
 // ---------------------------------------------------------------------------
+static void seh_apply_turret_single(void* entity, int* found, int* applied,
+    int* cntWH, int* cntSA, int* cntRL, int* cntOH) {
+    __try {
+        if (!entity) return;
+        if (!*(bool*)((uintptr_t)entity + 0x4C)) return;
+
+        bool hasWeaponHeat = (g_idx_weapon_overheat_data >= 0 && get_component(entity, g_idx_weapon_overheat_data));
+        bool hasStationaryAuto = (g_idx_stationary_auto >= 0 && get_component(entity, g_idx_stationary_auto));
+        bool hasRecoil = (g_idx_recoil_look >= 0 && get_component(entity, g_idx_recoil_look));
+        bool hasOverheated = (g_idx_overheated >= 0 && get_component(entity, g_idx_overheated));
+        bool hasTurretTag = (g_idx_stationary_data >= 0 && get_component(entity, g_idx_stationary_data)) ||
+                            (g_idx_auto_turret >= 0 && get_component(entity, g_idx_auto_turret));
+
+        if (hasWeaponHeat) (*cntWH)++;
+        if (hasStationaryAuto) (*cntSA)++;
+        if (hasRecoil) (*cntRL)++;
+        if (hasOverheated) (*cntOH)++;
+
+        if (!hasWeaponHeat && !hasStationaryAuto && !hasRecoil && !hasTurretTag) return;
+        (*found)++;
+
+        if (g_turretRapidFire.load()) {
+            if (g_idx_stationary_auto >= 0) {
+                void* sa = get_component(entity, g_idx_stationary_auto);
+                if (sa) {
+                    *(float*)((uintptr_t)sa + 0x24) = 0.01f;
+                    (*applied)++;
+                }
+            }
+        }
+
+        if (g_turretNoRecoil.load()) {
+            if (g_idx_recoil_look >= 0) {
+                void* rl = get_component(entity, g_idx_recoil_look);
+                if (rl) {
+                    memset((void*)((uintptr_t)rl + 0x10), 0, 48);
+                    g_cachedRecoilEntity.store((uintptr_t)entity);
+                    (*applied)++;
+                }
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 void apply_turret_mods() {
     void* gcm = (void*)g_gameContextModule;
     if (!gcm) return;
@@ -535,50 +703,11 @@ void apply_turret_mods() {
     int applied = 0;
     int cntWeaponHeat = 0, cntStationaryAuto = 0, cntRecoilLook = 0, cntOverheated = 0;
 
-    try {
-        g_cachedRecoilEntity.store(0);
-        for (int i = 0; i < entityCount; i++) {
-            void* entity = entityPtrs[i];
-            if (!is_readable(entity, 0x60)) continue;
-            if (!*(bool*)((uintptr_t)entity + 0x4C)) continue;
-
-            bool hasWeaponHeat = (g_idx_weapon_overheat_data >= 0 && get_component(entity, g_idx_weapon_overheat_data));
-            bool hasStationaryAuto = (g_idx_stationary_auto >= 0 && get_component(entity, g_idx_stationary_auto));
-            bool hasRecoil = (g_idx_recoil_look >= 0 && get_component(entity, g_idx_recoil_look));
-            bool hasOverheated = (g_idx_overheated >= 0 && get_component(entity, g_idx_overheated));
-            bool hasTurretTag = (g_idx_stationary_data >= 0 && get_component(entity, g_idx_stationary_data)) ||
-                                (g_idx_auto_turret >= 0 && get_component(entity, g_idx_auto_turret));
-
-            if (hasWeaponHeat) cntWeaponHeat++;
-            if (hasStationaryAuto) cntStationaryAuto++;
-            if (hasRecoil) cntRecoilLook++;
-            if (hasOverheated) cntOverheated++;
-
-            if (!hasWeaponHeat && !hasStationaryAuto && !hasRecoil && !hasTurretTag) continue;
-            found++;
-
-            if (g_turretRapidFire.load()) {
-                if (g_idx_stationary_auto >= 0) {
-                    void* sa = get_component(entity, g_idx_stationary_auto);
-                    if (is_readable(sa, 0x28)) {
-                        *(float*)((uintptr_t)sa + 0x24) = 0.01f;
-                        applied++;
-                    }
-                }
-            }
-
-            if (g_turretNoRecoil.load()) {
-                if (g_idx_recoil_look >= 0) {
-                    void* rl = get_component(entity, g_idx_recoil_look);
-                    if (is_readable(rl, 0x40)) {
-                        memset((void*)((uintptr_t)rl + 0x10), 0, 48);
-                        g_cachedRecoilEntity.store((uintptr_t)entity);
-                        applied++;
-                    }
-                }
-            }
-        }
-    } catch(...) {}
+    g_cachedRecoilEntity.store(0);
+    for (int i = 0; i < entityCount; i++) {
+        seh_apply_turret_single(entityPtrs[i], &found, &applied,
+            &cntWeaponHeat, &cntStationaryAuto, &cntRecoilLook, &cntOverheated);
+    }
 
     g_turretEntitiesFound.store(found);
     g_turretModsApplied.store(applied);
@@ -586,6 +715,35 @@ void apply_turret_mods() {
     g_dbgHasStationaryAuto.store(cntStationaryAuto);
     g_dbgHasRecoilLook.store(cntRecoilLook);
     g_dbgHasOverheated.store(cntOverheated);
+}
+
+static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, float velMult) {
+    __try {
+        if (!entity) return;
+        if (!*(bool*)((uintptr_t)entity + 0x4C)) return;
+
+        void* bpd = get_component(entity, g_idx_bullet_projectile_data);
+        if (!bpd) return;
+
+        if (noDrop) {
+            *(float*)((uintptr_t)bpd + 0x14) = 0.0f;
+        }
+
+        if (noBloom) {
+            *(float*)((uintptr_t)bpd + 0x18) = 0.0f;
+        }
+
+        if (velMult > 1.0f) {
+            float weight = *(float*)((uintptr_t)bpd + 0x10);
+            if (weight != -999.0f) {
+                float vel = *(float*)((uintptr_t)bpd + 0x1C);
+                if (vel > 0.0f && vel < 5000.0f) {
+                    *(float*)((uintptr_t)bpd + 0x1C) = vel * velMult;
+                    *(float*)((uintptr_t)bpd + 0x10) = -999.0f;
+                }
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 void apply_weapon_mods() {
@@ -632,35 +790,9 @@ void apply_weapon_mods() {
     bool noBloom = g_weaponNoBloom.load();
     float velMult = g_weaponVelocityMult.load();
 
-    __try {
-        for (int i = 0; i < entityCount; i++) {
-            void* entity = entityPtrs[i];
-            if (!is_readable(entity, 0x60)) continue;
-            if (!*(bool*)((uintptr_t)entity + 0x4C)) continue;
-
-            void* bpd = get_component(entity, g_idx_bullet_projectile_data);
-            if (!is_readable(bpd, 0x24)) continue;
-
-            if (noDrop) {
-                *(float*)((uintptr_t)bpd + 0x14) = 0.0f;
-            }
-
-            if (noBloom) {
-                *(float*)((uintptr_t)bpd + 0x18) = 0.0f;
-            }
-
-            if (velMult > 1.0f) {
-                float weight = *(float*)((uintptr_t)bpd + 0x10);
-                if (weight != -999.0f) {
-                    float vel = *(float*)((uintptr_t)bpd + 0x1C);
-                    if (vel > 0.0f && vel < 5000.0f) {
-                        *(float*)((uintptr_t)bpd + 0x1C) = vel * velMult;
-                        *(float*)((uintptr_t)bpd + 0x10) = -999.0f;
-                    }
-                }
-            }
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    for (int i = 0; i < entityCount; i++) {
+        seh_apply_weapon_single(entityPtrs[i], noDrop, noBloom, velMult);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,25 +837,12 @@ void __fastcall hooked_execute(void* thisPtr) {
     }
 
     __try {
-        ((fn_execute)g_executeHook.trampoline_exec)(thisPtr);
+        ((fn_execute)g_hwbpHooks[0].trampoline)(thisPtr);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        OutputDebugStringA("[execute] SEH in trampoline\n");
         return;
     }
 
     if (thisPtr != (void*)g_findInteractSystem) return;
-
-    if (g_turretNoRecoil.load() && g_idx_recoil_look >= 0) {
-        uintptr_t ent = g_cachedRecoilEntity.load();
-        if (ent) {
-            __try {
-                void* rl = get_component((void*)ent, g_idx_recoil_look);
-                if (rl) memset((void*)((uintptr_t)rl + 0x10), 0, 48);
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                g_cachedRecoilEntity.store(0);
-            }
-        }
-    }
 
     if (g_heavyBypass.load() && g_idx_large_item >= 0) {
         void* ent = (void*)g_lockedEntityPtr.load();
@@ -779,50 +898,47 @@ static void probe_bones_once(void* entity);
 static bool seh_resolve_username(void* entity, char* outBuf, int bufSize);
 
 static std::string get_display_name(const std::string& raw) {
-    if (raw.rfind("PlayerAvatar", 0) == 0) return "";
+    static std::unordered_map<std::string, std::string> s_cache;
+    auto it = s_cache.find(raw);
+    if (it != s_cache.end()) return it->second;
 
-    if (raw.rfind("EXPEDITION_WALKER_", 0) == 0) {
+    std::string result;
+
+    if (raw.rfind("PlayerAvatar", 0) == 0) {
+        result = "";
+    } else if (raw.rfind("EXPEDITION_WALKER_", 0) == 0) {
         std::string type = raw.substr(18);
         if (!type.empty()) type[0] = toupper(type[0]);
-        return "Walker (" + type + ")";
-    }
-    if (raw == "EXPEDITION_WALKER") return "Walker";
-
-    if (raw.rfind("Mob", 0) == 0) {
+        result = "Walker (" + type + ")";
+    } else if (raw == "EXPEDITION_WALKER") {
+        result = "Walker";
+    } else if (raw.rfind("Mob", 0) == 0) {
         std::string stripped = raw.substr(3);
-        std::string result;
         for (size_t i = 0; i < stripped.size(); i++) {
             if (i > 0 && isupper(stripped[i]) && !isupper(stripped[i-1]))
                 result += ' ';
             result += stripped[i];
         }
-        return result;
-    }
-
-    if (raw.rfind("Sentinel", 0) == 0 || raw.rfind("Trampler", 0) == 0) {
-        std::string result;
+    } else if (raw.rfind("Sentinel", 0) == 0 || raw.rfind("Trampler", 0) == 0) {
         for (size_t i = 0; i < raw.size(); i++) {
             if (i > 0 && isupper(raw[i]) && !isupper(raw[i-1]))
                 result += ' ';
             result += raw[i];
         }
-        return result;
+    } else if (raw.rfind("item_", 0) == 0) {
+        result = raw.substr(5);
+        for (auto& c : result) if (c == '_') c = ' ';
+        if (!result.empty()) result[0] = toupper(result[0]);
+    } else {
+        for (size_t i = 0; i < raw.size(); i++) {
+            if (i > 0 && isupper(raw[i]) && islower(raw[i > 0 ? i-1 : 0]))
+                result += ' ';
+            if (raw[i] == '_') { result += ' '; continue; }
+            result += raw[i];
+        }
     }
 
-    if (raw.rfind("item_", 0) == 0) {
-        std::string stripped = raw.substr(5);
-        for (auto& c : stripped) if (c == '_') c = ' ';
-        if (!stripped.empty()) stripped[0] = toupper(stripped[0]);
-        return stripped;
-    }
-
-    std::string result;
-    for (size_t i = 0; i < raw.size(); i++) {
-        if (i > 0 && isupper(raw[i]) && islower(raw[i > 0 ? i-1 : 0]))
-            result += ' ';
-        if (raw[i] == '_') { result += ' '; continue; }
-        result += raw[i];
-    }
+    s_cache[raw] = result;
     return result;
 }
 
@@ -1075,36 +1191,38 @@ void scan_entities() {
 
 
         std::unordered_map<int, void*> idToEntity;
-        if (g_idx_id >= 0) {
-            for (int e = 0; e < entityCount; e++) {
-                void* ent = entityPtrs[e];
-                if (!is_readable(ent, 0x58) || !is_valid_obj(ent)) continue;
-                if (!*(bool*)((uintptr_t)ent + 0x4C)) continue;
-                void* idComp = get_component(ent, g_idx_id);
-                if (is_readable(idComp, 0x18)) {
-                    int sid = *(int*)((uintptr_t)idComp + 0x10);
-                    if (sid > 0) idToEntity[sid] = ent;
-                }
-            }
-        }
-
         std::unordered_map<int, std::string> niceNameByParentId;
-        if (g_idx_nice_name >= 0 && g_idx_parent >= 0) {
+        {
             for (int e = 0; e < entityCount; e++) {
                 void* ent = entityPtrs[e];
                 if (!is_readable(ent, 0x58) || !is_valid_obj(ent)) continue;
                 if (!*(bool*)((uintptr_t)ent + 0x4C)) continue;
-                void* nnComp = get_component(ent, g_idx_nice_name);
-                if (!is_readable(nnComp, 0x18)) continue;
-                void* namePtr = *(void**)((uintptr_t)nnComp + 0x10);
-                if (!namePtr) continue;
-                std::string nn = read_il2cpp_string(namePtr);
-                if (nn.empty()) continue;
-                void* parComp = get_component(ent, g_idx_parent);
-                if (!is_readable(parComp, 0x18)) continue;
-                int parentId = *(int*)((uintptr_t)parComp + 0x10);
-                if (parentId > 0)
-                    niceNameByParentId[parentId] = nn;
+
+                if (g_idx_id >= 0) {
+                    void* idComp = get_component(ent, g_idx_id);
+                    if (is_readable(idComp, 0x18)) {
+                        int sid = *(int*)((uintptr_t)idComp + 0x10);
+                        if (sid > 0) idToEntity[sid] = ent;
+                    }
+                }
+
+                if (g_idx_nice_name >= 0 && g_idx_parent >= 0) {
+                    void* nnComp = get_component(ent, g_idx_nice_name);
+                    if (is_readable(nnComp, 0x18)) {
+                        void* namePtr = *(void**)((uintptr_t)nnComp + 0x10);
+                        if (namePtr) {
+                            std::string nn = read_il2cpp_string(namePtr);
+                            if (!nn.empty()) {
+                                void* parComp = get_component(ent, g_idx_parent);
+                                if (is_readable(parComp, 0x18)) {
+                                    int parentId = *(int*)((uintptr_t)parComp + 0x10);
+                                    if (parentId > 0)
+                                        niceNameByParentId[parentId] = nn;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1174,7 +1292,7 @@ void scan_entities() {
             if (name.rfind("Ground", 0) == 0) continue;
             if (name.rfind("prop_", 0) == 0) continue;
             if (name.rfind("cde_", 0) == 0) continue;
-            if (name.rfind("tool_", 0) == 0) continue;
+            if (name.rfind("walker_", 0) == 0) continue;
             if (name == "Sun") continue;
             if (name.rfind("LandingCutScene", 0) == 0) continue;
 
@@ -1182,7 +1300,7 @@ void scan_entities() {
             bool hasParent = (g_idx_parent >= 0 && get_component(entity, g_idx_parent));
             if (!posComp && !hasParent) continue;
 
-            ItemInfo info = {};
+            ItemInfo info;
             info.name = name;
             info.entityId = eid;
             info.entityPtr = entity;
@@ -1191,8 +1309,15 @@ void scan_entities() {
             info.hasBones = false;
             info.isCreature = false;
             info.isWeapon = false;
-            info.isHeavy = false;
-            info.isHeldByPlayer = hasParent;
+            if (g_idx_item_type >= 0) {
+                void* itdComp = get_component(entity, g_idx_item_type);
+                if (itdComp) {
+                    int itemType = *(int*)((uintptr_t)itdComp + 0x10);
+                    info.isWeapon = (itemType == 1);
+                }
+            }
+            info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
+            info.isHeldByPlayer = (hasParent && !posComp);
             info.hasOwnPosition = (posComp != nullptr);
             info.hasViewPos = false;
             info.velX = 0; info.velY = 0; info.velZ = 0;
@@ -1212,6 +1337,25 @@ void scan_entities() {
                     float dz = (info.pos.cy - playerPos.cy) * CHUNK_SIZE + (info.pos.z - playerPos.z);
                     info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
                 }
+            } else if (hasParent && g_idx_id >= 0) {
+                void* parComp = get_component(entity, g_idx_parent);
+                if (is_readable(parComp, 0x18)) {
+                    int parentId = *(int*)((uintptr_t)parComp + 0x10);
+                    auto it = idToEntity.find(parentId);
+                    if (it != idToEntity.end()) {
+                        void* parentPos = get_component(it->second, g_idx_position);
+                        if (is_readable(parentPos, 0x30)) {
+                            info.pos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
+                            if (havePlayerPos) {
+                                float dx = (info.pos.cx - playerPos.cx) * CHUNK_SIZE + (info.pos.x - playerPos.x);
+                                float dy = info.pos.y - playerPos.y;
+                                float dz = (info.pos.cy - playerPos.cy) * CHUNK_SIZE + (info.pos.z - playerPos.z);
+                                info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
+                            }
+                        }
+                    }
+                }
+                if (info.distance < 0) info.distance = 0.0f;
             }
 
             if (name.rfind("PlayerAvatar", 0) == 0) {
@@ -1226,8 +1370,6 @@ void scan_entities() {
                     info.isCreature = true;
                 }
             }
-
-            memset(info.bonePositions, 0, sizeof(info.bonePositions));
 
             entitiesPushed++;
             items.push_back(std::move(info));
@@ -1258,11 +1400,19 @@ void scan_entities() {
             }
         }
 
-        std::sort(items.begin(), items.end(), [](const ItemInfo& a, const ItemInfo& b) {
-            if (a.distance < 0) return false;
-            if (b.distance < 0) return true;
-            return a.distance < b.distance;
+        size_t itemCount = items.size();
+        std::vector<size_t> order(itemCount);
+        for (size_t i = 0; i < itemCount; i++) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (items[a].distance < 0) return false;
+            if (items[b].distance < 0) return true;
+            return items[a].distance < items[b].distance;
         });
+
+        std::vector<ItemInfo> sorted;
+        sorted.reserve(itemCount);
+        for (size_t idx : order) sorted.push_back(std::move(items[idx]));
+        items = std::move(sorted);
 
         EnterCriticalSection(&g_itemsLock);
         if (havePlayerPos) g_playerPos = playerPos;
@@ -1283,18 +1433,18 @@ void scan_entities() {
         }
 
         if (g_permaLockActive.load() && !g_dupeMode.load() && !g_stickyLock.load()) {
-            EnterCriticalSection(&g_itemsLock);
-            if (!g_permaLockName.empty()) {
+            int targetId = g_lockedEntityId.load();
+            if (targetId > 0) {
+                EnterCriticalSection(&g_itemsLock);
                 for (auto& it : g_items) {
-                    if (it.name == g_permaLockName) {
-                        int lockId = (it.serverId > 0) ? it.serverId : it.entityId;
-                        g_lockedEntityId.store(lockId);
+                    int itemId = (it.serverId > 0) ? it.serverId : it.entityId;
+                    if (itemId == targetId) {
                         g_lockedEntityPtr.store((uintptr_t)it.entityPtr);
                         break;
                     }
                 }
+                LeaveCriticalSection(&g_itemsLock);
             }
-            LeaveCriticalSection(&g_itemsLock);
         }
     }
 }
@@ -1553,99 +1703,6 @@ static void probe_bones_once(void* entity) {
     }
     fclose(bf);
     s_boneProbeCount = 20;
-}
-
-// ---------------------------------------------------------------------------
-// scan_entities_fast
-// ---------------------------------------------------------------------------
-void scan_entities_fast() {
-    WorldVector playerPos = {};
-    bool havePlayerPos = seh_read_player_pos(&playerPos);
-
-    EnterCriticalSection(&g_itemsLock);
-    std::vector<ItemInfo> items = g_items;
-    LeaveCriticalSection(&g_itemsLock);
-
-    size_t n = items.size();
-    for (size_t i = 0; i < n; ) {
-        void* entity = items[i].entityPtr;
-        if (!is_readable(entity, 0x58) || !is_valid_obj(entity) || !seh_entity_enabled(entity)) {
-            items[i] = std::move(items[n - 1]);
-            n--;
-            continue;
-        }
-
-        if (items[i].hasOwnPosition) {
-            void* posComp = get_component(entity, g_idx_position);
-            if (is_readable(posComp, 0x30)) {
-                WorldVector newPos;
-                if (seh_read_position(posComp, &newPos)) {
-                    DWORD now = GetTickCount();
-                    if (items[i].lastPosTime > 0) {
-                        float dt = (float)(now - items[i].lastPosTime) / 1000.0f;
-                        if (dt > 0.01f && dt < 2.0f) {
-                            float newAbsX = newPos.cx * CHUNK_SIZE + newPos.x;
-                            float newAbsZ = newPos.cy * CHUNK_SIZE + newPos.z;
-                            float oldAbsX = items[i].pos.cx * CHUNK_SIZE + items[i].pos.x;
-                            float oldAbsZ = items[i].pos.cy * CHUNK_SIZE + items[i].pos.z;
-                            items[i].velX = (newAbsX - oldAbsX) / dt;
-                            items[i].velY = (newPos.y - items[i].pos.y) / dt;
-                            items[i].velZ = (newAbsZ - oldAbsZ) / dt;
-                        }
-                    }
-                    items[i].lastPosTime = now;
-                    items[i].pos = newPos;
-                }
-            }
-        }
-
-        if (g_idx_view_position >= 0) {
-            void* vpComp = get_component(entity, g_idx_view_position);
-            if (is_readable(vpComp, 0x30)) {
-                WorldVector vp;
-                if (seh_read_position(vpComp, &vp)) {
-                    items[i].viewPos = vp;
-                    items[i].hasViewPos = true;
-                }
-            }
-        }
-
-        if (havePlayerPos) {
-            float dx = (items[i].pos.cx - playerPos.cx) * CHUNK_SIZE + (items[i].pos.x - playerPos.x);
-            float dy = items[i].pos.y - playerPos.y;
-            float dz = (items[i].pos.cy - playerPos.cy) * CHUNK_SIZE + (items[i].pos.z - playerPos.z);
-            items[i].distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        }
-
-        i++;
-    }
-    items.resize(n);
-
-    std::sort(items.begin(), items.end(), [](const ItemInfo& a, const ItemInfo& b) {
-        if (a.distance < 0) return false;
-        if (b.distance < 0) return true;
-        return a.distance < b.distance;
-    });
-
-    EnterCriticalSection(&g_itemsLock);
-    if (havePlayerPos) g_playerPos = playerPos;
-    g_items = std::move(items);
-    LeaveCriticalSection(&g_itemsLock);
-
-    if (g_permaLockActive.load() && !g_dupeMode.load() && !g_stickyLock.load()) {
-        EnterCriticalSection(&g_itemsLock);
-        if (!g_permaLockName.empty()) {
-            for (auto& it : g_items) {
-                if (it.name == g_permaLockName) {
-                    int lockId = (it.serverId > 0) ? it.serverId : it.entityId;
-                    g_lockedEntityId.store(lockId);
-                    g_lockedEntityPtr.store((uintptr_t)it.entityPtr);
-                    break;
-                }
-            }
-        }
-        LeaveCriticalSection(&g_itemsLock);
-    }
 }
 
 // ---------------------------------------------------------------------------

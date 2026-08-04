@@ -26,25 +26,42 @@ bool write_and_protect(uint32_t pid, uint64_t target_base,
             std::printf("    skip '%s' (header-less skip list)\n", s.name);
             continue;
         }
-        if (s.raw_size == 0) {
-            std::printf("    skip '%s' (raw_size=0, .bss-like)\n", s.name);
-            continue;
-        }
-        if (static_cast<size_t>(s.raw_offset) + s.raw_size > pe_size) {
-            std::printf("[!] map_stage2: '%s' raw range exceeds buf\n", s.name);
-            return false;
-        }
+        if (s.raw_size > 0) {
+            if (static_cast<size_t>(s.raw_offset) + s.raw_size > pe_size) {
+                std::printf("[!] map_stage2: '%s' raw range exceeds buf\n", s.name);
+                return false;
+            }
 
-        const uint64_t dst = target_base + s.virtual_address;
-        const uint64_t src = reinterpret_cast<uint64_t>(pe_buf + s.raw_offset);
+            const uint64_t dst = target_base + s.virtual_address;
+            const uint64_t src = reinterpret_cast<uint64_t>(pe_buf + s.raw_offset);
 
-        if (!cmdchannel::write_memory(pid, dst, src, s.raw_size)) {
-            std::printf("[!] map_stage2: write '%s' failed (dst=%016llX size=%u)\n",
+            if (!cmdchannel::write_memory(pid, dst, src, s.raw_size)) {
+                std::printf("[!] map_stage2: write '%s' failed (dst=%016llX size=%u)\n",
+                            s.name, static_cast<unsigned long long>(dst), s.raw_size);
+                return false;
+            }
+            std::printf("[+] map_stage2: wrote '%s' va=%016llX size=%u\n",
                         s.name, static_cast<unsigned long long>(dst), s.raw_size);
-            return false;
         }
-        std::printf("[+] map_stage2: wrote '%s' va=%016llX size=%u\n",
-                    s.name, static_cast<unsigned long long>(dst), s.raw_size);
+
+        uint32_t bss_start = s.raw_size;
+        uint32_t bss_end   = s.virtual_size;
+        if (bss_end > bss_start) {
+            uint8_t zero_buf[4096] = {};
+            for (uint32_t off = bss_start; off < bss_end; off += sizeof(zero_buf)) {
+                uint32_t chunk = (bss_end - off < sizeof(zero_buf))
+                                     ? (bss_end - off)
+                                     : sizeof(zero_buf);
+                if (!cmdchannel::write_memory(pid, target_base + s.virtual_address + off,
+                                              reinterpret_cast<uint64_t>(zero_buf), chunk)) {
+                    std::printf("[!] map_stage2: zero-fill '%s' failed at offset 0x%X\n",
+                                s.name, off);
+                    return false;
+                }
+            }
+            std::printf("[+] map_stage2: zeroed BSS '%s' va+0x%X..0x%X (%u bytes)\n",
+                        s.name, bss_start, bss_end, bss_end - bss_start);
+        }
     }
 
     // Phase 2 — per-page PTE-direct NX flip on executable sections.
@@ -75,11 +92,12 @@ bool write_and_protect(uint32_t pid, uint64_t target_base,
             const uint32_t vext = s.virtual_size ? s.virtual_size : s.raw_size;
             const uint32_t size = round_up_page(vext);
 
-            if (!cmdchannel::set_pte_nx(pid, dst, size, cmdchannel::PTE_FLAG_CLEAR_NX)) {
-                std::printf("[!] map_stage2: PTE clear-NX '%s' failed\n", s.name);
+            uint32_t old_prot = 0;
+            if (!cmdchannel::protect_memory(pid, dst, size, 0x20, &old_prot)) {
+                std::printf("[!] map_stage2: protect '%s' failed\n", s.name);
                 return false;
             }
-            std::printf("[+] map_stage2: PTE clear-NX '%s' va=%016llX size=%u (VAD untouched)\n",
+            std::printf("[+] map_stage2: protect '%s' va=%016llX size=%u RW->RX\n",
                         s.name, static_cast<unsigned long long>(dst), size);
         }
     }

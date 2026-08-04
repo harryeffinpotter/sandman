@@ -87,11 +87,11 @@ int main(int argc, char* argv[]) {
     char full_dll_path[MAX_PATH];
     GetFullPathNameA(dll_path, MAX_PATH, full_dll_path, nullptr);
 
-    printf("[*] Looking for process: %s\n", proc_name);
-    DWORD pid = find_process(proc_name);
-    if (!pid) {
-        printf("[-] Process not found: %s\n", proc_name);
-        return 1;
+    printf("[*] Waiting for process: %s\n", proc_name);
+    DWORD pid = 0;
+    while (!pid) {
+        pid = find_process(proc_name);
+        if (!pid) Sleep(500);
     }
     printf("[+] Found process PID: %lu\n", pid);
 
