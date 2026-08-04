@@ -2102,6 +2102,7 @@ static void* build_disk_trampoline(uint8_t* hookedFunc, uint8_t* relayPage, int 
     ReadFile(hFile, origBytes, sizeof(origBytes), &br, nullptr);
     tlog("build_disk_trampoline: fileOffset=0x%lX, read %lu bytes from disk\n", (unsigned long)fileOffset, (unsigned long)br);
     CloseHandle(hFile);
+    tlog("build_disk_trampoline: file closed, origBytes[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n", origBytes[0],origBytes[1],origBytes[2],origBytes[3],origBytes[4],origBytes[5],origBytes[6],origBytes[7]);
 
     dbglog("[trampoline] RVA 0x%X original bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
         (DWORD)rva,
@@ -2109,7 +2110,9 @@ static void* build_disk_trampoline(uint8_t* hookedFunc, uint8_t* relayPage, int 
         origBytes[4], origBytes[5], origBytes[6], origBytes[7],
         origBytes[8], origBytes[9], origBytes[10], origBytes[11],
         origBytes[12], origBytes[13], origBytes[14], origBytes[15]);
+    tlog("build_disk_trampoline: dbglog done\n");
 
+    tlog("build_disk_trampoline: starting insn decode loop\n");
     int stolen = 0;
     while (stolen < 5) {
         int len = x64_insn_len(origBytes + stolen);
@@ -2119,12 +2122,15 @@ static void* build_disk_trampoline(uint8_t* hookedFunc, uint8_t* relayPage, int 
         }
         stolen += len;
     }
+    tlog("build_disk_trampoline: stolen=%d bytes\n", stolen);
 
     dbglog("[trampoline] stealing %d bytes\n", stolen);
 
     uint8_t* tramp = relayPage + relayOffset;
     memcpy(tramp, origBytes, stolen);
+    tlog("build_disk_trampoline: memcpy to tramp=%p done\n", tramp);
 
+    tlog("build_disk_trampoline: starting fixup loop\n");
     int pos = 0;
     while (pos < stolen) {
         const uint8_t* insn = origBytes + pos;
@@ -2179,12 +2185,14 @@ static void* build_disk_trampoline(uint8_t* hookedFunc, uint8_t* relayPage, int 
 
         pos += len;
     }
+    tlog("build_disk_trampoline: fixup loop done\n");
 
     uintptr_t jmpTarget = (uintptr_t)hookedFunc + stolen;
     tramp[stolen] = 0xFF;
     tramp[stolen + 1] = 0x25;
     *(uint32_t*)(tramp + stolen + 2) = 0;
     *(uintptr_t*)(tramp + stolen + 6) = jmpTarget;
+    tlog("build_disk_trampoline: tramp complete at %p, jmpTarget=%p\n", tramp, (void*)jmpTarget);
 
     dbglog("[trampoline] built at %p, stolen=%d, jumps to %p\n",
         tramp, stolen, (void*)jmpTarget);
