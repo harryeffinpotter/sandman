@@ -8,7 +8,7 @@ namespace byovd {
 
 // Context carried across BYOVD lifecycle.
 struct Context {
-    HANDLE device = INVALID_HANDLE_VALUE;   // \\.\WinIo
+    HANDLE device = INVALID_HANDLE_VALUE;   // \\.\Nal
     std::wstring file_path;                  // full path to dropped driver (no .sys)
     std::wstring basename;                   // 6-char random temp filename (no path, no ext)
     std::wstring service_name;               // 8-char random (registry key leaf)
