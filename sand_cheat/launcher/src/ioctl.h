@@ -1,8 +1,6 @@
-// ioctl.h -- WinIo64.sys physmem MAP/UNMAP wrapper.
+// ioctl.h -- iqvw64e.sys (Intel NAL) physmem wrapper.
 //
-// Public API: map_physical, unmap_physical, read_physical, write_physical,
-// get_pml4_phys. All other launcher modules include this header and call
-// these through the ioctl:: namespace.
+// Public API: read_physical, write_physical, get_pml4_phys.
 
 #pragma once
 
@@ -11,22 +9,43 @@
 
 namespace ioctl {
 
-constexpr DWORD IOCTL_MAP_PHYS   = 0x80102040;
-constexpr DWORD IOCTL_UNMAP_PHYS = 0x80102044;
+constexpr DWORD IOCTL_NAL = 0x80862007;
 
-enum RwFlag : uint8_t { RW_READ = 0, RW_WRITE = 1 };
-
-struct Handle {
-    uint64_t dwPhysMemSizeInBytes;   // offset  0: size (input)
-    uint64_t pvPhysAddress;          // offset  8: physical address (input)
-    uint64_t pvPhysSection;          // offset 16: section object ptr (output)
-    uint64_t pvPhysMemLin;           // offset 24: mapped VA (output)
-    uint64_t PhysicalMemoryHandle;   // offset 32: section handle (output)
+#pragma pack(push, 1)
+struct MapIoSpace {
+    uint64_t case_number;       // 0x19
+    uint64_t reserved1;
+    uint64_t return_value;
+    uint64_t return_virt_addr;
+    uint64_t phys_addr;
+    uint64_t size;
 };
-static_assert(sizeof(Handle) == 40, "WinIo64 phys struct must be 40 bytes");
 
-bool map_physical(HANDLE device, uint64_t phys, uint32_t size, RwFlag rw, Handle& h);
-bool unmap_physical(HANDLE device, const Handle& h);
+struct UnmapIoSpace {
+    uint64_t case_number;       // 0x1A
+    uint64_t reserved1;
+    uint64_t reserved2;
+    uint64_t virt_addr;
+    uint64_t reserved3;
+    uint64_t size;
+};
+
+struct NalCopyMem {
+    uint64_t case_number;       // 0x21
+    uint64_t reserved;
+    uint64_t source;
+    uint64_t destination;
+    uint64_t length;
+};
+
+struct GetPhysAddr {
+    uint64_t case_number;       // 0x25
+    uint64_t reserved;
+    uint64_t return_phys_addr;
+    uint64_t virt_addr;
+};
+#pragma pack(pop)
+
 bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size);
 bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size);
 bool get_pml4_phys(HANDLE device, uint64_t& cr3);

