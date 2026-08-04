@@ -115,6 +115,13 @@ struct Hook {
     int stolen_bytes;
 };
 
+struct HWBPHook {
+    void* target;
+    void* detour;
+    void* trampoline;
+    int drIndex;
+};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -141,6 +148,8 @@ typedef void* (*fn_get_component_in_children)(void* component, void* type, void*
 extern volatile void* g_gameContextModule;
 extern volatile void* g_findInteractSystem;
 extern volatile bool g_hooked;
+extern std::atomic<bool> g_hwbpActive;
+void set_hwbp_active(bool enabled);
 
 extern int g_idx_blueprint;
 extern int g_idx_position;
@@ -311,9 +320,12 @@ extern bool g_mobAimbotSame;
 // ---------------------------------------------------------------------------
 void resolve_all(HMODULE ga, IL2CPP_API& api);
 bool install_hook(Hook& h, void* target, void* detour, int steal_count = 16);
+
+extern HWBPHook g_hwbpHooks[4];
+bool install_hwbp_hook(int drIndex, void* target, void* detour, int steal_count = 16);
+bool hwbp_handle_exception(EXCEPTION_POINTERS* ep);
 bool discover_component_indices(void* gameContextModule);
 void scan_entities();
-void scan_entities_fast();
 std::string read_il2cpp_string(void* str);
 void* get_component(void* entity, int componentIndex);
 bool strip_component(void* entity, int componentIndex);

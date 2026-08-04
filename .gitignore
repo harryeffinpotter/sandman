@@ -34,6 +34,30 @@ sand_cheat/*.ilk
 il2cpp_dumper/imgui/
 sand_cheat/imgui/
 
+# Vulnerable driver collection (279MB)
+Vulnerable Drivers/
+
+# Runtime trace/debug/crash files
+sand_cheat/injection_trace.txt
+sand_cheat/worker_debug.txt
+sand_cheat/crash_info.txt
+sand_cheat/sand_crash.dmp
+sand_cheat/scan_diag.txt
+sand_cheat/overlay_debug.txt
+sand_cheat/launcher_trace.txt
+sand_cheat/bone_probe.txt
+sand_cheat/component_names.txt
+sand_cheat/player_probe.txt
+sand_cheat/shop_probe.txt
+sand_cheat/tech_tree_dump.txt
+sand_cheat/tech_tree_cache.bin
+sand_cheat/sand_cheat_settings.ini
+sand_cheat/imgui_layout.ini
+
+# Encrypted driver payloads
+sand_cheat/launcher/kerneldriver_enc.bin
+sand_cheat/launcher/winio64_enc.bin
+
 # OS / editor junk
 Thumbs.db
 *.suo

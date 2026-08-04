@@ -1013,7 +1013,7 @@ int main(int argc, char* argv[]) {
     const uint32_t parking_size = (parsed.size_of_image + 0xFFF) & ~0xFFFu;
     uint64_t parking_base = 0;
     if (!cmdchannel::alloc_memory(game_pid, 0, parking_size,
-                                   0x3000, 0x40,
+                                   0x3000, 0x04,
                                    &parking_base)) {
         llog("FAIL: alloc_memory for stage2\n");
         std::printf("[!] Stage 2 memory allocation failed\n");
@@ -1021,7 +1021,7 @@ int main(int argc, char* argv[]) {
     }
     std::printf("[*] stage2 alloc: base=%016llX size=0x%X\n",
                 static_cast<unsigned long long>(parking_base), parking_size);
-    llog("stage2_base=%016llX size=0x%X (standalone RWX)\n",
+    llog("stage2_base=%016llX size=0x%X (standalone RW, will flip .text to RX)\n",
         (unsigned long long)parking_base, parking_size);
 
     // Pre-write readback: confirm the chosen slot is zero. Non-zero means we
@@ -1110,15 +1110,37 @@ int main(int argc, char* argv[]) {
     }
     std::printf("[+] Phase 16.c.delta: PASS — map pipeline bytewise validated\n");
 
+    llog("clearing NX via PTE for executable sections\n");
+    for (uint32_t i = 0; i < parsed.section_count; ++i) {
+        const auto& s = parsed.sections[i];
+        if (!s.copy) continue;
+        if (!s.exec) continue;
+
+        const uint64_t dst = parking_base + s.virtual_address;
+        const uint32_t vext = s.virtual_size ? s.virtual_size : s.raw_size;
+        const uint32_t size = (vext + 0xFFF) & ~0xFFFu;
+
+        if (!cmdchannel::set_pte_nx(game_pid, dst, size, 0x1)) {
+            llog("FAIL: set_pte_nx for section '%s'\n", s.name);
+            std::printf("[!] PTE NX clear failed for '%s'\n", s.name);
+            cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+            return 17;
+        }
+        std::printf("[+] PTE NX cleared for '%s' va=%016llX size=%u\n",
+                    s.name, static_cast<unsigned long long>(dst), size);
+        llog("PTE NX cleared '%s' va=%016llX size=%u\n",
+            s.name, (unsigned long long)dst, size);
+    }
+
     // =====================================================================
     // Phase 16.c.epsilon: Stage-2 DllMain invocation (full E2E).
     //
     // Stage 2 is mapped + protected. Now we need DllMain to actually run.
     // invoke_dllmain:
     //   - picks a SECOND parking slot (non-overlapping with Stage 2)
-    //   - stages a ~1 KB invoker parking: fake vtable + 65-byte shellcode
-    //     that calls (RCX=stage2_base, RDX=1, R8=0) at stage2_base+entry_rva
-    //     and writes 0xCAFEBABE to a marker on return
+    //   - stages a ~1 KB invoker parking: fake vtable + 102-byte shellcode
+    //     that registers .pdata via RtlAddFunctionTable, then calls
+    //     DllMain(stage2_base, 1, NULL) and writes 0xCAFEBABE to a marker
     //   - flips EA90[live_slot] to the fake vtable
     //   - polls the marker for up to 5 s
     //   - restores EA90 immediately on success (or timeout)
@@ -1137,7 +1159,9 @@ int main(int argc, char* argv[]) {
 
     if (!invoke_stage2::invoke_dllmain(game_pid, rctx,
                                        parking_base, parking_size,
-                                       parsed.entry_rva)) {
+                                       parsed.entry_rva,
+                                       parsed.exception_rva,
+                                       parsed.exception_size)) {
         llog("FAIL: invoke_dllmain\n");
         std::printf("[!] Phase 16.c.epsilon: FAIL — scrubbing Stage 2 region\n");
         cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);

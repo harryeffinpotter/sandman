@@ -866,7 +866,7 @@ static void scan_entities() {
 
             info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
 
-            info.isHeldByPlayer = hasParent;
+            info.isHeldByPlayer = (hasParent && !posComp);
 
             items.push_back(std::move(info));
         }
