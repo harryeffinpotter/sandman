@@ -1351,7 +1351,7 @@ void scan_entities() {
                 }
             }
             info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
-            info.isHeldByPlayer = (hasParent && !posComp);
+            info.isHeldByPlayer = hasParent;
             info.hasOwnPosition = (posComp != nullptr);
             info.hasViewPos = false;
             info.velX = 0; info.velY = 0; info.velZ = 0;
@@ -1360,36 +1360,36 @@ void scan_entities() {
             info.serverId = -1;
             if (g_idx_id >= 0) {
                 void* idComp = get_component(entity, g_idx_id);
-                if (is_readable(idComp, 0x18)) info.serverId = *(int*)((uintptr_t)idComp + 0x10);
+                if (idComp) info.serverId = *(int*)((uintptr_t)idComp + 0x10);
             }
 
-            if (is_readable(posComp, 0x30)) {
-                info.pos = *(WorldVector*)((uintptr_t)posComp + 0x10);
-                if (havePlayerPos) {
-                    float dx = (info.pos.cx - playerPos.cx) * CHUNK_SIZE + (info.pos.x - playerPos.x);
-                    float dy = info.pos.y - playerPos.y;
-                    float dz = (info.pos.cy - playerPos.cy) * CHUNK_SIZE + (info.pos.z - playerPos.z);
-                    info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
-                }
+            WorldVector resolvedPos = {};
+            bool hasResolvedPos = false;
+
+            if (posComp) {
+                resolvedPos = *(WorldVector*)((uintptr_t)posComp + 0x10);
+                hasResolvedPos = true;
             } else if (hasParent && g_idx_id >= 0) {
                 void* parComp = get_component(entity, g_idx_parent);
-                if (is_readable(parComp, 0x18)) {
+                if (parComp) {
                     int parentId = *(int*)((uintptr_t)parComp + 0x10);
                     auto it = idToEntity.find(parentId);
                     if (it != idToEntity.end()) {
                         void* parentPos = get_component(it->second, g_idx_position);
-                        if (is_readable(parentPos, 0x30)) {
-                            info.pos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
-                            if (havePlayerPos) {
-                                float dx = (info.pos.cx - playerPos.cx) * CHUNK_SIZE + (info.pos.x - playerPos.x);
-                                float dy = info.pos.y - playerPos.y;
-                                float dz = (info.pos.cy - playerPos.cy) * CHUNK_SIZE + (info.pos.z - playerPos.z);
-                                info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
-                            }
+                        if (parentPos) {
+                            resolvedPos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
+                            hasResolvedPos = true;
                         }
                     }
                 }
-                if (info.distance < 0) info.distance = 0.0f;
+            }
+
+            info.pos = resolvedPos;
+            if (havePlayerPos && hasResolvedPos) {
+                float dx = (resolvedPos.cx - playerPos.cx) * CHUNK_SIZE + (resolvedPos.x - playerPos.x);
+                float dy = resolvedPos.y - playerPos.y;
+                float dz = (resolvedPos.cy - playerPos.cy) * CHUNK_SIZE + (resolvedPos.z - playerPos.z);
+                info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
             }
 
             if (name.rfind("PlayerAvatar", 0) == 0) {

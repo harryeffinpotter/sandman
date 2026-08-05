@@ -1269,9 +1269,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             ImGui::TextUnformatted(item.name.c_str());
 
                         ImGui::TableSetColumnIndex(2);
-                        if (item.isHeldByPlayer)
-                            ImGui::TextUnformatted("held");
-                        else if (item.distance >= 0)
+                        if (item.distance >= 0)
                             ImGui::Text("%.1fm", item.distance);
                         else
                             ImGui::TextUnformatted("---");
