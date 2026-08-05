@@ -56,4 +56,8 @@ constexpr uint32_t PTE_FLAG_CLEAR_W  = 0x4u;
 constexpr uint32_t PTE_FLAG_SET_NX   = 0x8u;
 bool set_pte_nx(uint32_t pid, uint64_t va, uint64_t size, uint32_t flags);
 
+bool arm_image_notify(const wchar_t* exe_name);
+bool query_armed_pid(uint32_t* out_pid);
+bool create_remote_thread(uint32_t pid, uint64_t start_address, uint64_t parameter, uint32_t* out_tid);
+
 } // namespace cmdchannel
