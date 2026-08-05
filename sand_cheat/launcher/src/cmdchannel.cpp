@@ -67,10 +67,11 @@ int32_t send_raw(const void* body_plain, uint32_t body_size) {
     // as rcx to the hooked dispatcher. Dispatcher reads from that VA.
     ULONG64 smuggle = reinterpret_cast<ULONG64>(packet);
     ULONG64 out_val = 0;
-    BOOLEAN disc = FALSE;
+    ULONG64 disc_pad = 0;
+    PBOOLEAN disc = reinterpret_cast<PBOOLEAN>(&disc_pad);
 
     // direction=FALSE -> Perf→Aux → HAL slot B60 → our dispatcher.
-    LONG rc = g_pNtConv(FALSE, &smuggle, &out_val, &disc);
+    LONG rc = g_pNtConv(FALSE, &smuggle, &out_val, disc);
     return rc;
 }
 

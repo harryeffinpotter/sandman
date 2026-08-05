@@ -213,8 +213,6 @@ static IDXGISwapChain* g_initSwapChain = nullptr;
 
 bool g_menuVisible = true;
 
-static std::unordered_set<std::string> g_hiddenNames;
-static std::vector<std::string> g_hiddenPrefixes = { "Mob", "walker_", "EXPEDITION_WALKER" };
 
 typedef HRESULT(STDMETHODCALLTYPE* fn_Present)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 typedef HRESULT(STDMETHODCALLTYPE* fn_ResizeBuffers)(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
@@ -1257,6 +1255,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
                 static char searchBuf[256] = {};
                 ImGui::InputText("Search", searchBuf, sizeof(searchBuf));
+                g_nameFilter = searchBuf;
 
                 ImGui::Text("Items");
                 ImGui::BeginChild("ItemList", ImVec2(0, 0), true);

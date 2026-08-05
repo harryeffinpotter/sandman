@@ -24,11 +24,9 @@
 #include "kern_scan.h"
 #include "kern_map.h"
 #include "forensic_cleanup.h"
-#include "rtss_inject.h"
 #include "parse_stage2.h"
 #include "resolve_imports.h"
 #include "map_stage2.h"
-#include "invoke_stage2.h"
 #include "ui.h"
 
 #include <string>
@@ -108,7 +106,7 @@ bool write_kva_local(HANDLE device, uint64_t cr3, uint64_t kva, const void* src,
 }
 
 void banner() {
-    std::printf("[*] sand_cheat launcher — phase 1 (mapper + comm)\n");
+    std::printf("[*] sand_cheat launcher — DIRECT INJECT MODE (no RTSS)\n");
     std::printf("[*] build: %s %s\n", __DATE__, __TIME__);
 }
 
@@ -881,71 +879,11 @@ int main(int argc, char* argv[]) {
     std::printf("[+] target found: PID %u\n", game_pid);
     llog("target PID=%u\n", game_pid);
 
-    rtss_inject::Ctx rctx;
-    llog("calling wait_for_rtss_in_game pid=%u\n", game_pid);
-    bool landed = rtss_inject::wait_for_rtss_in_game(game_pid, rctx, 10000);
-    llog("wait_for_rtss returned %d rtss_base=%016llX parking_min=%08X parking_max=%08X\n",
-        landed?1:0, (unsigned long long)rctx.rtss_base_in_game,
-        rctx.parking_min_rva, rctx.parking_max_rva);
-    if (!landed) {
-        llog("FAIL: RTSS not in target\n");
-        std::printf("[!] Phase 16.b: FAIL — RTSS not in target\n");
-        return 9;
-    }
-    rtss_inject::verify_in_game_rtss(game_pid, rctx);
-    std::printf("[+] Phase 16.b: RTSS detected in game (tester-supplied install)\n");
-    llog("RTSS verified in game\n");
-
-    std::printf("\n  Phase 16.b.beta: parking-zone probe\n");
-    llog("parking probe: min_rva=%08X max_rva=%08X\n", rctx.parking_min_rva, rctx.parking_max_rva);
-    if (rctx.parking_min_rva == 0) {
-        llog("SKIP: no parking zone\n");
-        std::printf("[!] Phase 16.b.beta: SKIP — unknown build, no parking zone defined\n");
-        return 0;
-    }
-    bool probed = rtss_inject::probe_parking_zone(game_pid, rctx);
-    llog("probe_parking_zone returned %d\n", probed?1:0);
-    if (probed) {
-        std::printf("[+] Phase 16.b.beta: parking zone R/W validated\n");
-    } else {
-        llog("FAIL: parking probe\n");
-        std::printf("[!] Phase 16.b.beta: FAIL — parking-zone probe did not complete cleanly\n");
-        return 10;
-    }
-
-    std::printf("\n  Phase 16.b.gamma: DX12 A50F0 redirect smoke\n");
-    int live_slot = -1;
-    rtss_inject::sweep_d3d12_slots(game_pid, rctx, &live_slot);
-    llog("sweep_d3d12_slots: live_slot=%d\n", live_slot);
-    bool redirected = false;
-    if (live_slot >= 0) {
-        redirected = rtss_inject::redirect_d3d12_smoke(game_pid, rctx);
-        llog("redirect_d3d12_smoke returned %d\n", redirected?1:0);
-    } else {
-        std::printf("[*] Phase 16.b.gamma: direct-mode cluster empty — trying interop path\n");
-        redirected = rtss_inject::redirect_d3d12_interop_smoke(game_pid, rctx);
-        llog("redirect_d3d12_interop_smoke returned %d\n", redirected?1:0);
-    }
-    if (!redirected) {
-        std::printf("[*] Phase 16.b.gamma: DX12 paths unavailable — trying DX11 Present slot\n");
-        redirected = rtss_inject::redirect_d3d11_present_smoke(game_pid, rctx);
-        llog("redirect_d3d11_present_smoke returned %d\n", redirected?1:0);
-    }
-    if (redirected) {
-        std::printf("[+] Phase 16.b.gamma: redirect chain validated end-to-end\n");
-        llog("redirect PASS\n");
-    } else {
-        llog("FAIL: all redirect paths failed\n");
-        std::printf("[!] Phase 16.b.gamma: FAIL — stub did not fire (target may be non-rendering)\n");
-        return 11;
-    }
-
     // =====================================================================
     // Phase 16.c.delta: Stage-2 map-only smoke (Path A).
     //
-    // Validates the 16.c.a–d pipeline without invoking DllMain:
-    //   (1) load Stage 2 DLL from disk (test rig — production will decrypt
-    //       from embedded .enc via the same pre-build pipeline as kerneldriver)
+    // Validates the mapper pipeline without invoking DllMain:
+    //   (1) load Stage 2 DLL from disk
     //   (2) parse_stage2::parse -> parsed_stage2 struct
     //   (3) resolve_imports::resolve -> IAT patched in launcher buffer
     //       (cross-proc PEB walk + export table reads via cmdchannel)
@@ -955,11 +893,10 @@ int main(int argc, char* argv[]) {
     //       at parking_base + section.VA, per-section protection flip
     //   (6) bytewise read-back verify: each copied section must match the
     //       launcher-side prepared buffer exactly
-    //   (7) scrub parking (zeros + restore RW protection) — keeps RTSS clean
     //
     // No DllMain call, no shellcode, no widget. Validates mapper correctness
     // only. Missing failure modes: IAT contents semantic correctness,
-    // reloc arithmetic producing runnable code. Those surface at 16.c.e.
+    // reloc arithmetic producing runnable code. Those surface at 16.d.
     // =====================================================================
     std::printf("\n  Phase 16.c.delta: Stage-2 map-only smoke\n");
 
@@ -1019,31 +956,6 @@ int main(int argc, char* argv[]) {
                 static_cast<unsigned long long>(parking_base), parking_size);
     llog("stage2_base=%016llX size=0x%X (standalone RW, will flip .text to RX)\n",
         (unsigned long long)parking_base, parking_size);
-
-    // Pre-write readback: confirm the chosen slot is zero. Non-zero means we
-    // either overlap with live RTSS state or with earlier smoke leftovers —
-    // bail so we don't stomp anything.
-    {
-        std::vector<uint8_t> probe(parking_size, 0xFF);
-        if (!cmdchannel::read_memory(game_pid, parking_base,
-                                     reinterpret_cast<uint64_t>(probe.data()),
-                                     parking_size)) {
-            std::printf("[!] parking pre-write probe read FAIL\n");
-            return 14;
-        }
-        bool all_zero = true;
-        for (uint32_t i = 0; i < parking_size; ++i) {
-            if (probe[i] != 0) { all_zero = false; break; }
-        }
-        std::printf("[*] parking pre-write = %s\n",
-                    all_zero ? "ZERO (clean)" : "NONZERO (overlap risk)");
-        llog("parking pre-write zero check: %s\n", all_zero ? "ZERO" : "NONZERO");
-        if (!all_zero) {
-            llog("FAIL: parking not zero, aborting\n");
-            std::printf("[!] aborting to avoid clobbering live RTSS state\n");
-            return 14;
-        }
-    }
 
     resolve_imports::stats ri{};
     llog("calling resolve_imports pid=%u\n", game_pid);
@@ -1129,46 +1041,278 @@ int main(int argc, char* argv[]) {
     }
 
     // =====================================================================
-    // Phase 16.c.epsilon: Stage-2 DllMain invocation (full E2E).
-    //
-    // Stage 2 is mapped + protected. Now we need DllMain to actually run.
-    // invoke_dllmain:
-    //   - picks a SECOND parking slot (non-overlapping with Stage 2)
-    //   - stages a ~1 KB invoker parking: fake vtable + 102-byte shellcode
-    //     that registers .pdata via RtlAddFunctionTable, then calls
-    //     DllMain(stage2_base, 1, NULL) and writes 0xCAFEBABE to a marker
-    //   - flips EA90[live_slot] to the fake vtable
-    //   - polls the marker for up to 5 s
-    //   - restores EA90 immediately on success (or timeout)
-    //   - scrubs the invoker parking; Stage 2 stays resident
-    //
-    // After this returns, Stage 2 is live. Its init ran on the game's
-    // render thread inside RTSS's Present chain. E900 detour is installed
-    // on the game's widget dispatcher. On subsequent paints the state
-    // machine (maybe_finalize) will find the target widget and install
-    // the VMT shadow — red box appears in-game. No further launcher work.
+    // Phase 16.d: Direct thread-hijack DllMain invocation
     // =====================================================================
-    std::printf("\n  Phase 16.c.epsilon: Stage-2 DllMain invocation\n");
-    llog("calling invoke_dllmain pid=%u parking_base=%016llX parking_size=0x%X entry_rva=%08X\n",
-        game_pid, (unsigned long long)parking_base, parking_size, parsed.entry_rva);
-    llog("DllMain absolute addr = %016llX\n", (unsigned long long)(parking_base + parsed.entry_rva));
+    std::printf("\n  Phase 16.d: Direct thread-hijack DllMain invocation\n");
 
-    if (!invoke_stage2::invoke_dllmain(game_pid, rctx,
-                                       parking_base, parking_size,
-                                       parsed.entry_rva,
-                                       parsed.exception_rva,
-                                       parsed.exception_size)) {
-        llog("FAIL: invoke_dllmain\n");
-        std::printf("[!] Phase 16.c.epsilon: FAIL — scrubbing Stage 2 region\n");
+    // (1) Allocate a 4 KB page in the game for shellcode.
+    uint64_t sc_base = 0;
+    if (!cmdchannel::alloc_memory(game_pid, 0, 0x1000, 0x3000, 0x04, &sc_base)) {
+        llog("FAIL: shellcode page alloc\n");
+        std::printf("[!] Phase 16.d: shellcode page alloc FAIL\n");
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+    llog("shellcode page: %016llX\n", (unsigned long long)sc_base);
+    std::printf("[+] Phase 16.d: shellcode page @ %016llX\n",
+                static_cast<unsigned long long>(sc_base));
+
+    // (2) Build DllMain-invoker shellcode (thread-hijack variant).
+    //
+    // Layout:
+    //
+    //   0x00  push rbp
+    //   0x01  mov  rbp, rsp
+    //   0x04  and  rsp, -16
+    //   0x08  sub  rsp, 32
+    //   0x0C  mov  rcx, <PDATA_VA>
+    //   0x16  mov  edx, <PDATA_COUNT>
+    //   0x1B  mov  r8,  <STAGE2_BASE>
+    //   0x25  mov  rax, <RtlAddFunctionTable>
+    //   0x2F  call rax
+    //   0x31  mov  rcx, <STAGE2_BASE>
+    //   0x3B  mov  edx, 1
+    //   0x40  xor  r8d, r8d
+    //   0x43  mov  rax, <ENTRY_VA>
+    //   0x4D  call rax
+    //   0x4F  mov  rax, <MARKER_VA>
+    //   0x59  mov  dword [rax], 0xCAFEBABE
+    //   0x5F  pause
+    //   0x61  jmp  0x5F
+    //
+    // Total: 0x63 = 99 bytes.
+
+    const uint32_t SHELLCODE_LEN = 0x63;
+    const uint32_t SC_MARKER_OFF = 0x100;
+
+    static const uint8_t SC_TEMPLATE[] = {
+        0x55,                                              // push rbp
+        0x48, 0x89, 0xE5,                                  // mov  rbp, rsp
+        0x48, 0x83, 0xE4, 0xF0,                            // and  rsp, -16
+        0x48, 0x83, 0xEC, 0x20,                            // sub  rsp, 32
+        0x48, 0xB9, 0,0,0,0,0,0,0,0,                       // mov  rcx, imm64 (pdata_va)        @0x0E
+        0xBA, 0,0,0,0,                                      // mov  edx, imm32 (pdata_count)     @0x17
+        0x49, 0xB8, 0,0,0,0,0,0,0,0,                       // mov  r8,  imm64 (stage2_base)     @0x1D
+        0x48, 0xB8, 0,0,0,0,0,0,0,0,                       // mov  rax, imm64 (RtlAddFunctionTable) @0x27
+        0xFF, 0xD0,                                        // call rax
+        0x48, 0xB9, 0,0,0,0,0,0,0,0,                       // mov  rcx, imm64 (stage2_base)     @0x33
+        0xBA, 0x01, 0x00, 0x00, 0x00,                      // mov  edx, 1
+        0x45, 0x33, 0xC0,                                  // xor  r8d, r8d
+        0x48, 0xB8, 0,0,0,0,0,0,0,0,                       // mov  rax, imm64 (entry_va)        @0x45
+        0xFF, 0xD0,                                        // call rax
+        0x48, 0xB8, 0,0,0,0,0,0,0,0,                       // mov  rax, imm64 (marker_va)       @0x51
+        0xC7, 0x00, 0xBE, 0xBA, 0xFE, 0xCA,                // mov  dword [rax], 0xCAFEBABE
+        0xF3, 0x90,                                        // pause
+        0xEB, 0xFC,                                        // jmp  -4 (back to pause)
+    };
+
+    uint8_t sc_page[0x1000] = {};
+    std::memcpy(sc_page, SC_TEMPLATE, SHELLCODE_LEN);
+
+    const uint64_t pdata_va    = parking_base + parsed.exception_rva;
+    const uint32_t pdata_count = parsed.exception_size / 12;
+    const uint64_t entry_va    = parking_base + parsed.entry_rva;
+    const uint64_t marker_va   = sc_base + SC_MARKER_OFF;
+
+    HMODULE ntdll_local = GetModuleHandleA("ntdll.dll");
+    uint64_t rtlAddFT = (uint64_t)GetProcAddress(ntdll_local, "RtlAddFunctionTable");
+
+    std::memcpy(sc_page + 0x0E, &pdata_va,      8);
+    std::memcpy(sc_page + 0x17, &pdata_count,    4);
+    std::memcpy(sc_page + 0x1D, &parking_base,   8);
+    std::memcpy(sc_page + 0x27, &rtlAddFT,       8);
+    std::memcpy(sc_page + 0x33, &parking_base,   8);
+    std::memcpy(sc_page + 0x45, &entry_va,       8);
+    std::memcpy(sc_page + 0x51, &marker_va,      8);
+
+    llog("shellcode patched: pdata_va=%016llX count=%u rtlAddFT=%016llX "
+         "stage2_base=%016llX entry_va=%016llX marker_va=%016llX\n",
+        (unsigned long long)pdata_va, pdata_count, (unsigned long long)rtlAddFT,
+        (unsigned long long)parking_base, (unsigned long long)entry_va,
+        (unsigned long long)marker_va);
+
+    // (3) Write shellcode page to game.
+    if (!cmdchannel::write_memory(game_pid, sc_base,
+                                  reinterpret_cast<uint64_t>(sc_page), 0x1000)) {
+        llog("FAIL: shellcode write\n");
+        std::printf("[!] Phase 16.d: shellcode WRITE failed\n");
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+    llog("shellcode written OK\n");
+
+    // (4) Make shellcode page executable.
+    uint32_t sc_old_prot = 0;
+    if (!cmdchannel::protect_memory(game_pid, sc_base, 0x1000, 0x40, &sc_old_prot)) {
+        llog("FAIL: shellcode protect RWX\n");
+        std::printf("[!] Phase 16.d: shellcode PROTECT -> RWX failed\n");
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+    std::printf("[+] Phase 16.d: shellcode page RWX (old=0x%X)\n", sc_old_prot);
+
+    // (5) Find a suitable game thread (not main thread).
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) {
+        llog("FAIL: CreateToolhelp32Snapshot\n");
+        std::printf("[!] Phase 16.d: thread snapshot FAIL\n");
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
         cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
         return 19;
     }
 
-    std::printf("[+] Phase 16.c.epsilon: PASS — DllMain returned cleanly\n");
-    llog("invoke_dllmain SUCCEEDED\n");
+    DWORD lowest_tid = 0xFFFFFFFF;
+    std::vector<DWORD> game_tids;
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(hSnap, &te)) {
+        do {
+            if (te.th32OwnerProcessID == game_pid) {
+                game_tids.push_back(te.th32ThreadID);
+                if (te.th32ThreadID < lowest_tid)
+                    lowest_tid = te.th32ThreadID;
+            }
+        } while (Thread32Next(hSnap, &te));
+    }
+    CloseHandle(hSnap);
+
+    if (game_tids.size() < 2) {
+        llog("FAIL: not enough threads (found %zu)\n", game_tids.size());
+        std::printf("[!] Phase 16.d: need at least 2 game threads, found %zu\n",
+                    game_tids.size());
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+
+    DWORD target_tid = 0;
+    for (DWORD tid : game_tids) {
+        if (tid != lowest_tid) { target_tid = tid; break; }
+    }
+    llog("thread hijack: target_tid=%u (skipped main=%u, total=%zu)\n",
+        target_tid, lowest_tid, game_tids.size());
+    std::printf("[+] Phase 16.d: hijacking TID %u (skipped main TID %u, %zu total)\n",
+                target_tid, lowest_tid, game_tids.size());
+
+    // (6-9) Suspend, save context, hijack RIP, resume.
+    HANDLE hThread = OpenThread(
+        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+        FALSE, target_tid);
+    if (!hThread) {
+        llog("FAIL: OpenThread %u err=%lu\n", target_tid, GetLastError());
+        std::printf("[!] Phase 16.d: OpenThread FAIL (err=%lu)\n", GetLastError());
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+
+    SuspendThread(hThread);
+    llog("thread suspended\n");
+
+    CONTEXT saved = {};
+    saved.ContextFlags = CONTEXT_ALL;
+    if (!GetThreadContext(hThread, &saved)) {
+        llog("FAIL: GetThreadContext err=%lu\n", GetLastError());
+        std::printf("[!] Phase 16.d: GetThreadContext FAIL (err=%lu)\n", GetLastError());
+        ResumeThread(hThread);
+        CloseHandle(hThread);
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+    llog("saved RIP=%016llX RSP=%016llX\n",
+        (unsigned long long)saved.Rip, (unsigned long long)saved.Rsp);
+
+    CONTEXT hijacked = saved;
+    hijacked.Rip = sc_base;
+    if (!SetThreadContext(hThread, &hijacked)) {
+        llog("FAIL: SetThreadContext err=%lu\n", GetLastError());
+        std::printf("[!] Phase 16.d: SetThreadContext FAIL (err=%lu)\n", GetLastError());
+        ResumeThread(hThread);
+        CloseHandle(hThread);
+        cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+    llog("RIP redirected to %016llX\n", (unsigned long long)sc_base);
+
+    ResumeThread(hThread);
+    llog("thread resumed — shellcode running\n");
+    std::printf("[+] Phase 16.d: thread resumed — shellcode executing\n");
+
+    // (10) Poll marker (50 ms interval, 10 s timeout).
+    const uint32_t POLL_INTERVAL = 50;
+    const uint32_t POLL_TIMEOUT  = 10000;
+    const uint32_t MAX_POLLS     = POLL_TIMEOUT / POLL_INTERVAL;
+
+    bool fired = false;
+    uint32_t elapsed = 0;
+    for (uint32_t i = 0; i < MAX_POLLS; ++i) {
+        Sleep(POLL_INTERVAL);
+        elapsed += POLL_INTERVAL;
+        uint32_t mark = 0;
+        if (!cmdchannel::read_memory(game_pid, marker_va,
+                                     reinterpret_cast<uint64_t>(&mark), 4)) {
+            llog("marker read failed at poll %u\n", i);
+            std::printf("[!] Phase 16.d: marker READ failed\n");
+            break;
+        }
+        if (mark == 0xCAFEBABEu) {
+            llog("MARKER 0xCAFEBABE seen after %u ms\n", elapsed);
+            std::printf("[+] Phase 16.d: MARKER 0xCAFEBABE after %u ms — DllMain returned\n",
+                        elapsed);
+            fired = true;
+            break;
+        }
+        if (i < 5 || (i % 20 == 0)) {
+            llog("poll %u/%u: marker=0x%08X\n", i, MAX_POLLS, mark);
+        }
+    }
+    if (!fired) {
+        llog("TIMEOUT: DllMain did NOT complete in %u ms\n", POLL_TIMEOUT);
+        std::printf("[!] Phase 16.d: timeout — DllMain did NOT complete within %u ms\n",
+                    POLL_TIMEOUT);
+    }
+
+    // (11-14) Restore thread context regardless of marker result.
+    SuspendThread(hThread);
+    llog("thread re-suspended for context restore\n");
+
+    if (!SetThreadContext(hThread, &saved)) {
+        llog("WARNING: context restore failed err=%lu\n", GetLastError());
+        std::printf("[!] Phase 16.d: WARNING — context restore failed (err=%lu)\n",
+                    GetLastError());
+    } else {
+        llog("context restored: RIP=%016llX RSP=%016llX\n",
+            (unsigned long long)saved.Rip, (unsigned long long)saved.Rsp);
+    }
+
+    ResumeThread(hThread);
+    CloseHandle(hThread);
+    llog("thread released\n");
+    std::printf("[+] Phase 16.d: thread context restored + released\n");
+
+    // (15) Scrub shellcode page.
+    std::vector<uint8_t> sc_zero(0x1000, 0);
+    cmdchannel::write_memory(game_pid, sc_base,
+                             reinterpret_cast<uint64_t>(sc_zero.data()), 0x1000);
+    cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+    llog("shellcode page scrubbed + freed\n");
+    std::printf("[+] Phase 16.d: shellcode page scrubbed + freed\n");
+
+    if (!fired) {
+        std::printf("[!] Phase 16.d: FAIL — scrubbing Stage 2 region\n");
+        cmdchannel::free_memory(game_pid, parking_base, 0, 0x8000);
+        return 19;
+    }
+
+    std::printf("[+] Phase 16.d: PASS — DllMain returned cleanly\n");
+    llog("Phase 16.d SUCCEEDED\n");
     llog("Stage 2 LIVE at %016llX entry=%016llX\n",
         (unsigned long long)parking_base, (unsigned long long)(parking_base + parsed.entry_rva));
-    std::printf("[*] Stage 2 is LIVE in RTSS parking. Init thread running on game render thread.\n");
+    std::printf("[*] Stage 2 is LIVE. Init thread completed via direct thread hijack.\n");
     std::printf("[*] State machine: PROBING (widget vtable hunt in progress)\n");
     std::printf("[*] Expected: red box appears at screen (100,100) once target widget found (~0.5 s)\n");
     std::printf("[*] Launcher exits now. Stage 2 persists until game process exits.\n");
