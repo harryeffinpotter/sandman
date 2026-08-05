@@ -103,6 +103,8 @@ std::atomic<int> g_entityCount{0};
 
 std::string g_nameFilter;
 int g_scrollOffset = 0;
+std::unordered_set<std::string> g_hiddenNames;
+std::vector<std::string> g_hiddenPrefixes = { "Mob", "walker_", "EXPEDITION_WALKER" };
 
 Hook g_executeHook;
 fn_execute g_original_execute = nullptr;
@@ -206,7 +208,16 @@ void resolve_all(HMODULE ga, IL2CPP_API& api) {
 
 static bool is_readable(const void* ptr, size_t len) {
     if (!ptr) return false;
-    return !IsBadReadPtr(ptr, len);
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (!VirtualQuery(ptr, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    DWORD prot = mbi.Protect & 0xFF;
+    if (!(prot == PAGE_READONLY || prot == PAGE_READWRITE ||
+          prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE ||
+          prot == PAGE_WRITECOPY || prot == PAGE_EXECUTE_WRITECOPY))
+        return false;
+    uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    return ((uintptr_t)ptr + len) <= regionEnd;
 }
 
 static bool is_valid_obj(void* ptr) {
@@ -865,7 +876,13 @@ void __fastcall hooked_execute(void* thisPtr) {
     }
 
     if (!g_permaLockActive.load() || g_lockedEntityId.load() < 0) return;
-    force_interact_target(thisPtr, g_lockedEntityId.load());
+
+    int targetId = g_lockedEntityId.load();
+    uintptr_t targetPtr = g_lockedEntityPtr.load();
+    if (targetPtr && !is_readable((void*)targetPtr, 0x58))
+        return;
+
+    force_interact_target(thisPtr, targetId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1321,7 @@ void scan_entities() {
         int entitiesPushed = 0;
         int dbgReadable = 0, dbgValidObj = 0, dbgEnabled = 0, dbgHasBP = 0;
         int dbgNameOK = 0, dbgPassFilter = 0, dbgHasPosParent = 0;
+        int heldCount = 0, resolvedParentCount = 0;
         for (int e = 0; e < entityCount; e++) {
             void* entity = entityPtrs[e];
             if (!is_readable(entity, 0x68)) continue;
@@ -1362,6 +1380,7 @@ void scan_entities() {
             }
             info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
             info.isHeldByPlayer = hasParent;
+            if (hasParent) heldCount++;
             info.hasOwnPosition = (posComp != nullptr);
             info.hasViewPos = false;
             info.velX = 0; info.velY = 0; info.velZ = 0;
@@ -1389,6 +1408,7 @@ void scan_entities() {
                         if (parentPos) {
                             resolvedPos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
                             hasResolvedPos = true;
+                            resolvedParentCount++;
                         }
                     }
                 }
@@ -1433,6 +1453,8 @@ void scan_entities() {
 
         if (doLog) wlog("[scan] readable=%d validObj=%d enabled=%d hasBP=%d nameOK=%d passFilter=%d hasPosParent=%d pushed=%d\n",
                         dbgReadable, dbgValidObj, dbgEnabled, dbgHasBP, dbgNameOK, dbgPassFilter, dbgHasPosParent, entitiesPushed);
+        if (doLog) wlog("[scan] heldItems=%d resolvedParents=%d idToEntitySize=%d\n",
+                        heldCount, resolvedParentCount, (int)idToEntity.size());
 
         {
             static int s_itemCountLogCount = 0;
@@ -1463,6 +1485,9 @@ void scan_entities() {
         std::vector<size_t> order(itemCount);
         for (size_t i = 0; i < itemCount; i++) order[i] = i;
         std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            bool hA = items[a].isHeldByPlayer;
+            bool hB = items[b].isHeldByPlayer;
+            if (hA != hB) return hA;
             if (items[a].distance < 0) return false;
             if (items[b].distance < 0) return true;
             return items[a].distance < items[b].distance;
@@ -1482,13 +1507,40 @@ void scan_entities() {
 
         if (g_dupeMode.load() && !g_stickyLock.load()) {
             EnterCriticalSection(&g_itemsLock);
-            if (!g_items.empty()) {
-                auto& top = g_items[0];
-                g_permaLockName = top.name;
+            bool wf = g_weaponFilter.load();
+            std::string filter = g_nameFilter;
+            for (size_t i = 0; i < g_items.size(); i++) {
+                auto& it = g_items[i];
+                if (wf && !it.isWeapon) continue;
+                if (g_hiddenNames.count(it.name)) continue;
+                bool prefixHidden = false;
+                for (auto& p : g_hiddenPrefixes) {
+                    if (it.name.rfind(p, 0) == 0) { prefixHidden = true; break; }
+                }
+                if (prefixHidden) continue;
+                if (!filter.empty()) {
+                    bool found = false;
+                    size_t nlen = filter.size();
+                    size_t hlen = it.name.size();
+                    if (nlen <= hlen) {
+                        for (size_t s = 0; s <= hlen - nlen; s++) {
+                            bool match = true;
+                            for (size_t c = 0; c < nlen; c++) {
+                                if (tolower((unsigned char)it.name[s+c]) != tolower((unsigned char)filter[c])) {
+                                    match = false; break;
+                                }
+                            }
+                            if (match) { found = true; break; }
+                        }
+                    }
+                    if (!found) continue;
+                }
+                g_permaLockName = it.name;
                 g_permaLockActive.store(true);
-                int lockId = (top.serverId > 0) ? top.serverId : top.entityId;
+                int lockId = (it.serverId > 0) ? it.serverId : it.entityId;
                 g_lockedEntityId.store(lockId);
-                g_lockedEntityPtr.store((uintptr_t)top.entityPtr);
+                g_lockedEntityPtr.store((uintptr_t)it.entityPtr);
+                break;
             }
             LeaveCriticalSection(&g_itemsLock);
         }

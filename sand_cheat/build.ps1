@@ -18,7 +18,7 @@ $sources = @(
     "imgui\imgui_impl_win32.cpp"
 )
 
-cl /EHa /O2 /MT /LD /std:c++17 /Zi @sources /Fe:sand_cheat.dll /link /DEBUG /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib
+cl /EHa /O2 /MT /LD /std:c++17 /Zi @sources /Fe:sand_cheat.dll /link /DEBUG /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib dcomp.lib
 
 if ($LASTEXITCODE -eq 0) {
     Copy-Item -Force "sand_cheat.dll" "launcher\sand_cheat.dll"

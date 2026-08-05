@@ -7,6 +7,7 @@
 #include <vector>
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 
 // ---------------------------------------------------------------------------
 // IL2CPP function pointer typedefs
@@ -227,6 +228,8 @@ extern std::atomic<int> g_entityCount;
 
 extern std::string g_nameFilter;
 extern int g_scrollOffset;
+extern std::unordered_set<std::string> g_hiddenNames;
+extern std::vector<std::string> g_hiddenPrefixes;
 
 extern Hook g_executeHook;
 extern fn_execute g_original_execute;

@@ -36,6 +36,19 @@ static void tlog(const char* fmt, ...) {
     fflush(f); fclose(f);
 }
 
+static FILE* open_crash_log(const char* mode = "a") {
+    const char* path = CRASH_DIR "crash_info.txt";
+    if (mode[0] == 'a') {
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        if (GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
+            ULONGLONG size = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (size > 10 * 1024 * 1024)
+                return fopen(path, "w");
+        }
+    }
+    return fopen(path, mode);
+}
+
 volatile DWORD g_workerThreadId = 0;
 volatile DWORD g_renderThreadId = 0;
 static volatile int g_exceptionCount = 0;
@@ -217,6 +230,19 @@ static void write_minidump(EXCEPTION_POINTERS* ep) {
     CloseHandle(hFile);
 }
 
+static uintptr_t g_isbadreadptr_start = 0;
+static uintptr_t g_isbadreadptr_end   = 0;
+
+static void cache_isbadreadptr_range() {
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    if (!k32) return;
+    auto fn = reinterpret_cast<uintptr_t>(GetProcAddress(k32, "IsBadReadPtr"));
+    if (fn) {
+        g_isbadreadptr_start = fn;
+        g_isbadreadptr_end   = fn + 0x80;
+    }
+}
+
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
     if (hwbp_handle_exception(ep))
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -230,6 +256,12 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
     if (code == 0x40010006) return EXCEPTION_CONTINUE_SEARCH;
     if (code == 0x80000003) return EXCEPTION_CONTINUE_SEARCH;
     if (code == 0x80000004) return EXCEPTION_CONTINUE_SEARCH;
+
+    if (code == 0xC0000005 && g_isbadreadptr_start) {
+        uintptr_t rip = (uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+        if (rip >= g_isbadreadptr_start && rip < g_isbadreadptr_end)
+            return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     if (code == 0xC0000005 && GetCurrentThreadId() == g_workerThreadId && g_workerVehActive) {
         g_workerVehActive = false;
@@ -248,7 +280,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
 
     if (code == 0xC0000005 && GetCurrentThreadId() == g_renderThreadId && g_renderThreadId != 0) {
         g_overlayDisabled = true;
-        FILE* rf = fopen(CRASH_DIR "crash_info.txt", "a");
+        FILE* rf = open_crash_log();
         if (rf) {
             fprintf(rf, "\n!!! RENDER THREAD AV — overlay disabled !!!\n\n");
             write_full_crash(rf, ep);
@@ -256,7 +288,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
         }
     }
 
-    FILE* f = fopen(CRASH_DIR "crash_info.txt", "a");
+    FILE* f = open_crash_log();
     if (f) {
         write_full_crash(f, ep);
         fclose(f);
@@ -274,7 +306,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
 
 static LONG WINAPI final_crash_handler(EXCEPTION_POINTERS* ep) {
     if (InterlockedCompareExchange(&g_dumpWritten, 1, 0) == 0) {
-        FILE* f = fopen(CRASH_DIR "crash_info.txt", "a");
+        FILE* f = open_crash_log();
         if (f) {
             fprintf(f, "\n\n!!! UNHANDLED EXCEPTION - PROCESS DYING !!!\n\n");
             write_full_crash(f, ep);
@@ -286,7 +318,7 @@ static LONG WINAPI final_crash_handler(EXCEPTION_POINTERS* ep) {
 }
 
 static void on_terminate() {
-    FILE* f = fopen(CRASH_DIR "crash_info.txt", "a");
+    FILE* f = open_crash_log();
     if (f) {
         fprintf(f, "\n!!! std::terminate called on thread %lu !!!\n", GetCurrentThreadId());
         fflush(f); fclose(f);
@@ -295,7 +327,7 @@ static void on_terminate() {
 }
 
 static void on_abort_signal(int) {
-    FILE* f = fopen(CRASH_DIR "crash_info.txt", "a");
+    FILE* f = open_crash_log();
     if (f) {
         fprintf(f, "\n!!! SIGABRT on thread %lu !!!\n", GetCurrentThreadId());
         fflush(f); fclose(f);
@@ -326,7 +358,16 @@ static void safe_scan_tick(int scanCounter) {
 
 static bool is_readable(const void* ptr, size_t len) {
     if (!ptr) return false;
-    return !IsBadReadPtr(ptr, len);
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (!VirtualQuery(ptr, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    DWORD prot = mbi.Protect & 0xFF;
+    if (!(prot == PAGE_READONLY || prot == PAGE_READWRITE ||
+          prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE ||
+          prot == PAGE_WRITECOPY || prot == PAGE_EXECUTE_WRITECOPY))
+        return false;
+    uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    return ((uintptr_t)ptr + len) <= regionEnd;
 }
 
 static void* safe_find_execute(const IL2CPP_API* api, uintptr_t ga_base) {
@@ -407,8 +448,10 @@ static DWORD WINAPI worker_thread(LPVOID) {
     std::set_terminate(on_terminate);
     signal(SIGABRT, on_abort_signal);
     tlog("exception handlers installed\n");
+    cache_isbadreadptr_range();
     AddVectoredExceptionHandler(1, crash_handler);
-    tlog("VEH crash_handler installed\n");
+    tlog("VEH crash_handler installed (IsBadReadPtr filter: %016llX-%016llX)\n",
+         (unsigned long long)g_isbadreadptr_start, (unsigned long long)g_isbadreadptr_end);
     {
         FILE* f = fopen(CRASH_DIR "crash_info.txt", "w");
         if (f) { fprintf(f, "=== Session started ===\n\n"); fflush(f); fclose(f); }

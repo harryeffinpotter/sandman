@@ -121,7 +121,7 @@ bool prompt_for_dll(const std::string& default_path, std::string& out_path) {
     wc.hInstance     = hi;
     wc.lpszClassName = cls;
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.hCursor       = LoadCursorA(nullptr, IDC_ARROW);
+    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     // Re-register tolerantly — if a prior call registered the class, reuse.
     if (!RegisterClassA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;
