@@ -1,5 +1,5 @@
 #define IDR_WINIO64      101
 #define IDR_KERNELDRIVER  102
 
-IDR_WINIO64      RCDATA "..\\cpuz_enc.bin"
+IDR_WINIO64      RCDATA "..\\iqvw64_enc.bin"
 IDR_KERNELDRIVER  RCDATA "..\\kerneldriver_enc.bin"

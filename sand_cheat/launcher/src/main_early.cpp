@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <tlhelp32.h>
+#include <conio.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -142,6 +143,12 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
     banner();
 
+    auto bail = [](int code) -> int {
+        std::printf("\n[*] press any key to exit...\n");
+        _getch();
+        return code;
+    };
+
     {
         FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", "w");
         if (f) { fprintf(f, "=== LAUNCHER (EARLY) START ===\ntick=%lu pid=%lu\n", GetTickCount(), GetCurrentProcessId()); fflush(f); fclose(f); }
@@ -149,12 +156,12 @@ int main(int argc, char* argv[]) {
 
     if (!is_elevated()) {
         std::printf("[!] not elevated — NtLoadDriver will fail. Run as administrator.\n");
-        return 2;
+        return bail(2);
     }
 
     if (!ntapi::init()) {
         std::printf("[!] ntapi::init failed (ntdll resolve)\n");
-        return 3;
+        return bail(3);
     }
 
     // Preflight: HVCI check
@@ -171,7 +178,7 @@ int main(int argc, char* argv[]) {
             std::printf("[!] Disable HVCI to proceed:\n");
             std::printf("[!]   Windows Security -> Device security -> Core isolation\n");
             std::printf("[!]     -> toggle \"Memory integrity\" OFF, then reboot.\n\n");
-            return 5;
+            return bail(5);
         }
     }
 
@@ -191,41 +198,38 @@ int main(int argc, char* argv[]) {
         std::printf("[!]       -> State must be \"Stopped\"\n");
         std::printf("[!]       fltmc.exe filters\n");
         std::printf("[!]       -> WdFilter must not appear in the list\n\n");
-        return 4;
+        return bail(4);
     }
     std::printf("[+] preflight: WdFilter.sys not loaded — safe to proceed\n");
 
-    // Preflight: check if kernel driver is already alive
+    // Always remap — the running driver may be stale (missing new commands).
+    // New HAL hook overwrites the old one; leaked kernel memory is negligible.
     bool driver_already_up = false;
-    if (cmdchannel::init()) {
-        volatile unsigned char pf_heartbeat = 0;
-        uint64_t pf_target = reinterpret_cast<uint64_t>(
-            const_cast<unsigned char*>(&pf_heartbeat));
-        (void)cmdchannel::heartbeat(pf_target);
-        if (pf_heartbeat == 1) {
-            driver_already_up = true;
-        }
-    }
-    if (driver_already_up) {
-        std::printf("[+] preflight: kernel driver ALREADY ALIVE (heartbeat returned 0x01)\n");
-        std::printf("[*] skipping BYOVD drop + manual-map + HAL-hook install\n\n");
-    } else {
-    std::printf("[*] preflight: kernel driver not present — proceeding with full BYOVD + install\n");
+    std::printf("[*] proceeding with full BYOVD + driver install (always remaps)\n");
 
     std::vector<uint8_t> directio;
     std::vector<uint8_t> kdriver;
 
-    if (!load_embedded_blob(IDR_WINIO64, directio)) return 1;
-    if (!load_embedded_blob(IDR_KERNELDRIVER, kdriver)) return 1;
+    if (!load_embedded_blob(IDR_WINIO64, directio)) return bail(1);
+    if (!load_embedded_blob(IDR_KERNELDRIVER, kdriver)) return bail(1);
 
     std::printf("[+] loaded WinIo64 blob: %zu bytes (encrypted)\n", directio.size());
     std::printf("[+] loaded kerneldriver blob: %zu bytes (encrypted)\n", kdriver.size());
 
     byovd::Context byovd_ctx;
 
-    if (!byovd::decrypt_and_drop(directio, byovd_ctx)) return 10;
-    if (!byovd::load_service(byovd_ctx))               { byovd::unload(byovd_ctx); return 11; }
-    if (!byovd::open_device(byovd_ctx))                { byovd::unload(byovd_ctx); return 12; }
+    if (!byovd::decrypt_and_drop(directio, byovd_ctx)) {
+        std::printf("[!] BYOVD decrypt_and_drop failed (err=%lu)\n", GetLastError());
+        return bail(10);
+    }
+    if (!byovd::load_service(byovd_ctx)) {
+        std::printf("[!] BYOVD load_service failed (err=%lu)\n", GetLastError());
+        byovd::unload(byovd_ctx); return bail(11);
+    }
+    if (!byovd::open_device(byovd_ctx)) {
+        std::printf("[!] BYOVD open_device failed (err=%lu)\n", GetLastError());
+        byovd::unload(byovd_ctx); return bail(12);
+    }
 
     std::printf("[*] BYOVD fully up — device handle ready.\n");
 
@@ -391,7 +395,7 @@ int main(int argc, char* argv[]) {
                                             allocated)) {
                                         std::printf("[!] apply_section_protection failed — skipping DriverEntry call\n");
                                         byovd::unload(byovd_ctx);
-                                        return 30;
+                                        return bail(30);
                                     }
 
                                     auto* dos12 = reinterpret_cast<IMAGE_DOS_HEADER*>(
@@ -537,7 +541,6 @@ int main(int argc, char* argv[]) {
 
     std::printf("[*] unloading BYOVD — cheat driver persists in kernel memory\n");
     byovd::unload(byovd_ctx);
-    }  // end else (driver_already_up == false)
 
     // =====================================================================
     // Early-inject path: arm image-load notify, wait for game, inject DLL
@@ -579,7 +582,7 @@ int main(int argc, char* argv[]) {
                     default_dll_path.c_str());
         if (!ui::prompt_for_dll(default_dll_path, picked_path)) {
             std::printf("[*] inject cancelled by operator\n");
-            return 0;
+            return bail(0);
         }
         std::printf("[+] selected Stage 2: %s\n", picked_path.c_str());
         llog("selected DLL: %s\n", picked_path.c_str());
@@ -594,7 +597,7 @@ int main(int argc, char* argv[]) {
                                 nullptr, OPEN_EXISTING, 0, nullptr);
         if (fh == INVALID_HANDLE_VALUE) {
             std::printf("[!] cannot open '%s' (err=%lu)\n", stage2_path, GetLastError());
-            return 12;
+            return bail(12);
         }
         LARGE_INTEGER sz{};
         GetFileSizeEx(fh, &sz);
@@ -604,7 +607,7 @@ int main(int argc, char* argv[]) {
         CloseHandle(fh);
         if (got != stage2.size()) {
             std::printf("[!] short read %lu/%zu\n", got, stage2.size());
-            return 12;
+            return bail(12);
         }
         std::printf("[+] loaded Stage 2: %zu bytes\n", stage2.size());
         llog("loaded DLL: %zu bytes\n", stage2.size());
@@ -615,7 +618,7 @@ int main(int argc, char* argv[]) {
     if (!parse_stage2::parse(stage2.data(), stage2.size(), parsed)) {
         llog("FAIL: parse_stage2::parse\n");
         std::printf("[!] parse FAIL\n");
-        return 13;
+        return bail(13);
     }
     llog("parse OK: image_base=%016llX size_of_image=%u entry_rva=%08X sections=%u\n",
         (unsigned long long)parsed.image_base, parsed.size_of_image, parsed.entry_rva,
@@ -624,7 +627,7 @@ int main(int argc, char* argv[]) {
     // Arm image-load notify
     if (!cmdchannel::arm_image_notify(L"sand_be.exe")) {
         std::printf("[!] arm_image_notify failed\n");
-        return 20;
+        return bail(20);
     }
     std::printf("[*] Waiting for game to launch... (start the game now)\n");
     llog("armed image-load notify for sand_be.exe\n");
@@ -644,7 +647,7 @@ int main(int argc, char* argv[]) {
     }
     if (game_pid == 0) {
         std::printf("[!] timeout — game did not launch within 120 s\n");
-        return 21;
+        return bail(21);
     }
     std::printf("[+] game launched: PID %u\n", game_pid);
     llog("game PID=%u\n", game_pid);
@@ -660,7 +663,7 @@ int main(int argc, char* argv[]) {
                                    0x3000, 0x04, &stage2_base)) {
         llog("FAIL: alloc_memory for stage2\n");
         std::printf("[!] Stage 2 memory allocation failed\n");
-        return 14;
+        return bail(14);
     }
     std::printf("[*] stage2 alloc: base=%016llX size=0x%X\n",
                 static_cast<unsigned long long>(stage2_base), alloc_size);
@@ -674,7 +677,7 @@ int main(int argc, char* argv[]) {
         llog("FAIL: resolve_imports\n");
         std::printf("[!] import resolve FAIL\n");
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 15;
+        return bail(15);
     }
     llog("resolve_imports OK: dlls_found=%d dlls_missing=%d symbols_ok=%d symbols_missed=%d\n",
         ri.dlls_found, ri.dlls_missing, ri.symbols_ok, ri.symbols_missed);
@@ -687,7 +690,7 @@ int main(int argc, char* argv[]) {
         llog("FAIL: process_relocations\n");
         std::printf("[!] relocation FAIL\n");
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 16;
+        return bail(16);
     }
     llog("relocations OK: fixups=%d\n", fixups);
 
@@ -704,7 +707,7 @@ int main(int argc, char* argv[]) {
             llog("FAIL: write PE headers\n");
             std::printf("[!] PE header write FAIL\n");
             cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-            return 17;
+            return bail(17);
         }
         std::printf("[+] PE headers written (%u bytes)\n", hdr_size);
         llog("PE headers written: %u bytes\n", hdr_size);
@@ -717,7 +720,7 @@ int main(int argc, char* argv[]) {
         llog("FAIL: write_and_protect\n");
         std::printf("[!] write+protect FAIL\n");
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 17;
+        return bail(17);
     }
 
     // Clear NX on executable sections via PTE
@@ -734,7 +737,7 @@ int main(int argc, char* argv[]) {
             llog("FAIL: set_pte_nx for section '%s'\n", s.name);
             std::printf("[!] PTE NX clear failed for '%s'\n", s.name);
             cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-            return 17;
+            return bail(17);
         }
         std::printf("[+] PTE NX cleared for '%s' va=%016llX size=%u\n",
                     s.name, static_cast<unsigned long long>(dst), sz);
@@ -751,7 +754,7 @@ int main(int argc, char* argv[]) {
         llog("FAIL: alloc shellcode page\n");
         std::printf("[!] shellcode page allocation failed\n");
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 22;
+        return bail(22);
     }
     std::printf("[*] shellcode page: %016llX\n",
                 static_cast<unsigned long long>(sc_base));
@@ -790,7 +793,7 @@ int main(int argc, char* argv[]) {
         std::printf("[!] shellcode write FAIL\n");
         cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 22;
+        return bail(22);
     }
 
     // Clear NX on shellcode page
@@ -799,7 +802,7 @@ int main(int argc, char* argv[]) {
         std::printf("[!] PTE NX clear failed for shellcode page\n");
         cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 22;
+        return bail(22);
     }
     std::printf("[+] shellcode page NX cleared\n");
 
@@ -810,7 +813,7 @@ int main(int argc, char* argv[]) {
         std::printf("[!] create_remote_thread FAIL\n");
         cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
-        return 23;
+        return bail(23);
     }
     std::printf("[+] remote thread created: TID %u\n", tid);
     llog("remote thread TID=%u\n", tid);
@@ -842,7 +845,7 @@ int main(int argc, char* argv[]) {
             llog("TIMEOUT: DllMain did NOT complete in %u ms\n", TIMEOUT);
             std::printf("[!] timeout — DllMain did NOT complete within %u ms\n", TIMEOUT);
             cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
-            return 24;
+            return bail(24);
         }
     }
 
@@ -858,5 +861,5 @@ int main(int argc, char* argv[]) {
     std::printf("[*] Launcher exits now. Stage 2 persists until game process exits.\n");
     llog("=== LAUNCHER (EARLY) COMPLETE ===\n");
 
-    return 0;
+    return bail(0);
 }

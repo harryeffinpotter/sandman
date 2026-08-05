@@ -27,11 +27,11 @@ function Encrypt-RollingXor([byte[]]$data) {
     return $data
 }
 
-$cpuzPath = "C:\Users\ysg\projects\Vulnerable Drivers\cpuz_sys\cpuz.sys"
+$cpuzPath = "C:\Users\ysg\projects\Vulnerable Drivers\iQVW64_SYS\iQVW64.SYS"
 $kdrvPath = "$PWD\kerneldriver.sys"
 
 foreach ($pair in @(
-    @($cpuzPath, "$PWD\cpuz_enc.bin", "cpuz.sys"),
+    @($cpuzPath, "$PWD\iqvw64_enc.bin", "iQVW64.SYS"),
     @($kdrvPath, "$PWD\kerneldriver_enc.bin", "kerneldriver.sys")
 )) {
     $src, $dst, $label = $pair

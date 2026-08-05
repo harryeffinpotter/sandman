@@ -1,4 +1,4 @@
-// ioctl.h -- cpuz.sys physmem wrapper.
+// ioctl.h -- iQVW64.SYS (Intel NAL) physmem wrapper.
 //
 // Public API: read_physical, write_physical, get_pml4_phys.
 
@@ -9,15 +9,18 @@
 
 namespace ioctl {
 
-constexpr DWORD IOCTL_CPUZ_READ  = 0x9C402428;
-constexpr DWORD IOCTL_CPUZ_WRITE = 0x9C402430;
+constexpr DWORD IOCTL_NAL = 0x80862007;
+constexpr uint64_t NAL_CASE_COPY  = 0x33;
+constexpr uint64_t NAL_CASE_MAP   = 0x19;
+constexpr uint64_t NAL_CASE_UNMAP = 0x1A;
 
 #pragma pack(push, 1)
-struct CpuzReadWriteInput {
-    DWORD_PTR address;
-    DWORD     length;
-    DWORD_PTR buffer;
-    DWORD     pad;
+struct NalCopyInput {
+    uint64_t case_number;
+    uint64_t reserved;
+    uint64_t source;
+    uint64_t destination;
+    uint64_t length;
 };
 #pragma pack(pop)
 

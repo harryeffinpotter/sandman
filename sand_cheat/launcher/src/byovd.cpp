@@ -165,7 +165,7 @@ bool load_service(Context& ctx) {
 }
 
 bool open_device(Context& ctx) {
-    const wchar_t* dev_path = L"\\\\.\\cpuz141";
+    const wchar_t* dev_path = L"\\\\.\\Nal";
 
     ctx.device = CreateFileW(
         dev_path,
