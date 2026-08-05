@@ -1,6 +1,7 @@
 #include "cheat.h"
 
 #include <cstdio>
+#include <cstdarg>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -10,6 +11,16 @@
 #include <atomic>
 #include <unordered_map>
 #include <tlhelp32.h>
+
+static void wlog(const char* fmt, ...) {
+    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\worker_debug.txt", "a");
+    if (!f) return;
+    fprintf(f, "[%lu] ", GetTickCount());
+    va_list a; va_start(a, fmt);
+    vfprintf(f, fmt, a);
+    va_end(a);
+    fflush(f); fclose(f);
+}
 
 // ---------------------------------------------------------------------------
 // RESOLVE macro
@@ -836,17 +847,14 @@ void __fastcall hooked_execute(void* thisPtr) {
             g_gameContextModule = gameModule;
     }
 
-    __try {
-        ((fn_execute)g_hwbpHooks[0].trampoline)(thisPtr);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-
-    if (thisPtr != (void*)g_findInteractSystem) return;
-
     if (g_heavyBypass.load() && g_idx_large_item >= 0) {
         void* ent = (void*)g_lockedEntityPtr.load();
         if (ent) strip_component(ent, g_idx_large_item);
+    }
+
+    __try {
+        ((fn_execute)g_hwbpHooks[0].trampoline)(thisPtr);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
     }
 
     if (!g_permaLockActive.load() || g_lockedEntityId.load() < 0) return;
@@ -947,13 +955,26 @@ static std::string get_display_name(const std::string& raw) {
 // scan_entities
 // ---------------------------------------------------------------------------
 void scan_entities() {
+    static int s_wlogTick = 0;
+    bool doLog = (++s_wlogTick % 20 == 1);
+
     void* gcm = (void*)g_gameContextModule;
-    if (!gcm) return;
+    if (!gcm) {
+        if (doLog) wlog("[scan] gcm=null, hwbpActive=%d, executeHookCalls=%d\n",
+                        g_hwbpActive.load() ? 1 : 0, g_executeHookCalls.load());
+        return;
+    }
 
     {
         void* context = nullptr;
-        if (!safe_read_ptr((void*)((uintptr_t)gcm + 0x10), &context)) return;
-        if (!is_readable(context, 0xA0)) return;
+        if (!safe_read_ptr((void*)((uintptr_t)gcm + 0x10), &context)) {
+            if (doLog) wlog("[scan] context read failed gcm=%p\n", gcm);
+            return;
+        }
+        if (!is_readable(context, 0xA0)) {
+            if (doLog) wlog("[scan] context not readable context=%p\n", context);
+            return;
+        }
 
         void* cache = *(void**)((uintptr_t)context + 0x98);
         void** entityPtrs = nullptr;
@@ -988,6 +1009,9 @@ void scan_entities() {
         }
 
         g_entityCount.store(entityCount);
+        if (doLog) wlog("[scan] entityCount=%d source=%s cache=%p context=%p\n",
+                        entityCount, is_readable(cache, 0x20) ? "cache+0x98" : "hashSet+0x58",
+                        cache, context);
 
         static bool s_diagDone = false;
         if (!s_diagDone && entityCount > 0 && entityPtrs) {
@@ -1270,19 +1294,27 @@ void scan_entities() {
         int vehEntityRecoveries = 0;
         int entitiesSkippedFilter = 0;
         int entitiesPushed = 0;
+        int dbgReadable = 0, dbgValidObj = 0, dbgEnabled = 0, dbgHasBP = 0;
+        int dbgNameOK = 0, dbgPassFilter = 0, dbgHasPosParent = 0;
         for (int e = 0; e < entityCount; e++) {
             void* entity = entityPtrs[e];
-            if (!is_readable(entity, 0x68) || !is_valid_obj(entity)) continue;
+            if (!is_readable(entity, 0x68)) continue;
+            dbgReadable++;
+            if (!is_valid_obj(entity)) continue;
+            dbgValidObj++;
 
             bool isEnabled = *(bool*)((uintptr_t)entity + 0x4C);
             if (!isEnabled) continue;
+            dbgEnabled++;
 
             void* bpComp = get_component(entity, g_idx_blueprint);
             if (!is_readable(bpComp, 0x18)) continue;
+            dbgHasBP++;
 
             void* nameStr = *(void**)((uintptr_t)bpComp + 0x10);
             std::string name = read_il2cpp_string(nameStr);
             if (name.empty()) continue;
+            dbgNameOK++;
 
             int eid = *(int*)((uintptr_t)entity + 0x48);
             if (eid == playerEntityId) continue;
@@ -1295,10 +1327,12 @@ void scan_entities() {
             if (name.rfind("walker_", 0) == 0) continue;
             if (name == "Sun") continue;
             if (name.rfind("LandingCutScene", 0) == 0) continue;
+            dbgPassFilter++;
 
             void* posComp = get_component(entity, g_idx_position);
             bool hasParent = (g_idx_parent >= 0 && get_component(entity, g_idx_parent));
             if (!posComp && !hasParent) continue;
+            dbgHasPosParent++;
 
             ItemInfo info;
             info.name = name;
@@ -1375,6 +1409,9 @@ void scan_entities() {
             items.push_back(std::move(info));
         }
 
+        if (doLog) wlog("[scan] readable=%d validObj=%d enabled=%d hasBP=%d nameOK=%d passFilter=%d hasPosParent=%d pushed=%d\n",
+                        dbgReadable, dbgValidObj, dbgEnabled, dbgHasBP, dbgNameOK, dbgPassFilter, dbgHasPosParent, entitiesPushed);
+
         {
             static int s_itemCountLogCount = 0;
             if (s_itemCountLogCount < 3) {
@@ -1418,6 +1455,8 @@ void scan_entities() {
         if (havePlayerPos) g_playerPos = playerPos;
         g_items = std::move(items);
         LeaveCriticalSection(&g_itemsLock);
+        if (doLog) wlog("[scan] g_items=%d havePlayerPos=%d playerEid=%d\n",
+                        (int)itemCount, havePlayerPos ? 1 : 0, playerEntityId);
 
         if (g_dupeMode.load() && !g_stickyLock.load()) {
             EnterCriticalSection(&g_itemsLock);

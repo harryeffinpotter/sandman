@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\BYOVD">
+      <UniqueIdentifier>{D4E5F6A7-1111-2222-3333-444455550001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Kernel">
+      <UniqueIdentifier>{D4E5F6A7-1111-2222-3333-444455550002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Injection">
+      <UniqueIdentifier>{D4E5F6A7-1111-2222-3333-444455550003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Core">
+      <UniqueIdentifier>{D4E5F6A7-1111-2222-3333-444455550004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4B04-88EB-625FBE52EBFC}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Common">
+      <UniqueIdentifier>{D4E5F6A7-1111-2222-3333-444455550005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4C08-8B7A-83BB121AAD02}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\byovd.cpp">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ioctl.cpp">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClCompile>
+    <ClCompile Include="src\crypto.cpp">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClCompile>
+    <ClCompile Include="src\forensic_cleanup.cpp">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClCompile>
+    <ClCompile Include="src\kern_map.cpp">
+      <Filter>Source Files\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\kern_scan.cpp">
+      <Filter>Source Files\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\pagewalk.cpp">
+      <Filter>Source Files\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\syscall_hijack.cpp">
+      <Filter>Source Files\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\rtss_inject.cpp">
+      <Filter>Source Files\Injection</Filter>
+    </ClCompile>
+    <ClCompile Include="src\parse_stage2.cpp">
+      <Filter>Source Files\Injection</Filter>
+    </ClCompile>
+    <ClCompile Include="src\resolve_imports.cpp">
+      <Filter>Source Files\Injection</Filter>
+    </ClCompile>
+    <ClCompile Include="src\map_stage2.cpp">
+      <Filter>Source Files\Injection</Filter>
+    </ClCompile>
+    <ClCompile Include="src\invoke_stage2.cpp">
+      <Filter>Source Files\Injection</Filter>
+    </ClCompile>
+    <ClCompile Include="src\main.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\cmdchannel.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ntapi.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\byovd.h">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ioctl.h">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClInclude>
+    <ClInclude Include="src\crypto.h">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClInclude>
+    <ClInclude Include="src\forensic_cleanup.h">
+      <Filter>Source Files\BYOVD</Filter>
+    </ClInclude>
+    <ClInclude Include="src\kern_map.h">
+      <Filter>Source Files\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="src\kern_scan.h">
+      <Filter>Source Files\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="src\pagewalk.h">
+      <Filter>Source Files\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="src\syscall_hijack.h">
+      <Filter>Source Files\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="src\rtss_inject.h">
+      <Filter>Source Files\Injection</Filter>
+    </ClInclude>
+    <ClInclude Include="src\parse_stage2.h">
+      <Filter>Source Files\Injection</Filter>
+    </ClInclude>
+    <ClInclude Include="src\resolve_imports.h">
+      <Filter>Source Files\Injection</Filter>
+    </ClInclude>
+    <ClInclude Include="src\map_stage2.h">
+      <Filter>Source Files\Injection</Filter>
+    </ClInclude>
+    <ClInclude Include="src\invoke_stage2.h">
+      <Filter>Source Files\Injection</Filter>
+    </ClInclude>
+    <ClInclude Include="src\cmdchannel.h">
+      <Filter>Source Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ntapi.h">
+      <Filter>Source Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ui.h">
+      <Filter>Source Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="common\common_defs.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="common\lcg_xor.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="common\phase14_cipher_key.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="common\phase14_encrypted_names.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="common\phase14_scratch.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="common\splitmix.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="common\xor_str.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\launcher.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+</Project>

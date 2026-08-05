@@ -186,6 +186,7 @@ static HWND g_gameHwnd = nullptr;
 static WNDPROC g_originalWndProc = nullptr;
 static bool g_imguiInitialized = false;
 std::atomic<bool> g_streamProof{false};
+volatile bool g_overlayDisabled = false;
 static HWND g_overlayHwnd = nullptr;
 static ID3D11Device* g_overlayDevice = nullptr;
 static ID3D11DeviceContext* g_overlayContext = nullptr;
@@ -921,81 +922,98 @@ static void safe_imgui_render_and_present_overlay() {
 }
 
 
+static bool seh_present_init(IDXGISwapChain* pSwapChain) {
+    __try {
+        if (g_imguiInitialized && pSwapChain != g_initSwapChain) {
+            dbglog("[hooked_present] SWAPCHAIN CHANGED old=%p new=%p — reinitializing\n", g_initSwapChain, pSwapChain);
+            ImGui_ImplDX11_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui::DestroyContext();
+            release_render_target();
+            if (g_overlayImguiInit) {
+                destroy_stream_proof_overlay();
+                g_overlayImguiInit = false;
+            }
+            if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+            if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+            g_imguiInitialized = false;
+            g_initSwapChain = nullptr;
+        }
+
+        if (!g_imguiInitialized) {
+            if (FAILED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice))) {
+                dbglog("[hooked_present] GetDevice FAILED\n");
+                return true;
+            }
+            dbglog("[hooked_present] got device %p\n", g_pd3dDevice);
+
+            g_pd3dDevice->GetImmediateContext(&g_pd3dDeviceContext);
+            create_render_target(pSwapChain);
+
+            DXGI_SWAP_CHAIN_DESC desc;
+            pSwapChain->GetDesc(&desc);
+            HWND newHwnd = desc.OutputWindow;
+            dbglog("[hooked_present] game hwnd: %p\n", newHwnd);
+
+            if (newHwnd != g_gameHwnd) {
+                if (g_gameHwnd && g_originalWndProc) {
+                    SetWindowLongPtrW(g_gameHwnd, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
+                }
+                g_gameHwnd = newHwnd;
+                g_originalWndProc = (WNDPROC)SetWindowLongPtrW(g_gameHwnd, GWLP_WNDPROC, (LONG_PTR)hooked_wndproc);
+                dbglog("[hooked_present] wndproc hooked, original: %p\n", g_originalWndProc);
+            } else if (!g_originalWndProc) {
+                g_gameHwnd = newHwnd;
+                g_originalWndProc = (WNDPROC)SetWindowLongPtrW(g_gameHwnd, GWLP_WNDPROC, (LONG_PTR)hooked_wndproc);
+                dbglog("[hooked_present] wndproc hooked, original: %p\n", g_originalWndProc);
+            }
+
+            IMGUI_CHECKVERSION();
+            ImGui::CreateContext();
+            ImGui::GetIO().IniFilename = "C:\\Users\\ysg\\projects\\sand_cheat\\imgui_layout.ini";
+            ImGui::StyleColorsDark();
+
+            load_settings();
+
+            if (g_streamProof.load()) {
+                create_stream_proof_overlay();
+                if (g_overlayHwnd && g_overlayDevice && g_overlayContext) {
+                    ImGui_ImplWin32_Init(g_gameHwnd);
+                    ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
+                    g_overlayImguiInit = true;
+                    dbglog("[hooked_present] stream-proof ImGui init done\n");
+                } else {
+                    dbglog("[hooked_present] stream-proof creation failed, falling back\n");
+                    g_streamProof.store(false);
+                    ImGui_ImplWin32_Init(g_gameHwnd);
+                    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+                }
+            } else {
+                ImGui_ImplWin32_Init(g_gameHwnd);
+                ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+            }
+
+            g_initSwapChain = pSwapChain;
+            g_imguiInitialized = true;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        dbglog("[hooked_present] SEH exception during init: 0x%08lX\n", GetExceptionCode());
+        return false;
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     static bool s_logged = false;
     if (!s_logged) { dbglog("[hooked_present] FIRST CALL swapchain=%p\n", pSwapChain); s_logged = true; }
 
-    if (g_imguiInitialized && pSwapChain != g_initSwapChain) {
-        dbglog("[hooked_present] SWAPCHAIN CHANGED old=%p new=%p — reinitializing\n", g_initSwapChain, pSwapChain);
-        ImGui_ImplDX11_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-        release_render_target();
-        if (g_overlayImguiInit) {
-            destroy_stream_proof_overlay();
-            g_overlayImguiInit = false;
-        }
-        if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
-        if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
-        g_imguiInitialized = false;
-        g_initSwapChain = nullptr;
-    }
+    if (g_overlayDisabled)
+        return g_originalPresent(pSwapChain, SyncInterval, Flags);
 
-    if (!g_imguiInitialized) {
-        if (FAILED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice))) {
-            dbglog("[hooked_present] GetDevice FAILED\n");
-            return g_originalPresent(pSwapChain, SyncInterval, Flags);
-        }
-        dbglog("[hooked_present] got device %p\n", g_pd3dDevice);
-
-        g_pd3dDevice->GetImmediateContext(&g_pd3dDeviceContext);
-        create_render_target(pSwapChain);
-
-        DXGI_SWAP_CHAIN_DESC desc;
-        pSwapChain->GetDesc(&desc);
-        HWND newHwnd = desc.OutputWindow;
-        dbglog("[hooked_present] game hwnd: %p\n", newHwnd);
-
-        if (newHwnd != g_gameHwnd) {
-            if (g_gameHwnd && g_originalWndProc) {
-                SetWindowLongPtrW(g_gameHwnd, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
-            }
-            g_gameHwnd = newHwnd;
-            g_originalWndProc = (WNDPROC)SetWindowLongPtrW(g_gameHwnd, GWLP_WNDPROC, (LONG_PTR)hooked_wndproc);
-            dbglog("[hooked_present] wndproc hooked, original: %p\n", g_originalWndProc);
-        } else if (!g_originalWndProc) {
-            g_gameHwnd = newHwnd;
-            g_originalWndProc = (WNDPROC)SetWindowLongPtrW(g_gameHwnd, GWLP_WNDPROC, (LONG_PTR)hooked_wndproc);
-            dbglog("[hooked_present] wndproc hooked, original: %p\n", g_originalWndProc);
-        }
-
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui::GetIO().IniFilename = "C:\\Users\\ysg\\projects\\sand_cheat\\imgui_layout.ini";
-        ImGui::StyleColorsDark();
-
-        load_settings();
-
-        if (g_streamProof.load()) {
-            create_stream_proof_overlay();
-            if (g_overlayHwnd && g_overlayDevice && g_overlayContext) {
-                ImGui_ImplWin32_Init(g_gameHwnd);
-                ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
-                g_overlayImguiInit = true;
-                dbglog("[hooked_present] stream-proof ImGui init done\n");
-            } else {
-                dbglog("[hooked_present] stream-proof creation failed, falling back\n");
-                g_streamProof.store(false);
-                ImGui_ImplWin32_Init(g_gameHwnd);
-                ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-            }
-        } else {
-            ImGui_ImplWin32_Init(g_gameHwnd);
-            ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-        }
-
-        g_initSwapChain = pSwapChain;
-        g_imguiInitialized = true;
+    if (!seh_present_init(pSwapChain)) {
+        g_overlayDisabled = true;
+        dbglog("[hooked_present] init crashed — overlay disabled permanently\n");
+        return g_originalPresent(pSwapChain, SyncInterval, Flags);
     }
 
     if (!g_pd3dDeviceContext || !g_pd3dDevice) {

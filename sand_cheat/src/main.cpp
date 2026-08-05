@@ -246,6 +246,16 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
+    if (code == 0xC0000005 && GetCurrentThreadId() == g_renderThreadId && g_renderThreadId != 0) {
+        g_overlayDisabled = true;
+        FILE* rf = fopen(CRASH_DIR "crash_info.txt", "a");
+        if (rf) {
+            fprintf(rf, "\n!!! RENDER THREAD AV — overlay disabled !!!\n\n");
+            write_full_crash(rf, ep);
+            fclose(rf);
+        }
+    }
+
     FILE* f = fopen(CRASH_DIR "crash_info.txt", "a");
     if (f) {
         write_full_crash(f, ep);
@@ -385,6 +395,14 @@ static DWORD WINAPI worker_thread(LPVOID) {
     g_workerThreadId = GetCurrentThreadId();
     tlog("worker_thread ENTERED tid=%lu pid=%lu\n", g_workerThreadId, GetCurrentProcessId());
     tlog("worker thread start addr check: NtCurrentTeb=%p\n", NtCurrentTeb());
+
+    if (GetFileAttributesA(CRASH_DIR "debug_wait.txt") != INVALID_FILE_ATTRIBUTES) {
+        tlog("debug_wait.txt found — spinning until debugger attaches...\n");
+        while (!IsDebuggerPresent()) Sleep(100);
+        tlog("debugger attached! breaking...\n");
+        __debugbreak();
+    }
+
     SetUnhandledExceptionFilter(final_crash_handler);
     std::set_terminate(on_terminate);
     signal(SIGABRT, on_abort_signal);
