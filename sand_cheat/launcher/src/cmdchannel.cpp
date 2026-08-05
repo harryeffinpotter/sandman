@@ -234,4 +234,46 @@ bool heartbeat(uint64_t target_addr) {
     return rc == 0;  // STATUS_SUCCESS
 }
 
+bool arm_image_notify(const wchar_t* exe_name) {
+    if (!exe_name) return false;
+    size_t len = 0;
+    while (exe_name[len]) ++len;
+    if (len == 0 || len > 127) return false;
+
+    unsigned char body[0x18] = {0};
+    *reinterpret_cast<uint16_t*>(body + 0x00) = 0x7C4A;
+    *reinterpret_cast<uint32_t*>(body + 0x04) = 9;
+    *reinterpret_cast<uint16_t*>(body + 0x08) = static_cast<uint16_t>(len);
+    *reinterpret_cast<uint64_t*>(body + 0x10) = reinterpret_cast<uint64_t>(exe_name);
+    int32_t rc = send_raw(body, sizeof(body));
+    return rc == 0;
+}
+
+bool query_armed_pid(uint32_t* out_pid) {
+    if (!out_pid) return false;
+    uint32_t fired = 0;
+    *out_pid = 0;
+
+    unsigned char body[0x18] = {0};
+    *reinterpret_cast<uint16_t*>(body + 0x00) = 0x7C4A;
+    *reinterpret_cast<uint32_t*>(body + 0x04) = 10;
+    *reinterpret_cast<uint64_t*>(body + 0x08) = reinterpret_cast<uint64_t>(out_pid);
+    *reinterpret_cast<uint64_t*>(body + 0x10) = reinterpret_cast<uint64_t>(&fired);
+    int32_t rc = send_raw(body, sizeof(body));
+    return rc == 0 && fired != 0 && *out_pid != 0;
+}
+
+bool create_remote_thread(uint32_t pid, uint64_t start_address, uint64_t parameter, uint32_t* out_tid) {
+    unsigned char body[0x28] = {0};
+    *reinterpret_cast<uint16_t*>(body + 0x00) = 0x7C4A;
+    *reinterpret_cast<uint32_t*>(body + 0x04) = 11;
+    *reinterpret_cast<uint32_t*>(body + 0x08) = pid;
+    *reinterpret_cast<uint64_t*>(body + 0x10) = start_address;
+    *reinterpret_cast<uint64_t*>(body + 0x18) = parameter;
+    *reinterpret_cast<uint64_t*>(body + 0x20) = out_tid ? reinterpret_cast<uint64_t>(out_tid) : 0;
+    if (out_tid) *out_tid = 0;
+    int32_t rc = send_raw(body, sizeof(body));
+    return rc == 0;
+}
+
 } // namespace cmdchannel
