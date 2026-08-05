@@ -147,6 +147,12 @@ fn_get_component_in_children g_getComponentInChildren = nullptr;
 void* g_animatorType = nullptr;
 void* g_userNameType = nullptr;
 std::atomic<bool> g_espShowSkeleton{false};
+std::atomic<bool> g_espShowLootT1{true};
+std::atomic<bool> g_espShowLootT2{true};
+std::atomic<bool> g_espShowLootT3{true};
+float g_espLootT1Dist = 500.0f;
+float g_espLootT2Dist = 500.0f;
+float g_espLootT3Dist = 500.0f;
 
 uintptr_t g_gaBase = 0;
 uintptr_t g_gaSize = 0;
@@ -494,7 +500,7 @@ bool strip_component(void* entity, int componentIndex) {
         if (!is_readable(entity, 0x58)) return false;
         void* dict = *(void**)((uintptr_t)entity + 0x50);
         return dict_slim_null_value(dict, componentIndex);
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[strip_component] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -504,35 +510,35 @@ bool safe_read_ptr(void* addr, void** out) {
     __try {
         *out = *(void**)addr;
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[safe_read_ptr] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 bool safe_read_int(void* addr, int* out) {
     __try {
         *out = *(int*)addr;
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[safe_read_int] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 bool safe_read_bool(void* addr, bool* out) {
     __try {
         *out = *(bool*)addr;
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[safe_read_bool] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 bool safe_read_worldvec(void* addr, WorldVector* out) {
     __try {
         *out = *(WorldVector*)addr;
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[safe_read_worldvec] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 bool safe_read_sizet(void* addr, size_t* out) {
     __try {
         *out = *(size_t*)addr;
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[safe_read_sizet] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +674,7 @@ static void seh_apply_turret_single(void* entity, int* found, int* applied,
                 }
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_apply_turret_single] SEH: 0x%08lX\n", GetExceptionCode()); }
 }
 
 void apply_turret_mods() {
@@ -754,7 +760,7 @@ static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, flo
                 }
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_apply_weapon_single] SEH: 0x%08lX\n", GetExceptionCode()); }
 }
 
 void apply_weapon_mods() {
@@ -832,7 +838,7 @@ void force_interact_target(void* systemPtr, int targetId) {
                 g_forceInteractWrites.fetch_add(1);
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[force_interact_target] SEH: 0x%08lX\n", GetExceptionCode()); }
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +861,7 @@ void __fastcall hooked_execute(void* thisPtr) {
     __try {
         ((fn_execute)g_hwbpHooks[0].trampoline)(thisPtr);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[hooked_execute] SEH: 0x%08lX\n", GetExceptionCode());
     }
 
     if (!g_permaLockActive.load() || g_lockedEntityId.load() < 0) return;
@@ -869,6 +876,7 @@ bool __fastcall hooked_is_too_far(void* thisPtr, int32_t targetId, void* avatar)
     __try {
         return ((fn_is_too_far)g_farHook.trampoline_exec)(thisPtr, targetId, avatar);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[hooked_is_too_far] SEH: 0x%08lX\n", GetExceptionCode());
         return true;
     }
 }
@@ -1327,6 +1335,7 @@ void scan_entities() {
             if (name.rfind("walker_", 0) == 0) continue;
             if (name == "Sun") continue;
             if (name.rfind("LandingCutScene", 0) == 0) continue;
+            if (name.rfind("Shot Projectile", 0) == 0) continue;
             dbgPassFilter++;
 
             void* posComp = get_component(entity, g_idx_position);
@@ -1342,6 +1351,7 @@ void scan_entities() {
             info.hasTransformPos = false;
             info.hasBones = false;
             info.isCreature = false;
+            info.lootTier = 0;
             info.isWeapon = false;
             if (g_idx_item_type >= 0) {
                 void* itdComp = get_component(entity, g_idx_item_type);
@@ -1398,11 +1408,23 @@ void scan_entities() {
                 info.displayName = name;
             } else {
                 info.displayName = get_display_name(name);
+                if (name.find("_t3_") != std::string::npos || name.find("_T3_") != std::string::npos)
+                    info.lootTier = 3;
+                else if (name.find("_t2_") != std::string::npos || name.find("_T2_") != std::string::npos)
+                    info.lootTier = 2;
+                else if (name.find("_t1_") != std::string::npos || name.find("_T1_") != std::string::npos)
+                    info.lootTier = 1;
                 if (name.rfind("Mob", 0) == 0 || name.rfind("mob_", 0) == 0
                     || name.rfind("Ai", 0) == 0 || name.rfind("Sentinel", 0) == 0
                     || name.rfind("Trampler", 0) == 0) {
                     info.isCreature = true;
                 }
+            }
+
+            bool isPlayer = (name.rfind("PlayerAvatar", 0) == 0);
+            if (isPlayer || info.isCreature) {
+                memset(info.bonePositions, 0, sizeof(info.bonePositions));
+                info.hasBones = seh_resolve_bones(entity, info.bonePositions);
             }
 
             entitiesPushed++;
@@ -1506,20 +1528,20 @@ static bool seh_read_player_pos(WorldVector* out) {
         if (!posComp) return false;
         *out = *(WorldVector*)((uintptr_t)posComp + 0x10);
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_read_player_pos] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 static bool seh_entity_enabled(void* entity) {
     __try {
         return *(bool*)((uintptr_t)entity + 0x4C);
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_entity_enabled] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 static bool seh_read_position(void* posComp, WorldVector* out) {
     __try {
         *out = *(WorldVector*)((uintptr_t)posComp + 0x10);
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_read_position] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
@@ -1595,7 +1617,7 @@ static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
         }
         g_vehInnerActive = false;
         return anyBone;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_bones] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 static bool seh_resolve_transform_pos(void* entity, Vec3* out) {
@@ -1626,7 +1648,7 @@ static bool seh_resolve_transform_pos(void* entity, Vec3* out) {
         if (std::isnan(wpos.x) || std::isnan(wpos.y) || std::isnan(wpos.z)) return false;
         *out = wpos;
         return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_transform_pos] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
@@ -1664,7 +1686,7 @@ static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
                 }
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_username] SEH: 0x%08lX\n", GetExceptionCode()); }
     return false;
 }
 
