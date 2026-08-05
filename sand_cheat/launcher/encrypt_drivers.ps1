@@ -25,9 +25,9 @@ function Encrypt-RollingXor([byte[]]$data) {
 
 $drivers = @(
     @{
-        Source = "C:\Users\ysg\projects\Vulnerable Drivers\cpuz_sys\cpuz.sys"
-        Output = "$projDir\cpuz_enc.bin"
-        Label  = "cpuz.sys"
+        Source = "C:\Users\ysg\projects\Vulnerable Drivers\iQVW64_SYS\iQVW64.SYS"
+        Output = "$projDir\iqvw64_enc.bin"
+        Label  = "iQVW64.SYS"
     },
     @{
         Source = "$projDir\kerneldriver.sys"

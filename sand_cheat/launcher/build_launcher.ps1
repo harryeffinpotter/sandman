@@ -9,9 +9,9 @@ $env:LIB = "$vsPath\lib\x64;$sdkLib\ucrt\x64;$sdkLib\um\x64"
 
 Write-Host "`n=== Sand Launcher Build ===" -ForegroundColor Cyan
 
-# --- Encrypt WinIo64.sys -> winio64_enc.bin ---
+# --- Encrypt iQVW64.SYS -> iqvw64_enc.bin ---
 
-Write-Host "`n[1/3] Encrypting WinIo64.sys..." -ForegroundColor Cyan
+Write-Host "`n[1/3] Encrypting iQVW64.SYS..." -ForegroundColor Cyan
 
 function Encrypt-RollingXor([byte[]]$data) {
     [byte[]]$key = @(0x46, 0x28, 0x64)
@@ -27,11 +27,11 @@ function Encrypt-RollingXor([byte[]]$data) {
     return $data
 }
 
-$winioPath  = "C:\Users\ysg\projects\Vulnerable Drivers\C__Users_user_Desktop_WinIo64_Sys\C__Users_user_Desktop_WinIo64.Sys"
+$winioPath  = "C:\Users\ysg\projects\Vulnerable Drivers\iQVW64_SYS\iQVW64.SYS"
 $kdrvPath   = "$PWD\kerneldriver.sys"
 
 foreach ($pair in @(
-    @($winioPath, "$PWD\winio64_enc.bin", "WinIo64.sys"),
+    @($winioPath, "$PWD\iqvw64_enc.bin", "iQVW64.SYS"),
     @($kdrvPath,  "$PWD\kerneldriver_enc.bin", "kerneldriver.sys")
 )) {
     $src, $dst, $label = $pair
