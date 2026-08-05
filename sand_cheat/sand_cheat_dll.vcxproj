@@ -53,7 +53,7 @@
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>user32.lib;d3d11.lib;dxgi.lib;dwmapi.lib;dxguid.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;d3d11.lib;dxgi.lib;dwmapi.lib;dxguid.lib;dbghelp.lib;dcomp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(TargetDir)sand_cheat.dll" "$(ProjectDir)launcher\sand_cheat.dll"
@@ -73,7 +73,7 @@ copy /Y "$(TargetDir)sand_cheat.pdb" "$(ProjectDir)launcher\sand_cheat.pdb"</Com
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <AdditionalDependencies>user32.lib;d3d11.lib;dxgi.lib;dwmapi.lib;dxguid.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;d3d11.lib;dxgi.lib;dwmapi.lib;dxguid.lib;dbghelp.lib;dcomp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(TargetDir)sand_cheat.dll" "$(ProjectDir)launcher\sand_cheat.dll"

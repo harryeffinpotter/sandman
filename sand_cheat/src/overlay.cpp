@@ -7,6 +7,7 @@
 #include <dxgi.h>
 #include <dxgi1_2.h>
 #include <dwmapi.h>
+#include <dcomp.h>
 #include <string>
 #include <cstdio>
 #include <cstdarg>
@@ -62,6 +63,12 @@ static void save_settings() {
     fprintf(f, "mobDist=%.0f\n", g_espMobDist);
     fprintf(f, "walkerDist=%.0f\n", g_espWalkerDist);
     fprintf(f, "itemDist=%.0f\n", g_espItemDist);
+    fprintf(f, "showLootT1=%d\n", g_espShowLootT1.load() ? 1 : 0);
+    fprintf(f, "showLootT2=%d\n", g_espShowLootT2.load() ? 1 : 0);
+    fprintf(f, "showLootT3=%d\n", g_espShowLootT3.load() ? 1 : 0);
+    fprintf(f, "lootT1Dist=%.0f\n", g_espLootT1Dist);
+    fprintf(f, "lootT2Dist=%.0f\n", g_espLootT2Dist);
+    fprintf(f, "lootT3Dist=%.0f\n", g_espLootT3Dist);
     fprintf(f, "rapidFire=%d\n", g_turretRapidFire.load() ? 1 : 0);
     fprintf(f, "noRecoil=%d\n", g_turretNoRecoil.load() ? 1 : 0);
     fprintf(f, "menuVisible=%d\n", g_menuVisible ? 1 : 0);
@@ -129,6 +136,12 @@ static void load_settings() {
             else if (strcmp(key, "mobDist") == 0) g_espMobDist = val;
             else if (strcmp(key, "walkerDist") == 0) g_espWalkerDist = val;
             else if (strcmp(key, "itemDist") == 0) g_espItemDist = val;
+            else if (strcmp(key, "showLootT1") == 0) g_espShowLootT1.store(iv != 0);
+            else if (strcmp(key, "showLootT2") == 0) g_espShowLootT2.store(iv != 0);
+            else if (strcmp(key, "showLootT3") == 0) g_espShowLootT3.store(iv != 0);
+            else if (strcmp(key, "lootT1Dist") == 0) g_espLootT1Dist = val;
+            else if (strcmp(key, "lootT2Dist") == 0) g_espLootT2Dist = val;
+            else if (strcmp(key, "lootT3Dist") == 0) g_espLootT3Dist = val;
             else if (strcmp(key, "rapidFire") == 0) g_turretRapidFire.store(iv != 0);
             else if (strcmp(key, "noRecoil") == 0) g_turretNoRecoil.store(iv != 0);
             else if (strcmp(key, "menuVisible") == 0) g_menuVisible = (iv != 0);
@@ -193,6 +206,9 @@ static ID3D11DeviceContext* g_overlayContext = nullptr;
 static IDXGISwapChain1* g_overlaySwapChain = nullptr;
 static ID3D11RenderTargetView* g_overlayRTV = nullptr;
 static bool g_overlayImguiInit = false;
+static IDCompositionDevice* g_dcompDevice = nullptr;
+static IDCompositionTarget* g_dcompTarget = nullptr;
+static IDCompositionVisual* g_dcompVisual = nullptr;
 static IDXGISwapChain* g_initSwapChain = nullptr;
 
 bool g_menuVisible = true;
@@ -254,7 +270,7 @@ static bool seh_get_camera_yaw(float* outCos, float* outSin) {
         *outCos = cosf(-yaw);
         *outSin = sinf(-yaw);
         return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { dbglog("[seh_get_camera_yaw] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
 struct BoneScreenPos {
@@ -266,6 +282,7 @@ struct ESP3DEntry {
     float sx, sy, headSX, headSY;
     char label[96];
     int type;
+    int lootTier;
     float dist;
     bool hasHead;
     bool hasSkeleton;
@@ -292,6 +309,7 @@ struct ESPSnapshot {
     bool hasBones;
     bool isCreature;
     int type;
+    int lootTier;
 };
 static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDist, volatile bool& csHeld) {
     if (!g_cameraGetMain || !g_cameraW2S || !g_getTransform || !g_getPosition) return;
@@ -332,13 +350,26 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         bool isMob = item.isCreature;
         bool isWalker = (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
         bool isItem = (!isPlayer && !isMob && !isWalker);
+        bool isLoot = (item.lootTier > 0);
 
         if (isPlayer && !g_espShowPlayers.load()) continue;
         if (isMob && !g_espShowMobs.load()) continue;
         if (isWalker && !g_espShowWalkers.load()) continue;
-        if (isItem && !g_espShowItems.load()) continue;
+        if (isLoot) {
+            if (item.lootTier == 1 && !g_espShowLootT1.load()) continue;
+            if (item.lootTier == 2 && !g_espShowLootT2.load()) continue;
+            if (item.lootTier == 3 && !g_espShowLootT3.load()) continue;
+        } else if (isItem && !g_espShowItems.load()) continue;
 
-        float catDist = isPlayer ? g_espPlayerDist : (isMob ? g_espMobDist : (isWalker ? g_espWalkerDist : g_espItemDist));
+        float catDist;
+        if (isPlayer) catDist = g_espPlayerDist;
+        else if (isMob) catDist = g_espMobDist;
+        else if (isWalker) catDist = g_espWalkerDist;
+        else if (isLoot) {
+            if (item.lootTier == 3) catDist = g_espLootT3Dist;
+            else if (item.lootTier == 2) catDist = g_espLootT2Dist;
+            else catDist = g_espLootT1Dist;
+        } else catDist = g_espItemDist;
         if (item.distance >= 0 && item.distance > catDist) continue;
 
         ESPSnapshot snap;
@@ -350,6 +381,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         snap.velY = item.velY;
         snap.velZ = item.velZ;
         snap.isCreature = item.isCreature;
+        snap.lootTier = item.lootTier;
         snap.type = isWalker ? 2 : (isPlayer ? 0 : (isMob ? 1 : 3));
 
         const char* dn = item.displayName.empty() ? item.name.c_str() : item.displayName.c_str();
@@ -421,6 +453,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         }
 
         e.type = snap.type;
+        e.lootTier = snap.lootTier;
         e.dist = snap.distance >= 0 ? snap.distance : 0.0f;
         snprintf(e.label, sizeof(e.label), "%s [%.0fm]", snap.displayName, e.dist);
 
@@ -684,7 +717,7 @@ static void apply_aimbot(const std::vector<ESP3DEntry>& entries) {
         }
     }
 
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    } __except (EXCEPTION_EXECUTE_HANDLER) { dbglog("[apply_aimbot] SEH: 0x%08lX\n", GetExceptionCode()); }
 }
 
 static void render_aimbot_profile(AimbotProfile& p, const char* suffix) {
@@ -846,15 +879,55 @@ static void create_stream_proof_overlay() {
     scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     scd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
 
-    hr = factory2->CreateSwapChainForHwnd(g_overlayDevice, g_overlayHwnd, &scd, nullptr, nullptr, &g_overlaySwapChain);
+    hr = factory2->CreateSwapChainForComposition(g_overlayDevice, &scd, nullptr, &g_overlaySwapChain);
     if (FAILED(hr)) {
-        dbglog("[stream-proof] CreateSwapChainForHwnd failed: 0x%lX\n", hr);
+        dbglog("[stream-proof] CreateSwapChainForComposition failed: 0x%lX\n", hr);
         factory2->Release(); adapter->Release(); dxgiDevice->Release();
         g_overlayDevice->Release(); g_overlayDevice = nullptr;
         g_overlayContext->Release(); g_overlayContext = nullptr;
         DestroyWindow(g_overlayHwnd); g_overlayHwnd = nullptr;
         return;
     }
+
+    hr = DCompositionCreateDevice(dxgiDevice, IID_PPV_ARGS(&g_dcompDevice));
+    if (FAILED(hr)) {
+        dbglog("[stream-proof] DCompositionCreateDevice failed: 0x%lX\n", hr);
+        g_overlaySwapChain->Release(); g_overlaySwapChain = nullptr;
+        factory2->Release(); adapter->Release(); dxgiDevice->Release();
+        g_overlayDevice->Release(); g_overlayDevice = nullptr;
+        g_overlayContext->Release(); g_overlayContext = nullptr;
+        DestroyWindow(g_overlayHwnd); g_overlayHwnd = nullptr;
+        return;
+    }
+
+    hr = g_dcompDevice->CreateTargetForHwnd(g_overlayHwnd, TRUE, &g_dcompTarget);
+    if (FAILED(hr)) {
+        dbglog("[stream-proof] CreateTargetForHwnd failed: 0x%lX\n", hr);
+        g_dcompDevice->Release(); g_dcompDevice = nullptr;
+        g_overlaySwapChain->Release(); g_overlaySwapChain = nullptr;
+        factory2->Release(); adapter->Release(); dxgiDevice->Release();
+        g_overlayDevice->Release(); g_overlayDevice = nullptr;
+        g_overlayContext->Release(); g_overlayContext = nullptr;
+        DestroyWindow(g_overlayHwnd); g_overlayHwnd = nullptr;
+        return;
+    }
+
+    hr = g_dcompDevice->CreateVisual(&g_dcompVisual);
+    if (FAILED(hr)) {
+        dbglog("[stream-proof] CreateVisual failed: 0x%lX\n", hr);
+        g_dcompTarget->Release(); g_dcompTarget = nullptr;
+        g_dcompDevice->Release(); g_dcompDevice = nullptr;
+        g_overlaySwapChain->Release(); g_overlaySwapChain = nullptr;
+        factory2->Release(); adapter->Release(); dxgiDevice->Release();
+        g_overlayDevice->Release(); g_overlayDevice = nullptr;
+        g_overlayContext->Release(); g_overlayContext = nullptr;
+        DestroyWindow(g_overlayHwnd); g_overlayHwnd = nullptr;
+        return;
+    }
+
+    g_dcompVisual->SetContent(g_overlaySwapChain);
+    g_dcompTarget->SetRoot(g_dcompVisual);
+    g_dcompDevice->Commit();
 
     ID3D11Texture2D* backBuf = nullptr;
     g_overlaySwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuf);
@@ -873,6 +946,9 @@ static void create_stream_proof_overlay() {
 }
 
 static void destroy_stream_proof_overlay() {
+    if (g_dcompVisual) { g_dcompVisual->Release(); g_dcompVisual = nullptr; }
+    if (g_dcompTarget) { g_dcompTarget->Release(); g_dcompTarget = nullptr; }
+    if (g_dcompDevice) { g_dcompDevice->Release(); g_dcompDevice = nullptr; }
     if (g_overlayRTV) { g_overlayRTV->Release(); g_overlayRTV = nullptr; }
     if (g_overlaySwapChain) { g_overlaySwapChain->Release(); g_overlaySwapChain = nullptr; }
     if (g_overlayContext) { g_overlayContext->Release(); g_overlayContext = nullptr; }
@@ -1435,6 +1511,35 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SliderFloat("Dist##item", &g_espItemDist, 50.0f, 2000.0f, "%.0f m");
                     ImGui::EndDisabled();
                 }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.3f, 1.0f), "Loot Containers");
+                {
+                    bool t1 = g_espShowLootT1.load();
+                    if (ImGui::Checkbox("T1 Loot##3d", &t1))
+                        g_espShowLootT1.store(t1);
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(!t1);
+                    ImGui::SliderFloat("Dist##lootT1", &g_espLootT1Dist, 50.0f, 2000.0f, "%.0f m");
+                    ImGui::EndDisabled();
+                }
+                {
+                    bool t2 = g_espShowLootT2.load();
+                    if (ImGui::Checkbox("T2 Loot##3d", &t2))
+                        g_espShowLootT2.store(t2);
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(!t2);
+                    ImGui::SliderFloat("Dist##lootT2", &g_espLootT2Dist, 50.0f, 2000.0f, "%.0f m");
+                    ImGui::EndDisabled();
+                }
+                {
+                    bool t3 = g_espShowLootT3.load();
+                    if (ImGui::Checkbox("T3 Loot##3d", &t3))
+                        g_espShowLootT3.store(t3);
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(!t3);
+                    ImGui::SliderFloat("Dist##lootT3", &g_espLootT3Dist, 50.0f, 2000.0f, "%.0f m");
+                    ImGui::EndDisabled();
+                }
                 {
                     bool showSkeleton = g_espShowSkeleton.load();
                     if (ImGui::Checkbox("Show Skeleton", &showSkeleton))
@@ -1610,6 +1715,9 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         if (g_espMobDist > projDist) projDist = g_espMobDist;
         if (g_espWalkerDist > projDist) projDist = g_espWalkerDist;
         if (g_espItemDist > projDist) projDist = g_espItemDist;
+        if (g_espLootT1Dist > projDist) projDist = g_espLootT1Dist;
+        if (g_espLootT2Dist > projDist) projDist = g_espLootT2Dist;
+        if (g_espLootT3Dist > projDist) projDist = g_espLootT3Dist;
         if (g_aimbotEnabled.load() && g_aimbotMaxDist > projDist) projDist = g_aimbotMaxDist;
         seh_project_entities(espEntries, projDist);
 
@@ -1633,6 +1741,18 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bgColor = IM_COL32(80, 40, 0, 180);
                     borderColor = IM_COL32(255, 165, 0, 220);
                     textColor = IM_COL32(255, 200, 50, 255);
+                } else if (e.lootTier == 3) {
+                    bgColor = IM_COL32(80, 0, 80, 180);
+                    borderColor = IM_COL32(200, 50, 200, 220);
+                    textColor = IM_COL32(230, 100, 230, 255);
+                } else if (e.lootTier == 2) {
+                    bgColor = IM_COL32(0, 40, 80, 180);
+                    borderColor = IM_COL32(50, 150, 255, 220);
+                    textColor = IM_COL32(100, 180, 255, 255);
+                } else if (e.lootTier == 1) {
+                    bgColor = IM_COL32(40, 60, 20, 160);
+                    borderColor = IM_COL32(140, 200, 60, 200);
+                    textColor = IM_COL32(180, 230, 100, 255);
                 } else {
                     bgColor = IM_COL32(40, 60, 20, 160);
                     borderColor = IM_COL32(140, 200, 60, 200);
