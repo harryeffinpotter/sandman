@@ -202,6 +202,11 @@ int main(int argc, char* argv[]) {
     }
     std::printf("[+] preflight: WdFilter.sys not loaded — safe to proceed\n");
 
+    if (!cmdchannel::init()) {
+        std::printf("[!] cmdchannel::init failed (NtConvert resolve)\n");
+        return bail(6);
+    }
+
     // Always remap — the running driver may be stale (missing new commands).
     // New HAL hook overwrites the old one; leaked kernel memory is negligible.
     bool driver_already_up = false;
@@ -624,10 +629,29 @@ int main(int argc, char* argv[]) {
         (unsigned long long)parsed.image_base, parsed.size_of_image, parsed.entry_rva,
         parsed.section_count);
 
-    // Arm image-load notify
-    if (!cmdchannel::arm_image_notify(L"sand_be.exe")) {
-        std::printf("[!] arm_image_notify failed\n");
-        return bail(20);
+    // Arm image-load notify — test heartbeat first to verify command channel
+    {
+        volatile unsigned char hb_test = 0;
+        uint64_t hb_addr = reinterpret_cast<uint64_t>(const_cast<unsigned char*>(&hb_test));
+        bool hb_ok = cmdchannel::heartbeat(hb_addr);
+        std::printf("[*] heartbeat test: rc=%s val=%u\n", hb_ok ? "ok" : "FAIL", (unsigned)hb_test);
+        llog("heartbeat test: rc=%s val=%u\n", hb_ok ? "ok" : "FAIL", (unsigned)hb_test);
+    }
+    {
+        const wchar_t* target = L"sand_be.exe";
+        size_t tlen = 11;
+        unsigned char abody[0x18] = {0};
+        *reinterpret_cast<uint16_t*>(abody + 0x00) = 0x7C4A;
+        *reinterpret_cast<uint32_t*>(abody + 0x04) = 9;
+        *reinterpret_cast<uint16_t*>(abody + 0x08) = static_cast<uint16_t>(tlen);
+        *reinterpret_cast<uint64_t*>(abody + 0x10) = reinterpret_cast<uint64_t>(target);
+        int32_t arc = cmdchannel::send_raw(abody, sizeof(abody));
+        std::printf("[*] arm_image_notify raw NTSTATUS=0x%08X\n", (unsigned)arc);
+        llog("arm_image_notify NTSTATUS=0x%08X\n", (unsigned)arc);
+        if (arc != 0) {
+            std::printf("[!] arm_image_notify failed\n");
+            return bail(20);
+        }
     }
     std::printf("[*] Waiting for game to launch... (start the game now)\n");
     llog("armed image-load notify for sand_be.exe\n");

@@ -1,0 +1,29 @@
+﻿  C:\Users\ysg\projects\sand_cheat\launcher\.python-version not found!
+EXEC : warning : pyenv-venv: env '3.12.3' not found at C:\Users\ysg\.pyenv-win-venv\envs\3.12.3\Scripts\Activate.ps1
+  Test-Path : Illegal characters in path.
+  At C:\Users\ysg\projects\sand_cheat\launcher\encrypt_drivers.ps1:49 char:10
+  +     if ((Test-Path $dst) -and ((Get-Item $dst).LastWriteTime -gt (Get ...
+  +          ~~~~~~~~~~~~~~
+      + CategoryInfo          : InvalidArgument: (C:\Users\ysg\pr...r"\cpuz_enc.bin:String) [Test-Path], ArgumentExcepti 
+     on
+      + FullyQualifiedErrorId : ItemExistsArgumentError,Microsoft.PowerShell.Commands.TestPathCommand
+   
+  Exception calling "WriteAllBytes" with "2" argument(s): "Illegal characters in path."
+  At C:\Users\ysg\projects\sand_cheat\launcher\encrypt_drivers.ps1:56 char:5
+  +     [System.IO.File]::WriteAllBytes($dst, $enc)
+  +     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException
+      + FullyQualifiedErrorId : ArgumentException
+   
+  cpuz.sys -> cpuz_enc.bin (44320 bytes encrypted)
+  Test-Path : Illegal characters in path.
+  At C:\Users\ysg\projects\sand_cheat\launcher\encrypt_drivers.ps1:44 char:15
+  +     if (-not (Test-Path $src)) {
+  +               ~~~~~~~~~~~~~~
+      + CategoryInfo          : InvalidArgument: (C:\Users\ysg\pr...erneldriver.sys:String) [Test-Path], ArgumentExcepti 
+     on
+      + FullyQualifiedErrorId : ItemExistsArgumentError,Microsoft.PowerShell.Commands.TestPathCommand
+   
+EXEC : warning : kerneldriver.sys not found at: C:\Users\ysg\projects\sand_cheat\launcher"\kerneldriver.sys - skipping
+  cmdchannel.cpp
+  sand_launcher.vcxproj -> C:\Users\ysg\projects\sand_cheat\launcher\Debug\sand_launcher.exe
