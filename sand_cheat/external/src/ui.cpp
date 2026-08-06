@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace ui {
 
@@ -127,6 +128,84 @@ void draw_memory_viewer() {
 // -----------------------------------------------------------------------
 // Widget: entity list (placeholder until scan.cpp populates state)
 // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Widget: radar — top-down mini-map of entities relative to player
+// -----------------------------------------------------------------------
+void draw_radar() {
+    ImGui::SetNextWindowPos(ImVec2(1080, 20), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 400), ImGuiCond_FirstUseEver);
+    ImGui::Begin("radar");
+    static float range = 100.0f;
+    ImGui::SliderFloat("range (m)", &range, 20.0f, 500.0f, "%.0f");
+    static bool show_players = true, show_mobs = true, show_walkers = true, show_items = false;
+    ImGui::Checkbox("players", &show_players); ImGui::SameLine();
+    ImGui::Checkbox("mobs",    &show_mobs);    ImGui::SameLine();
+    ImGui::Checkbox("walkers", &show_walkers); ImGui::SameLine();
+    ImGui::Checkbox("items",   &show_items);
+
+    ImVec2 canvas_p0 = ImGui::GetCursorScreenPos();
+    ImVec2 canvas_sz = ImGui::GetContentRegionAvail();
+    if (canvas_sz.x < 100) canvas_sz.x = 100;
+    if (canvas_sz.y < 100) canvas_sz.y = 100;
+    float radius = (canvas_sz.x < canvas_sz.y ? canvas_sz.x : canvas_sz.y) * 0.5f - 4;
+    ImVec2 center(canvas_p0.x + canvas_sz.x * 0.5f, canvas_p0.y + canvas_sz.y * 0.5f);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // Background
+    dl->AddCircleFilled(center, radius, IM_COL32(15, 15, 25, 220), 64);
+    dl->AddCircle(center, radius, IM_COL32(80, 80, 120, 255), 64, 1.5f);
+    // Range rings
+    for (int i = 1; i <= 4; i++) {
+        float r = radius * ((float)i / 4.0f);
+        dl->AddCircle(center, r, IM_COL32(50, 50, 80, 180), 48, 1.0f);
+    }
+    // Crosshair
+    dl->AddLine(ImVec2(center.x - radius, center.y), ImVec2(center.x + radius, center.y),
+                IM_COL32(80, 80, 100, 160), 1.0f);
+    dl->AddLine(ImVec2(center.x, center.y - radius), ImVec2(center.x, center.y + radius),
+                IM_COL32(80, 80, 100, 160), 1.0f);
+    // Self
+    dl->AddCircleFilled(center, 4.0f, IM_COL32(80, 220, 80, 255));
+
+    if (!scan::g_player.found) {
+        ImGui::Dummy(canvas_sz);
+        ImGui::TextDisabled("waiting for player position...");
+        ImGui::End();
+        return;
+    }
+
+    static std::vector<scan::Entity> snap;
+    scan::copy_snapshot(snap);
+    for (const auto& e : snap) {
+        if (!e.has_pos || e.is_self) continue;
+        if (e.is_player  && !show_players) continue;
+        if (e.is_mob     && !show_mobs)    continue;
+        if (e.is_walker  && !show_walkers) continue;
+        if (e.is_item    && !show_items)   continue;
+
+        float ax = e.cx * scan::CHUNK_SIZE + e.x;
+        float az = e.cy * scan::CHUNK_SIZE + e.z;
+        float dx = ax - scan::g_player.ax;
+        float dz = az - scan::g_player.az;
+        float dist2 = dx*dx + dz*dz;
+        if (dist2 > range * range) continue;
+
+        // Scale into radar space (top-down: x → right, z → up=north)
+        float sx = center.x + (dx / range) * radius;
+        float sy = center.y - (dz / range) * radius;
+
+        ImU32 color;
+        if (e.is_player)      color = IM_COL32(255, 60, 60, 255);
+        else if (e.is_walker) color = IM_COL32(200, 200, 60, 255);
+        else if (e.is_mob)    color = IM_COL32(230, 130, 40, 255);
+        else                  color = IM_COL32(120, 180, 255, 220);
+
+        dl->AddCircleFilled(ImVec2(sx, sy), e.is_player ? 4.0f : 3.0f, color);
+    }
+    ImGui::Dummy(canvas_sz);
+    ImGui::End();
+}
+
 void draw_entity_list() {
     auto& g = state::g;
     ImGui::SetNextWindowPos(ImVec2(20, 300), ImGuiCond_FirstUseEver);
@@ -163,27 +242,57 @@ void draw_entity_list() {
     // Filter
     static char filter[64] = "";
     ImGui::InputText("filter (name contains)", filter, sizeof(filter));
+    static bool sort_by_dist = true;
+    static bool only_players = false;
+    ImGui::Checkbox("sort by distance", &sort_by_dist);
+    ImGui::SameLine();
+    ImGui::Checkbox("players only", &only_players);
     ImGui::Separator();
 
-    // Snapshot
+    if (scan::g_player.found) {
+        ImGui::Text("SELF: id=%d abs=(%.1f, %.1f, %.1f)",
+                    scan::g_player.id, scan::g_player.ax, scan::g_player.ay, scan::g_player.az);
+    } else {
+        ImGui::TextDisabled("player not found");
+    }
+    ImGui::Separator();
+
+    // Snapshot + sort by distance
     static std::vector<scan::Entity> snap;
     scan::copy_snapshot(snap);
+    if (sort_by_dist) {
+        std::sort(snap.begin(), snap.end(),
+                  [](const scan::Entity& a, const scan::Entity& b) {
+                      if (a.distance < 0) return false;
+                      if (b.distance < 0) return true;
+                      return a.distance < b.distance;
+                  });
+    }
     ImGui::BeginChild("entlist", ImVec2(0, 200), true);
     int shown = 0;
     for (size_t i = 0; i < snap.size(); i++) {
         const auto& e = snap[i];
+        if (only_players && !e.is_player) continue;
         if (filter[0]) {
             if (e.name.find(filter) == std::string::npos) continue;
         }
         if (shown >= 200) break;
+        // Colour by category
+        ImVec4 c(0.75f, 0.75f, 0.75f, 1.0f);
+        if (e.is_self)        c = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+        else if (e.is_player) c = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
+        else if (e.is_walker) c = ImVec4(1.0f, 0.9f, 0.4f, 1.0f);
+        else if (e.is_mob)    c = ImVec4(1.0f, 0.6f, 0.3f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, c);
         if (e.has_pos) {
-            ImGui::Text("[%4d] id=%5d %-32s  pos=(%.1f, %.1f, %.1f) chunk=(%d,%d)",
-                        e.id, e.id, e.name.empty() ? "(no name)" : e.name.c_str(),
-                        e.x, e.y, e.z, e.cx, e.cy);
+            ImGui::Text("[%5d] %-30s dist=%6.1f pos=(%.0f,%.0f,%.0f)",
+                        e.id, e.name.empty() ? "(no name)" : e.name.c_str(),
+                        e.distance, e.x, e.y, e.z);
         } else {
-            ImGui::Text("[%4d] id=%5d %-32s  (no pos)",
-                        e.id, e.id, e.name.empty() ? "(no name)" : e.name.c_str());
+            ImGui::Text("[%5d] %-30s (no pos)",
+                        e.id, e.name.empty() ? "(no name)" : e.name.c_str());
         }
+        ImGui::PopStyleColor();
         shown++;
     }
     if (shown == 0) ImGui::TextDisabled("(no entities match filter)");
@@ -222,6 +331,7 @@ void draw_all() {
     draw_overview();
     draw_memory_viewer();
     draw_entity_list();
+    draw_radar();
 }
 
 } // namespace ui

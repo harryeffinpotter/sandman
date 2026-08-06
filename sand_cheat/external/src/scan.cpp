@@ -14,10 +14,12 @@
 #include <string>
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 
 namespace scan {
 
 ComponentIndices g_indices;
+PlayerInfo       g_player;
 
 namespace {
 
@@ -259,7 +261,49 @@ bool tick() {
             }
         }
 
+        // Classify entity
+        if (!e.name.empty()) {
+            if (e.name.rfind("PlayerAvatar", 0) == 0)         e.is_player = true;
+            else if (e.name.rfind("EXPEDITION_WALKER", 0) == 0) e.is_walker = true;
+            else if (e.name.rfind("mob_", 0) == 0 ||
+                     e.name.rfind("MobLivingSand", 0) == 0 ||
+                     e.name.rfind("MobGhoul", 0) == 0)          e.is_mob = true;
+            else e.is_item = true;
+        }
         temp.push_back(std::move(e));
+    }
+
+    // Player detection — find the entity that has both UserNameComponent
+    // AND a position, and match to the CURRENT process's user (heuristic:
+    // in single-player or as the local user, that's usually the closest
+    // player-typed entity to the camera. For now pick the first PlayerAvatar
+    // with a position and call it self — real "which user is me" needs
+    // AccountId comparison against something we can only get post-login.)
+    PlayerInfo pi{};
+    for (auto& e : temp) {
+        if (e.is_player && e.has_pos) {
+            pi.found = true;
+            pi.entity_ptr = e.ptr;
+            pi.id = e.id;
+            pi.ax = e.cx * CHUNK_SIZE + e.x;
+            pi.ay = e.y;
+            pi.az = e.cy * CHUNK_SIZE + e.z;
+            e.is_self = true;
+            break;
+        }
+    }
+    g_player = pi;
+
+    // Distance from player
+    if (pi.found) {
+        for (auto& e : temp) {
+            if (!e.has_pos) continue;
+            float ax = e.cx * CHUNK_SIZE + e.x;
+            float ay = e.y;
+            float az = e.cy * CHUNK_SIZE + e.z;
+            float dx = ax - pi.ax, dy = ay - pi.ay, dz = az - pi.az;
+            e.distance = sqrtf(dx*dx + dy*dy + dz*dz);
+        }
     }
 
     {

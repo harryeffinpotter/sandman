@@ -20,7 +20,26 @@ struct Entity {
     float    x = 0, y = 0, z = 0;
     int32_t  cx = 0, cy = 0;
     bool     has_pos = false;
+    // Computed each tick when player is known
+    float    distance = -1.0f;
+    // Classification (set by scan post-processing)
+    bool     is_player = false;
+    bool     is_mob    = false;
+    bool     is_walker = false;
+    bool     is_item   = false;
+    bool     is_self   = false;
 };
+
+struct PlayerInfo {
+    bool     found = false;
+    uint64_t entity_ptr = 0;
+    int32_t  id = 0;
+    float    ax = 0, ay = 0, az = 0;  // absolute world position
+};
+extern PlayerInfo g_player;
+
+// Chunk size for chunked coords (Unity floating-origin trick).
+constexpr float CHUNK_SIZE = 100.0f;
 
 // One-time (or on-GCM-change) discovery of component indices from
 // GameContextModule + 0x20. Reads the componentNames array and matches
