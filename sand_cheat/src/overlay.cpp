@@ -1,5 +1,6 @@
 #include "overlay.h"
 #include "cheat.h"
+#include "debug_log.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -25,29 +26,20 @@ extern std::atomic<int> g_dbgHasRecoilLook;
 extern std::atomic<int> g_dbgHasOverheated;
 
 static void dbglog(const char* fmt, ...) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\overlay_debug.txt", "a");
-    if (!f) return;
-    va_list a; va_start(a, fmt);
-    vfprintf(f, fmt, a);
-    va_end(a);
-    fflush(f);
-    fclose(f);
+    char tmp[256];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
+    ringlog::push("[d] %s", tmp);
 }
-
 static void tlog(const char* fmt, ...) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\injection_trace.txt", "a");
-    if (!f) return;
-    fprintf(f, "[%lu] ", GetTickCount());
-    va_list a; va_start(a, fmt);
-    vfprintf(f, fmt, a);
-    va_end(a);
-    fflush(f); fclose(f);
+    char tmp[256];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
+    ringlog::push("[t] %s", tmp);
 }
 
-static const char* SETTINGS_PATH = "C:\\Users\\ysg\\projects\\sand_cheat\\sand_cheat_settings.ini";
-
-static void save_settings() {
-    FILE* f = fopen(SETTINGS_PATH, "w");
+static void save_settings() { /* stealth: no I/O from injected DLL */ }
+#if 0
+static void save_settings_disabled_() {
+    FILE* f = nullptr;
     if (!f) return;
     fprintf(f, "esp3d=%d\n", g_esp3DEnabled.load() ? 1 : 0);
     fprintf(f, "espMaxDist=%.0f\n", g_espMaxDist);
@@ -191,6 +183,8 @@ static void load_settings() {
     }
     fclose(f);
 }
+#endif
+static void load_settings() { /* stealth: no I/O from injected DLL */ }
 
 static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -1044,7 +1038,7 @@ static bool seh_present_init(IDXGISwapChain* pSwapChain) {
 
             IMGUI_CHECKVERSION();
             ImGui::CreateContext();
-            ImGui::GetIO().IniFilename = "C:\\Users\\ysg\\projects\\sand_cheat\\imgui_layout.ini";
+            ImGui::GetIO().IniFilename = nullptr;
             ImGui::StyleColorsDark();
 
             load_settings();
@@ -1117,7 +1111,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         LeaveCriticalSection(&g_itemsLock);
 
         ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(480, 520), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(820, 520), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSizeConstraints(ImVec2(300, 200), ImVec2(FLT_MAX, FLT_MAX));
         ImGui::SetNextWindowBgAlpha(0.85f);
         ImGui::Begin("Sand Raider", &g_menuVisible);
@@ -1260,6 +1254,68 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::Text("Items");
                 ImGui::BeginChild("ItemList", ImVec2(0, 0), true);
 
+                struct ItemRowSnap {
+                    std::string name;
+                    float distance;
+                    int entityId;
+                    int serverId;
+                    void* entityPtr;
+                    bool isWeapon;
+                    bool isHeavy;
+                    bool isHeldByPlayer;
+                };
+                static std::vector<ItemRowSnap> rowSnaps;
+                rowSnaps.clear();
+
+                bool wf = g_weaponFilter.load();
+                size_t nlen = strlen(searchBuf);
+
+                EnterCriticalSection(&g_itemsLock);
+                rowSnaps.reserve(g_items.size());
+                for (size_t i = 0; i < g_items.size(); i++) {
+                    const ItemInfo& item = g_items[i];
+                    if (wf && !item.isWeapon) continue;
+                    if (nlen > 0) {
+                        bool found = false;
+                        const char* haystack = item.name.c_str();
+                        size_t hlen = item.name.size();
+                        if (nlen <= hlen) {
+                            for (size_t s = 0; s <= hlen - nlen; s++) {
+                                bool match = true;
+                                for (size_t c = 0; c < nlen; c++) {
+                                    if (tolower((unsigned char)haystack[s+c]) != tolower((unsigned char)searchBuf[c])) {
+                                        match = false;
+                                        break;
+                                    }
+                                }
+                                if (match) { found = true; break; }
+                            }
+                        }
+                        if (!found) continue;
+                    }
+
+                    if (g_hiddenNames.count(item.name)) continue;
+                    {
+                        bool prefixHidden = false;
+                        for (auto& p : g_hiddenPrefixes) {
+                            if (item.name.rfind(p, 0) == 0) { prefixHidden = true; break; }
+                        }
+                        if (prefixHidden) continue;
+                    }
+
+                    ItemRowSnap rs;
+                    rs.name = item.name;
+                    rs.distance = item.distance;
+                    rs.entityId = item.entityId;
+                    rs.serverId = item.serverId;
+                    rs.entityPtr = item.entityPtr;
+                    rs.isWeapon = item.isWeapon;
+                    rs.isHeavy = item.isHeavy;
+                    rs.isHeldByPlayer = item.isHeldByPlayer;
+                    rowSnaps.push_back(std::move(rs));
+                }
+                LeaveCriticalSection(&g_itemsLock);
+
                 if (ImGui::BeginTable("Items", 6,
                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter |
                     ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable)) {
@@ -1273,96 +1329,70 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 60.0f);
                     ImGui::TableHeadersRow();
 
-                    EnterCriticalSection(&g_itemsLock);
+                    int lockedId = g_lockedEntityId.load();
+                    bool permaActive = g_permaLockActive.load();
 
-                    int displayIdx = 0;
-                    for (size_t i = 0; i < g_items.size(); i++) {
-                        const ItemInfo& item = g_items[i];
-                        if (g_weaponFilter.load() && !item.isWeapon) continue;
-                        if (searchBuf[0] != '\0') {
-                            bool found = false;
-                            const char* haystack = item.name.c_str();
-                            const char* needle = searchBuf;
-                            size_t nlen = strlen(needle);
-                            size_t hlen = item.name.size();
-                            if (nlen <= hlen) {
-                                for (size_t s = 0; s <= hlen - nlen; s++) {
-                                    bool match = true;
-                                    for (size_t c = 0; c < nlen; c++) {
-                                        if (tolower((unsigned char)haystack[s+c]) != tolower((unsigned char)needle[c])) {
-                                            match = false;
-                                            break;
-                                        }
-                                    }
-                                    if (match) { found = true; break; }
-                                }
+                    ImGuiListClipper clipper;
+                    clipper.Begin((int)rowSnaps.size());
+                    while (clipper.Step()) {
+                        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+                            const ItemRowSnap& item = rowSnaps[i];
+                            int itemLockId = (item.serverId > 0) ? item.serverId : item.entityId;
+                            bool isLocked = permaActive && (itemLockId == lockedId);
+
+                            ImVec4 color;
+                            if (isLocked) color = ImVec4(0.0f, 1.0f, 1.0f, 1.0f);
+                            else if (item.isWeapon) color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
+                            else if (item.isHeldByPlayer) color = ImVec4(1.0f, 0.0f, 1.0f, 1.0f);
+                            else color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+
+                            ImGui::TableNextRow();
+                            ImGui::PushStyleColor(ImGuiCol_Text, color);
+
+                            char label[32];
+                            snprintf(label, sizeof(label), "%d", i + 1);
+
+                            ImGui::TableSetColumnIndex(0);
+                            bool clicked = ImGui::Selectable(label, isLocked,
+                                ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+
+                            if (clicked) {
+                                EnterCriticalSection(&g_itemsLock);
+                                g_permaLockName = item.name;
+                                LeaveCriticalSection(&g_itemsLock);
+                                g_permaLockActive.store(true);
+                                int lockId = (item.serverId > 0) ? item.serverId : item.entityId;
+                                g_lockedEntityId.store(lockId);
+                                g_lockedEntityPtr.store((uintptr_t)item.entityPtr);
+                                g_dupeMode.store(false);
                             }
-                            if (!found) continue;
+
+                            ImGui::TableSetColumnIndex(1);
+                            if (item.isHeldByPlayer)
+                                ImGui::Text("%s (held)", item.name.c_str());
+                            else
+                                ImGui::TextUnformatted(item.name.c_str());
+
+                            ImGui::TableSetColumnIndex(2);
+                            if (item.distance >= 0)
+                                ImGui::Text("%.1fm", item.distance);
+                            else
+                                ImGui::TextUnformatted("---");
+
+                            ImGui::TableSetColumnIndex(3);
+                            ImGui::TextUnformatted(item.isHeldByPlayer ? "PAR" : "WRLD");
+
+                            ImGui::TableSetColumnIndex(4);
+                            ImGui::TextUnformatted(item.isHeavy ? "HVY" : (item.isWeapon ? "WPN" : ""));
+
+                            ImGui::TableSetColumnIndex(5);
+                            ImGui::Text("%d", item.entityId);
+
+                            ImGui::PopStyleColor();
                         }
-
-                        if (g_hiddenNames.count(item.name)) continue;
-                        {
-                            bool prefixHidden = false;
-                            for (auto& p : g_hiddenPrefixes) {
-                                if (item.name.rfind(p, 0) == 0) { prefixHidden = true; break; }
-                            }
-                            if (prefixHidden) continue;
-                        }
-
-                        int itemLockId = (item.serverId > 0) ? item.serverId : item.entityId;
-                        bool isLocked = g_permaLockActive.load() && (itemLockId == g_lockedEntityId.load());
-
-                        ImVec4 color;
-                        if (isLocked) color = ImVec4(0.0f, 1.0f, 1.0f, 1.0f);
-                        else if (item.isWeapon) color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
-                        else if (item.isHeldByPlayer) color = ImVec4(1.0f, 0.0f, 1.0f, 1.0f);
-                        else color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-
-                        ImGui::TableNextRow();
-                        ImGui::PushStyleColor(ImGuiCol_Text, color);
-
-                        char label[32];
-                        snprintf(label, sizeof(label), "%d", displayIdx + 1);
-
-                        ImGui::TableSetColumnIndex(0);
-                        bool clicked = ImGui::Selectable(label, isLocked,
-                            ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
-
-                        if (clicked) {
-                            g_permaLockName = item.name;
-                            g_permaLockActive.store(true);
-                            int lockId = (item.serverId > 0) ? item.serverId : item.entityId;
-                            g_lockedEntityId.store(lockId);
-                            g_lockedEntityPtr.store((uintptr_t)item.entityPtr);
-                            g_dupeMode.store(false);
-                        }
-
-                        ImGui::TableSetColumnIndex(1);
-                        if (item.isHeldByPlayer)
-                            ImGui::Text("%s (held)", item.name.c_str());
-                        else
-                            ImGui::TextUnformatted(item.name.c_str());
-
-                        ImGui::TableSetColumnIndex(2);
-                        if (item.distance >= 0)
-                            ImGui::Text("%.1fm", item.distance);
-                        else
-                            ImGui::TextUnformatted("---");
-
-                        ImGui::TableSetColumnIndex(3);
-                        ImGui::TextUnformatted(item.isHeldByPlayer ? "PAR" : "WRLD");
-
-                        ImGui::TableSetColumnIndex(4);
-                        ImGui::TextUnformatted(item.isHeavy ? "HVY" : (item.isWeapon ? "WPN" : ""));
-
-                        ImGui::TableSetColumnIndex(5);
-                        ImGui::Text("%d", item.entityId);
-
-                        ImGui::PopStyleColor();
-                        displayIdx++;
                     }
+                    clipper.End();
 
-                    LeaveCriticalSection(&g_itemsLock);
                     ImGui::EndTable();
                 }
 
@@ -1686,6 +1716,28 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::EndTabItem();
             }
 
+            if (ImGui::BeginTabItem("Debug")) {
+                if (ImGui::Button("Clear")) ringlog::clear();
+                ImGui::SameLine();
+                ImGui::Text("Lines: %zu / %zu", ringlog::count(), ringlog::RING_CAP);
+                ImGui::Separator();
+
+                ImGui::BeginChild("DebugLogScroll", ImVec2(0, 0), true,
+                                  ImGuiWindowFlags_HorizontalScrollbar);
+                ImGuiListClipper clipper;
+                clipper.Begin((int)ringlog::count());
+                while (clipper.Step()) {
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                        ImGui::TextUnformatted(ringlog::line((size_t)i));
+                    }
+                }
+                if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {
+                    ImGui::SetScrollHereY(1.0f);
+                }
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+
             ImGui::EndTabBar();
         }
 
@@ -1859,7 +1911,19 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             seh_get_camera_yaw(&cosYaw, &sinYaw);
         }
 
+        struct RadarSnap {
+            WorldVector pos;
+            std::string displayName;
+            bool isPlayer;
+            bool isMob;
+            bool isWalker;
+        };
+        static std::vector<RadarSnap> radarSnaps;
+        radarSnaps.clear();
+        bool showItems = g_espShowItems.load();
+
         EnterCriticalSection(&g_itemsLock);
+        radarSnaps.reserve(g_items.size());
         for (auto& item : g_items) {
             bool isPlayer = (item.name.rfind("PlayerAvatar", 0) == 0);
             bool isMob = item.isCreature;
@@ -1868,8 +1932,19 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             if (isPlayer && !showPlayers) continue;
             if (isMob && !showMobs) continue;
             if (isWalker && !showWalkers) continue;
-            if (isItem && !g_espShowItems.load()) continue;
+            if (isItem && !showItems) continue;
 
+            RadarSnap rs;
+            rs.pos = item.pos;
+            if (isPlayer) rs.displayName = item.displayName;
+            rs.isPlayer = isPlayer;
+            rs.isMob = isMob;
+            rs.isWalker = isWalker;
+            radarSnaps.push_back(std::move(rs));
+        }
+        LeaveCriticalSection(&g_itemsLock);
+
+        for (auto& item : radarSnaps) {
             float absX = item.pos.cx * CHUNK_SIZE + item.pos.x;
             float absZ = item.pos.cy * CHUNK_SIZE + item.pos.z;
 
@@ -1894,20 +1969,19 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
             ImU32 dotColor;
             float dotSize;
-            if (isWalker) { dotColor = IM_COL32(0, 200, 255, 255); dotSize = 5.0f; }
-            else if (isPlayer) { dotColor = IM_COL32(255, 50, 50, 255); dotSize = 4.0f; }
-            else if (isMob) { dotColor = IM_COL32(255, 165, 0, 255); dotSize = 3.0f; }
+            if (item.isWalker) { dotColor = IM_COL32(0, 200, 255, 255); dotSize = 5.0f; }
+            else if (item.isPlayer) { dotColor = IM_COL32(255, 50, 50, 255); dotSize = 4.0f; }
+            else if (item.isMob) { dotColor = IM_COL32(255, 165, 0, 255); dotSize = 3.0f; }
             else { dotColor = IM_COL32(140, 200, 60, 200); dotSize = 2.5f; }
             drawList->AddCircleFilled(ImVec2(rx, ry), dotSize, dotColor);
 
             char distLabel[64];
-            if (isPlayer && !item.displayName.empty())
+            if (item.isPlayer && !item.displayName.empty())
                 snprintf(distLabel, sizeof(distLabel), "%s %.0fm", item.displayName.c_str(), dist);
             else
                 snprintf(distLabel, sizeof(distLabel), "%.0fm", dist);
             drawList->AddText(ImVec2(rx + 6, ry - 6), IM_COL32(255, 255, 255, 200), distLabel);
         }
-        LeaveCriticalSection(&g_itemsLock);
 
         if (g_menuVisible) {
             char rangeLabel[64];

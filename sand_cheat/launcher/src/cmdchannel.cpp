@@ -75,7 +75,7 @@ int32_t send_raw(const void* body_plain, uint32_t body_size) {
     return rc;
 }
 
-bool read_memory(uint32_t pid, uint64_t src, uint64_t dst, uint64_t size) {
+int32_t read_memory_rc(uint32_t pid, uint64_t src, uint64_t dst, uint64_t size) {
     // Spec §5.3 Cmd 0 body (48 bytes):
     //   +0x00 magic (u16=0x7C4A)
     //   +0x02 reserved (u16)
@@ -93,8 +93,11 @@ bool read_memory(uint32_t pid, uint64_t src, uint64_t dst, uint64_t size) {
     *reinterpret_cast<uint64_t*>(body + 0x10) = src;
     *reinterpret_cast<uint64_t*>(body + 0x18) = dst;
     *reinterpret_cast<uint64_t*>(body + 0x20) = size;
-    int32_t rc = send_raw(body, sizeof(body));
-    return rc == 0;
+    return send_raw(body, sizeof(body));
+}
+
+bool read_memory(uint32_t pid, uint64_t src, uint64_t dst, uint64_t size) {
+    return read_memory_rc(pid, src, dst, size) == 0;
 }
 
 bool write_memory(uint32_t pid, uint64_t dst, uint64_t src, uint64_t size) {
@@ -141,6 +144,28 @@ bool find_module(uint32_t pid, const wchar_t* name, uint64_t* out_base, uint32_t
 
     int32_t rc = send_raw(body, sizeof(body));
     return rc == 0 && *out_base != 0;
+}
+
+int32_t find_module_ex(uint32_t pid, const wchar_t* name,
+                       uint64_t* out_base, uint32_t* out_size) {
+    if (!name || !out_base) return -1;
+    size_t len = 0;
+    while (name[len]) ++len;
+    if (len == 0 || len > 127) return -1;
+
+    unsigned char body[0x38] = {0};
+    *reinterpret_cast<uint16_t*>(body + 0x00) = 0x7C4A;
+    *reinterpret_cast<uint32_t*>(body + 0x04) = 2;
+    *reinterpret_cast<uint32_t*>(body + 0x08) = pid;
+    *reinterpret_cast<uint16_t*>(body + 0x0C) = static_cast<uint16_t>(len);
+    *reinterpret_cast<uint64_t*>(body + 0x10) = reinterpret_cast<uint64_t>(name);
+    *reinterpret_cast<uint64_t*>(body + 0x18) = reinterpret_cast<uint64_t>(out_base);
+    *reinterpret_cast<uint64_t*>(body + 0x20) = out_size ? reinterpret_cast<uint64_t>(out_size) : 0;
+
+    *out_base = 0;
+    if (out_size) *out_size = 0;
+
+    return send_raw(body, sizeof(body));
 }
 
 bool alloc_memory(uint32_t pid, uint64_t hint, uint64_t size,
@@ -272,6 +297,14 @@ bool create_remote_thread(uint32_t pid, uint64_t start_address, uint64_t paramet
     *reinterpret_cast<uint64_t*>(body + 0x18) = parameter;
     *reinterpret_cast<uint64_t*>(body + 0x20) = out_tid ? reinterpret_cast<uint64_t>(out_tid) : 0;
     if (out_tid) *out_tid = 0;
+    int32_t rc = send_raw(body, sizeof(body));
+    return rc == 0;
+}
+
+bool unhook_hal() {
+    unsigned char body[0x10] = {0};
+    *reinterpret_cast<uint16_t*>(body + 0x00) = 0x7C4A;
+    *reinterpret_cast<uint32_t*>(body + 0x04) = 12;
     int32_t rc = send_raw(body, sizeof(body));
     return rc == 0;
 }

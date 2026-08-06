@@ -1,6 +1,7 @@
 // cl /EHsc /O2 /LD cheat.cpp /Fe:cheat.dll /link user32.lib
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "pe_resolve.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -94,7 +95,7 @@ struct IL2CPP_API {
 static HANDLE g_hConsole = INVALID_HANDLE_VALUE;
 
 #define RESOLVE(api, mod, name) \
-    api.name = (fn_##name)GetProcAddress(mod, #name); \
+    api.name = (fn_##name)pe_resolve::get_proc(mod, #name); \
     if (!api.name) { \
         SetConsoleTextAttribute(g_hConsole, CLR_RED); \
         printf("[!] Warning: %s not found\n", #name); \
