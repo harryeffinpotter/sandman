@@ -50,11 +50,6 @@ static PVOID g_resolved_apis[API_COUNT];
 typedef NTSTATUS (*hal_dispatch_fn_t)(PVOID, PVOID, PVOID, PVOID);
 static hal_dispatch_fn_t  g_hal_original = NULL;
 static PVOID*             g_hal_slot_ptr = NULL;
-static volatile LONG   g_notify_armed = 0;
-static volatile ULONG  g_notify_target_pid = 0;
-static volatile LONG   g_notify_fired = 0;
-static WCHAR           g_notify_exe_name[64];
-static USHORT          g_notify_exe_name_len = 0;
 
 // LDR_DATA_TABLE_ENTRY layout (DDK-stable fields we care about).
 typedef struct _LDR_DATA_TABLE_ENTRY_RE {
@@ -259,19 +254,6 @@ typedef NTSTATUS (NTAPI *ZwFreeVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, ULONG);
 typedef NTSTATUS (NTAPI *ZwProtectVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
 typedef NTSTATUS (NTAPI *ZwQueryVirtualMemory_t)(HANDLE, PVOID, ULONG /*class*/, PVOID, SIZE_T, PSIZE_T);
 typedef PVOID    (NTAPI *PsGetProcessPeb_t)(PEPROCESS);
-typedef NTSTATUS (NTAPI *PsSetLoadImageNotifyRoutine_t)(PVOID NotifyRoutine);
-typedef NTSTATUS (NTAPI *PsRemoveLoadImageNotifyRoutine_t)(PVOID NotifyRoutine);
-typedef NTSTATUS (NTAPI *RtlCreateUserThread_t)(
-    HANDLE ProcessHandle,
-    PVOID SecurityDescriptor,
-    BOOLEAN CreateSuspended,
-    ULONG StackZeroBits,
-    PSIZE_T StackReserved,
-    PSIZE_T StackCommit,
-    PVOID StartAddress,
-    PVOID StartParameter,
-    PHANDLE ThreadHandle,
-    PVOID ClientId);
 
 // PEB + Ldr layout (x64). Not in ntddk.h — manual-defined for our walker.
 typedef struct _PEB_LDR_DATA_RE {
@@ -286,167 +268,6 @@ typedef struct _PEB_RE {
     UCHAR              _pad0[0x18];
     PPEB_LDR_DATA_RE   Ldr;               // 0x18
 } PEB_RE, *PPEB_RE;
-
-static VOID image_load_notify(PUNICODE_STRING FullImageName,
-                               HANDLE ProcessId,
-                               PIMAGE_INFO ImageInfo) {
-    UNREFERENCED_PARAMETER(ImageInfo);
-    if (!g_notify_armed || g_notify_fired) return;
-    if (!FullImageName || !FullImageName->Buffer) return;
-
-    USHORT i;
-    WCHAR* filename = FullImageName->Buffer;
-    USHORT char_count = FullImageName->Length / sizeof(WCHAR);
-    for (i = char_count; i > 0; --i) {
-        if (FullImageName->Buffer[i - 1] == L'\\' || FullImageName->Buffer[i - 1] == L'/') {
-            filename = &FullImageName->Buffer[i];
-            char_count = char_count - i;
-            break;
-        }
-    }
-
-    if (char_count != g_notify_exe_name_len) return;
-    for (i = 0; i < char_count; ++i) {
-        WCHAR a = filename[i];
-        WCHAR b = g_notify_exe_name[i];
-        if (a >= L'A' && a <= L'Z') a += 32;
-        if (b >= L'A' && b <= L'Z') b += 32;
-        if (a != b) return;
-    }
-
-    g_notify_target_pid = (ULONG)(ULONG_PTR)ProcessId;
-    InterlockedExchange(&g_notify_fired, 1);
-}
-
-static NTSTATUS cmd_arm_image_notify(UCHAR* body, ULONG body_size) {
-    PsSetLoadImageNotifyRoutine_t pSet;
-    USHORT name_len;
-    PVOID  name_ptr;
-    NTSTATUS st;
-
-    if (body_size < 0x18) return STATUS_INVALID_PARAMETER;
-
-    name_len = *(USHORT*)(body + 0x08);
-    name_ptr = (PVOID)*(ULONGLONG*)(body + 0x10);
-
-    if (name_len == 0 || name_len > 63) return STATUS_INVALID_PARAMETER;
-    if (!is_usermode_range(name_ptr, (SIZE_T)name_len * sizeof(WCHAR)))
-        return STATUS_INVALID_PARAMETER;
-
-    pSet = (PsSetLoadImageNotifyRoutine_t)g_resolved_apis[API_PsSetLoadImageNotifyRoutine];
-    if (!pSet) return STATUS_PROCEDURE_NOT_FOUND;
-
-    if (!safe_memcpy(g_notify_exe_name, name_ptr, (SIZE_T)name_len * sizeof(WCHAR)))
-        return STATUS_ACCESS_VIOLATION;
-    g_notify_exe_name[name_len] = 0;
-    g_notify_exe_name_len = name_len;
-
-    InterlockedExchange(&g_notify_fired, 0);
-    g_notify_target_pid = 0;
-
-    if (!g_notify_armed) {
-        st = pSet((PVOID)image_load_notify);
-        if (!NT_SUCCESS(st)) return st;
-        InterlockedExchange(&g_notify_armed, 1);
-    }
-
-    return STATUS_SUCCESS;
-}
-
-static NTSTATUS cmd_query_armed_pid(UCHAR* body, ULONG body_size) {
-    PVOID out_pid_ptr, out_fired_ptr;
-    ULONG pid_val, fired_val;
-
-    if (body_size < 0x18) return STATUS_INVALID_PARAMETER;
-
-    out_pid_ptr   = (PVOID)*(ULONGLONG*)(body + 0x08);
-    out_fired_ptr = (PVOID)*(ULONGLONG*)(body + 0x10);
-
-    if (!is_usermode_range(out_pid_ptr, sizeof(ULONG))) return STATUS_INVALID_PARAMETER;
-    if (!is_usermode_range(out_fired_ptr, sizeof(ULONG))) return STATUS_INVALID_PARAMETER;
-
-    pid_val = g_notify_target_pid;
-    fired_val = (ULONG)g_notify_fired;
-
-    if (!safe_memcpy(out_pid_ptr, &pid_val, sizeof(pid_val))) return STATUS_ACCESS_VIOLATION;
-    if (!safe_memcpy(out_fired_ptr, &fired_val, sizeof(fired_val))) return STATUS_ACCESS_VIOLATION;
-
-    return STATUS_SUCCESS;
-}
-
-static NTSTATUS cmd_create_thread(UCHAR* body, ULONG body_size) {
-    PsLookupProcessByProcessId_t pLookup;
-    ObfDereferenceObject_t       pDeref;
-    RtlCreateUserThread_t        pCreate;
-    ULONG       pid;
-    PVOID       start_address, parameter, out_tid_ptr;
-    PEPROCESS   target = NULL;
-    HANDLE      proc_handle = NULL;
-    HANDLE      thread_handle = NULL;
-    NTSTATUS    st;
-    struct { HANDLE uid; HANDLE tid; } client_id = {0};
-
-    if (body_size < 0x28) return STATUS_INVALID_PARAMETER;
-
-    pid           = *(ULONG*)(body + 0x08);
-    start_address = (PVOID)*(ULONGLONG*)(body + 0x10);
-    parameter     = (PVOID)*(ULONGLONG*)(body + 0x18);
-    out_tid_ptr   = (PVOID)*(ULONGLONG*)(body + 0x20);
-
-    if (!start_address) return STATUS_INVALID_PARAMETER;
-
-    pLookup = (PsLookupProcessByProcessId_t)g_resolved_apis[API_PsLookupProcessByProcessId];
-    pDeref  = (ObfDereferenceObject_t)      g_resolved_apis[API_ObfDereferenceObject];
-    pCreate = (RtlCreateUserThread_t)       g_resolved_apis[API_RtlCreateUserThread];
-    if (!pLookup || !pDeref || !pCreate) return STATUS_PROCEDURE_NOT_FOUND;
-
-    st = pLookup((HANDLE)(ULONG_PTR)pid, &target);
-    if (!NT_SUCCESS(st) || !target) return STATUS_INVALID_HANDLE;
-
-    st = ObOpenObjectByPointer(target, OBJ_KERNEL_HANDLE, NULL, PROCESS_ALL_ACCESS, *PsProcessType, KernelMode, &proc_handle);
-    if (!NT_SUCCESS(st)) {
-        pDeref(target);
-        return st;
-    }
-
-    st = pCreate(proc_handle,
-                 NULL,
-                 FALSE,
-                 0,
-                 NULL,
-                 NULL,
-                 start_address,
-                 parameter,
-                 &thread_handle,
-                 &client_id);
-
-    if (NT_SUCCESS(st) && thread_handle) {
-        ZwClose(thread_handle);
-    }
-
-    ZwClose(proc_handle);
-    pDeref(target);
-
-    if (NT_SUCCESS(st) && out_tid_ptr && is_usermode_range(out_tid_ptr, sizeof(ULONG))) {
-        ULONG tid = (ULONG)(ULONG_PTR)client_id.tid;
-        safe_memcpy(out_tid_ptr, &tid, sizeof(tid));
-    }
-
-    return st;
-}
-
-static NTSTATUS cmd_unhook_hal(UCHAR* body, ULONG body_size) {
-    (void)body; (void)body_size;
-    if (g_hal_slot_ptr && g_hal_original) {
-        // Aligned 8-byte store: naturally atomic on x64.
-        // Leave g_hal_original set so any in-flight dispatcher call that
-        // already loaded our function pointer can still fall through to
-        // the original via the passthrough branch.
-        *g_hal_slot_ptr = (PVOID)g_hal_original;
-        g_hal_slot_ptr = NULL;
-    }
-    return STATUS_SUCCESS;
-}
 
 // Phase 14.5: READ_MEMORY (cmd 0). Body layout (48 bytes total, spec §5.3):
 //   +0x00 magic    (u16=0x7C4A, already verified)
@@ -579,7 +400,9 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
     PEPROCESS   target = NULL;
     KAPC_STATE_RE apc_state;
     PPEB_RE     peb;
+    PPEB_LDR_DATA_RE ldr;
     PLIST_ENTRY head, cur;
+    PLDR_DATA_TABLE_ENTRY_RE e;
     ULONGLONG   found_base = 0;
     ULONG       found_size = 0;
     BOOLEAN     found = FALSE;
@@ -603,21 +426,7 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
     pAttach = (KeStackAttachProcess_t)      g_resolved_apis[API_KeStackAttachProcess];
     pDetach = (KeUnstackDetachProcess_t)    g_resolved_apis[API_KeUnstackDetachProcess];
     pGetPeb = (PsGetProcessPeb_t)           g_resolved_apis[API_PsGetProcessPeb];
-    {
-        MmCopyVirtualMemory_t pCopy =
-            (MmCopyVirtualMemory_t)g_resolved_apis[API_MmCopyVirtualMemory];
-        IoGetCurrentProcess_t pCurr =
-            (IoGetCurrentProcess_t)g_resolved_apis[API_IoGetCurrentProcess];
-        PEPROCESS caller_proc;
-
-        if (!pLookup || !pDeref || !pAttach || !pDetach || !pGetPeb || !pCopy || !pCurr)
-            return STATUS_PROCEDURE_NOT_FOUND;
-
-    // Capture caller process BEFORE any attach — KeStackAttachProcess swaps
-    // the current-process pointer, so pCurr() while attached returns target,
-    // not the real caller. MmCopyVirtualMemory's TargetProcess must be the
-    // process whose address space the kernel-stack dest lives in.
-    caller_proc = pCurr();
+    if (!pLookup || !pDeref || !pAttach || !pDetach || !pGetPeb) return STATUS_PROCEDURE_NOT_FOUND;
 
     // Copy name from launcher VA → kernel stack (still in launcher context).
     // Zero-terminate explicitly so _wcsicmp is safe.
@@ -627,52 +436,15 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
     st = pLookup((HANDLE)(ULONG_PTR)pid, &target);
     if (!NT_SUCCESS(st) || !target) return STATUS_INVALID_HANDLE;
 
-    // PsGetProcessPeb reads EPROCESS.Peb — no attach needed.
-    peb = (PPEB_RE)pGetPeb(target);
-    if (!peb) {
-        pDeref(target);
-        return (NTSTATUS)0xE0000001;
-    }
-
-    // Probe (unattached): MmCopyVirtualMemory handles cross-process attach
-    // internally and is SEH-safe — pages the source page in on demand,
-    // returns NTSTATUS error on truly invalid src. If the probes pass, the
-    // Ldr chain is guaranteed readable for the direct walk that follows.
-    {
-        PPEB_LDR_DATA_RE  probed_ldr = NULL;
-        LIST_ENTRY        probed_head;
-        SIZE_T            got = 0;
-
-        st = pCopy(target, &peb->Ldr, caller_proc,
-                   &probed_ldr, sizeof(probed_ldr), KernelMode, &got);
-        if (!NT_SUCCESS(st) || !probed_ldr) {
-            pDeref(target);
-            return (NTSTATUS)0xE0000004;
-        }
-
-        st = pCopy(target, &probed_ldr->InLoadOrderModuleList, caller_proc,
-                   &probed_head, sizeof(probed_head), KernelMode, &got);
-        if (!NT_SUCCESS(st)) {
-            pDeref(target);
-            return (NTSTATUS)0xE0000005;
-        }
-    }
-
-    // Probes passed — attach for the direct walk. The original walking code
-    // is preserved verbatim; the only difference from the pre-BSOD version
-    // is the two probes above that force the PEB/Ldr pages resident and
-    // filter out truly-torn processes before we can crash on them.
+    // Enter target VA space. From here, target's user VAs are accessible.
     pAttach(target, &apc_state);
-    {
-        PPEB_LDR_DATA_RE ldr = peb->Ldr;
-        PLDR_DATA_TABLE_ENTRY_RE e;
-        ULONG walk_count = 0;
-
+    peb = (PPEB_RE)pGetPeb(target);
+    if (peb && peb->Ldr) {
+        ldr = peb->Ldr;
         head = &ldr->InLoadOrderModuleList;
-        cur  = head->Flink;
-        while (cur && cur != head && walk_count < 2000) {
+        cur = head->Flink;
+        while (cur && cur != head) {
             e = CONTAINING_RECORD(cur, LDR_DATA_TABLE_ENTRY_RE, InLoadOrderLinks);
-            walk_count++;
             if (e->BaseDllName.Buffer &&
                 e->BaseDllName.Length == name_len * sizeof(WCHAR) &&
                 _wcsicmp(e->BaseDllName.Buffer, name_buf) == 0) {
@@ -683,18 +455,9 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
             }
             cur = cur->Flink;
         }
-        if (!found && out_size_ptr && is_usermode_range(out_size_ptr, sizeof(ULONG))) {
-            safe_memcpy(out_size_ptr, &walk_count, sizeof(walk_count));
-        }
-        if (!found && walk_count == 0) {
-            pDetach(&apc_state);
-            pDeref(target);
-            return (NTSTATUS)0xE0000003;
-        }
     }
     pDetach(&apc_state);
     pDeref(target);
-    } // pCopy/pCurr scope
 
     if (!found) return STATUS_NOT_FOUND;
 
@@ -1139,18 +902,6 @@ static NTSTATUS our_hal_dispatcher(PVOID a1, PVOID a2, PVOID a3, PVOID a4) {
             break;
         case 8:
             status = cmd_set_pte_nx(body, buffer_size);
-            break;
-        case 9:
-            status = cmd_arm_image_notify(body, buffer_size);
-            break;
-        case 10:
-            status = cmd_query_armed_pid(body, buffer_size);
-            break;
-        case 11:
-            status = cmd_create_thread(body, buffer_size);
-            break;
-        case 12:
-            status = cmd_unhook_hal(body, buffer_size);
             break;
         default:
             status = STATUS_NOT_IMPLEMENTED;

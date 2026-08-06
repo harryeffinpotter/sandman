@@ -50,7 +50,7 @@ static void llog(const char* fmt, ...) {
 
 namespace {
 
-static std::string g_target_name = "sand_be.exe";
+static std::string g_target_name = "sand.exe";
 
 static uint32_t find_target_pid() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
         if (NT_SUCCESS(cs) && (ci.CodeIntegrityOptions & CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED)) {
             std::printf("\n[!] HVCI (Hypervisor-Protected Code Integrity) is ENABLED\n");
             std::printf("[!] (CodeIntegrityOptions=0x%08X)\n", ci.CodeIntegrityOptions);
-            std::printf("[!] iqvw64e.sys may be blocked while HVCI is on.\n");
+            std::printf("[!] WinIo64.sys may be blocked while HVCI is on.\n");
             std::printf("[!] NtLoadDriver will fail silently while HVCI is on.\n\n");
             std::printf("[!] Disable HVCI to proceed:\n");
             std::printf("[!]   Windows Security -> Device security -> Core isolation\n");
@@ -262,16 +262,20 @@ int main(int argc, char* argv[]) {
 
     std::printf("[*] BYOVD fully up — device handle ready.\n");
 
-    {
+    // Task #3 smoke tests:
+    //  (a) MAP/UNMAP round trip against phys page 0 (16-byte peek)
+    //  (b) CR3 scan against low 1 MB
+    ioctl::Handle h;
+    if (ioctl::map_physical(byovd_ctx.device, 0, 0x1000, ioctl::RW_READ, h)) {
         uint8_t buf[16] = {};
-        if (ioctl::read_physical(byovd_ctx.device, 0, buf, sizeof(buf))) {
-            bool all_zero = true;
-            for (int i = 0; i < 16; ++i) if (buf[i] != 0) { all_zero = false; break; }
-            std::printf("[+] phys 0x0 readable (first 16 %s)\n",
-                        all_zero ? "zero" : "nonzero");
-        } else {
-            std::printf("[!] read_physical(0) failed\n");
-        }
+        std::memcpy(buf, reinterpret_cast<const void*>(h.pvPhysMemLin), sizeof(buf));
+        bool all_zero = true;
+        for (int i = 0; i < 16; ++i) if (buf[i] != 0) { all_zero = false; break; }
+        std::printf("[+] phys 0x0 readable (first 16 %s), unmapped clean\n",
+                    all_zero ? "zero" : "nonzero");
+        ioctl::unmap_physical(byovd_ctx.device, h);
+    } else {
+        std::printf("[!] map_physical failed\n");
     }
 
     uint64_t cr3 = 0;

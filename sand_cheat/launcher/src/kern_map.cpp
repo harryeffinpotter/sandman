@@ -27,8 +27,18 @@ bool write_kva(HANDLE device, uint64_t cr3, uint64_t kva, const void* src, size_
 }
 
 bool read_kva(HANDLE device, uint64_t cr3, uint64_t kva, void* dst, size_t size) {
-    (void)cr3;
-    return ioctl::read_kernel_virtual(device, kva, dst, size);
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    while (size) {
+        uint64_t page_off = kva & 0xFFFULL;
+        size_t   chunk    = std::min<size_t>(size, 0x1000 - page_off);
+        uint64_t phys     = 0;
+        if (!pagewalk::va_to_phys(device, cr3, kva, phys)) return false;
+        if (!ioctl::read_physical(device, phys, out, chunk)) return false;
+        kva  += chunk;
+        out  += chunk;
+        size -= chunk;
+    }
+    return true;
 }
 
 const IMAGE_NT_HEADERS64* nt_headers(const uint8_t* pe, size_t n) {
@@ -290,8 +300,7 @@ bool resolve_imports(HANDLE device, uint64_t cr3,
 
 bool apply_section_protection(HANDLE device, uint64_t cr3,
                               const uint8_t* pe_buf, size_t pe_size,
-                              uint64_t kernel_base, uint64_t pte_base) {
-    (void)cr3;
+                              uint64_t kernel_base) {
     const auto* nt = nt_headers(pe_buf, pe_size);
     if (!nt) return false;
 
@@ -315,17 +324,20 @@ bool apply_section_protection(HANDLE device, uint64_t cr3,
 
         int section_pages = 0;
         for (uint64_t va = page_start; va < page_end; va += 0x1000) {
-            uint64_t pte_va = pte_base + (((va >> 12) << 3) & 0x7FFFFFFFF8ULL);
-
-            uint64_t pte = 0;
-            if (!ioctl::read_kernel_virtual(device, pte_va, &pte, sizeof(pte))) {
-                std::printf("[!] protection: PTE read failed at PTE VA %016llX (for VA %016llX)\n",
-                            (unsigned long long)pte_va, (unsigned long long)va);
+            uint64_t pte_phys = 0;
+            if (!pagewalk::va_to_pte_phys(device, cr3, va, pte_phys)) {
+                std::printf("[!] protection: no PTE for VA %016llX\n",
+                            (unsigned long long)va);
                 return false;
             }
 
-            uint64_t pte_before = pte;
+            uint64_t pte = 0;
+            if (!ioctl::read_physical(device, pte_phys, &pte, sizeof(pte))) {
+                std::printf("[!] protection: PTE read failed\n");
+                return false;
+            }
 
+            // Bit 1 = R/W (1 = writable). Bit 63 = NX (1 = not executable).
             constexpr uint64_t PTE_RW = 1ULL << 1;
             constexpr uint64_t PTE_NX = 1ULL << 63;
 
@@ -335,21 +347,10 @@ bool apply_section_protection(HANDLE device, uint64_t cr3,
             if (executable) pte &= ~PTE_NX;
             else            pte |= PTE_NX;
 
-            if (!ioctl::write_kernel_virtual(device, pte_va, &pte, sizeof(pte))) {
-                std::printf("[!] protection: PTE write failed at PTE VA %016llX\n",
-                            (unsigned long long)pte_va);
+            if (!ioctl::write_physical(device, pte_phys, &pte, sizeof(pte))) {
+                std::printf("[!] protection: PTE write failed\n");
                 return false;
             }
-
-            if (pages_total == 0) {
-                uint64_t readback = 0;
-                ioctl::read_kernel_virtual(device, pte_va, &readback, sizeof(readback));
-                std::printf("    [diag] first PTE: va=%016llX pte_va=%016llX before=%016llX after=%016llX readback=%016llX\n",
-                            (unsigned long long)va, (unsigned long long)pte_va,
-                            (unsigned long long)pte_before, (unsigned long long)pte,
-                            (unsigned long long)readback);
-            }
-
             ++section_pages;
             ++pages_total;
         }

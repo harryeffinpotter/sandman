@@ -17,7 +17,6 @@ bool heartbeat(uint64_t target_addr);
 // Cross-process read: driver reads `size` bytes from src in process `pid`
 // and writes them to dst in our process. size ≤ 1 MB.
 bool read_memory(uint32_t pid, uint64_t src, uint64_t dst, uint64_t size);
-int32_t read_memory_rc(uint32_t pid, uint64_t src, uint64_t dst, uint64_t size);
 
 // Cross-process write: driver writes `size` bytes from src in our process
 // to dst in process `pid`. Direction reversed from read. size ≤ 1 MB.
@@ -27,11 +26,6 @@ bool write_memory(uint32_t pid, uint64_t dst, uint64_t src, uint64_t size);
 // out_size may be nullptr to skip size readback. Returns true on STATUS_SUCCESS
 // AND out_base populated.
 bool find_module(uint32_t pid, const wchar_t* name, uint64_t* out_base, uint32_t* out_size);
-
-// Diagnostic variant: returns raw NTSTATUS. On non-success, *out_size holds
-// walk_count (Ldr entries visited by the driver walk).
-int32_t find_module_ex(uint32_t pid, const wchar_t* name,
-                       uint64_t* out_base, uint32_t* out_size);
 
 // Allocate size bytes in target process. hint=0 for any address.
 // alloc_type: MEM_COMMIT|MEM_RESERVE = 0x3000. protect: PAGE_READWRITE=0x04,
@@ -61,10 +55,5 @@ constexpr uint32_t PTE_FLAG_SET_W    = 0x2u;
 constexpr uint32_t PTE_FLAG_CLEAR_W  = 0x4u;
 constexpr uint32_t PTE_FLAG_SET_NX   = 0x8u;
 bool set_pte_nx(uint32_t pid, uint64_t va, uint64_t size, uint32_t flags);
-
-bool arm_image_notify(const wchar_t* exe_name);
-bool query_armed_pid(uint32_t* out_pid);
-bool create_remote_thread(uint32_t pid, uint64_t start_address, uint64_t parameter, uint32_t* out_tid);
-bool unhook_hal();
 
 } // namespace cmdchannel

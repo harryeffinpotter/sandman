@@ -10,8 +10,18 @@
 namespace kern_scan {
 
 bool read_kva(HANDLE device, uint64_t cr3, uint64_t kva, void* dst, size_t size) {
-    (void)cr3;
-    return ioctl::read_kernel_virtual(device, kva, dst, size);
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    while (size) {
+        uint64_t page_off = kva & 0xFFFULL;
+        size_t   chunk    = std::min<size_t>(size, 0x1000 - page_off);
+        uint64_t phys     = 0;
+        if (!pagewalk::va_to_phys(device, cr3, kva, phys)) return false;
+        if (!ioctl::read_physical(device, phys, out, chunk)) return false;
+        kva  += chunk;
+        out  += chunk;
+        size -= chunk;
+    }
+    return true;
 }
 
 } // namespace kern_scan

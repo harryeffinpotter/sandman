@@ -1,6 +1,8 @@
-// ioctl.h -- iQVW64.SYS (Intel NAL) physmem wrapper.
+// ioctl.h -- WinIo64.sys physmem MAP/UNMAP wrapper.
 //
-// Public API: read_physical, write_physical, get_pml4_phys.
+// Public API: map_physical, unmap_physical, read_physical, write_physical,
+// get_pml4_phys. All other launcher modules include this header and call
+// these through the ioctl:: namespace.
 
 #pragma once
 
@@ -9,45 +11,24 @@
 
 namespace ioctl {
 
-constexpr DWORD IOCTL_NAL = 0x80862007;
-constexpr uint64_t NAL_CASE_COPY  = 0x33;
-constexpr uint64_t NAL_CASE_MAP   = 0x19;
-constexpr uint64_t NAL_CASE_UNMAP = 0x1A;
-constexpr uint64_t NAL_CASE_VTOP = 0x25;
+constexpr DWORD IOCTL_MAP_PHYS   = 0x80102040;
+constexpr DWORD IOCTL_UNMAP_PHYS = 0x80102044;
 
-#pragma pack(push, 1)
-struct NalCopyInput {
-    uint64_t case_number;
-    uint64_t buffer_size;
-    uint64_t source;
-    uint64_t destination;
-    uint64_t length;
+enum RwFlag : uint8_t { RW_READ = 0, RW_WRITE = 1 };
+
+struct Handle {
+    uint64_t dwPhysMemSizeInBytes;   // offset  0: size (input)
+    uint64_t pvPhysAddress;          // offset  8: physical address (input)
+    uint64_t pvPhysSection;          // offset 16: section object ptr (output)
+    uint64_t pvPhysMemLin;           // offset 24: mapped VA (output)
+    uint64_t PhysicalMemoryHandle;   // offset 32: section handle (output)
 };
+static_assert(sizeof(Handle) == 40, "WinIo64 phys struct must be 40 bytes");
 
-struct NalVtopInput {
-    uint64_t case_number;
-    uint64_t buffer_size;
-    uint64_t out_phys;
-    uint64_t virt_addr;
-};
-
-struct NalMapInput {
-    uint64_t case_number;
-    uint64_t buffer_size;
-    uint32_t out_result;
-    uint32_t pad;
-    uint64_t mapped_va;
-    uint64_t phys_address;
-    uint32_t map_size;
-    uint32_t pad2;
-};
-#pragma pack(pop)
-
+bool map_physical(HANDLE device, uint64_t phys, uint32_t size, RwFlag rw, Handle& h);
+bool unmap_physical(HANDLE device, const Handle& h);
 bool read_physical(HANDLE device, uint64_t phys, void* dst, size_t size);
 bool write_physical(HANDLE device, uint64_t phys, const void* src, size_t size);
 bool get_pml4_phys(HANDLE device, uint64_t& cr3);
-bool read_kernel_virtual(HANDLE device, uint64_t kernel_va, void* dst, size_t size);
-bool write_kernel_virtual(HANDLE device, uint64_t kernel_va, const void* src, size_t size);
-bool virt_to_phys(HANDLE device, uint64_t kernel_va, uint64_t& phys);
 
 } // namespace ioctl
