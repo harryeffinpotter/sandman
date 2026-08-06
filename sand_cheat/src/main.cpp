@@ -325,16 +325,26 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
         }
     }
 
-    FILE* f = open_crash_log();
-    if (f) {
-        write_full_crash(f, ep);
-        fclose(f);
-    }
-
-    if (code == 0xC0000005 || code == 0xC00000FD || code == 0xC0000096 ||
-        code == 0xC000001D || code == 0xC0000094) {
-        if (InterlockedCompareExchange(&g_dumpWritten, 1, 0) == 0) {
+    // Only run the heavy symbolicating crash write ONCE per session — Sym*
+    // API demand-loads every module's PDB from disk (10-30s cold thrash).
+    // Repeated on every stale-pointer AV caused the periodic full-app freeze.
+    // Cheap append still records that another AV happened, without symbolication.
+    if (InterlockedCompareExchange(&g_dumpWritten, 1, 0) == 0) {
+        FILE* f = open_crash_log();
+        if (f) {
+            write_full_crash(f, ep);
+            fclose(f);
+        }
+        if (code == 0xC0000005 || code == 0xC00000FD || code == 0xC0000096 ||
+            code == 0xC000001D || code == 0xC0000094) {
             write_minidump(ep);
+        }
+    } else {
+        FILE* f = open_crash_log();
+        if (f) {
+            fprintf(f, "\n[additional AV suppressed] code=0x%08lX addr=%p tid=%lu exceptionsSeen=%d\n",
+                    code, ep->ExceptionRecord->ExceptionAddress, GetCurrentThreadId(), g_exceptionCount);
+            fclose(f);
         }
     }
 
@@ -382,6 +392,98 @@ static void safe_scan_tick(int scanCounter) {
         g_entityCount.store(0);
         s_cooldownUntil = GetTickCount() + 3000;
     }
+}
+
+// Dump every method of a klass — name, return type, param types, address —
+// to a text file. Returns the address of the method matching wantMethodName
+// (nullptr if not requested or not found). Free function because __try cannot
+// live inside a lambda.
+static void* dump_klass_methods(const IL2CPP_API& api, void* klass, const char* fileName, const char* wantMethodName) {
+    if (!klass) return nullptr;
+    if (!api.il2cpp_class_get_methods || !api.il2cpp_method_get_name
+        || !api.il2cpp_method_get_param_count || !api.il2cpp_method_get_return_type
+        || !api.il2cpp_method_get_param || !api.il2cpp_type_get_name) return nullptr;
+    FILE* mf = nullptr;
+    fopen_s(&mf, fileName, "w");
+    if (!mf) return nullptr;
+    const char* cn = api.il2cpp_class_get_name(klass);
+    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+    fprintf(mf, "# Methods of %s.%s\n# klass=%p\n\n", ns ? ns : "", cn ? cn : "?", klass);
+    void* foundAddr = nullptr;
+    void* iter = nullptr;
+    void* method;
+    int mcount = 0;
+    while ((method = api.il2cpp_class_get_methods(klass, &iter)) != nullptr) {
+        const char* mname = api.il2cpp_method_get_name(method);
+        uint32_t pc = api.il2cpp_method_get_param_count(method);
+        void* addr = *(void**)method;
+        const char* retName = "?";
+        __try {
+            void* retType = api.il2cpp_method_get_return_type(method);
+            if (retType) retName = api.il2cpp_type_get_name(retType);
+        } __except(EXCEPTION_EXECUTE_HANDLER) { retName = "<seh>"; }
+        fprintf(mf, "[%3d] %s %s(", mcount, retName ? retName : "?", mname ? mname : "?");
+        for (uint32_t p = 0; p < pc; p++) {
+            const char* pname = "?", *ptype = "?";
+            __try {
+                if (api.il2cpp_method_get_param_name) pname = api.il2cpp_method_get_param_name(method, p);
+                void* pt = api.il2cpp_method_get_param(method, p);
+                if (pt) ptype = api.il2cpp_type_get_name(pt);
+            } __except(EXCEPTION_EXECUTE_HANDLER) { ptype = "<seh>"; }
+            fprintf(mf, "%s%s %s", p > 0 ? ", " : "", ptype ? ptype : "?", pname ? pname : "?");
+        }
+        fprintf(mf, ")   addr=%p\n", addr);
+        if (wantMethodName && mname && strcmp(mname, wantMethodName) == 0 && !foundAddr) {
+            foundAddr = addr;
+        }
+        mcount++;
+    }
+    fprintf(mf, "\n# total: %d methods\n", mcount);
+    fclose(mf);
+    wlog("[worker] %s: %d methods dumped\n", fileName, mcount);
+    return foundAddr;
+}
+
+// Call an IL2CPP get_* accessor and dump the returned object's first 0x80
+// bytes to a file. Free function because __try can't sit inside worker_thread
+// (which contains C++ objects with destructors — C2712).
+static void call_and_dump_getter(void* getterAddr, void* thisPtr, const char* fileName, const char* label) {
+    if (!getterAddr || !thisPtr) return;
+    FILE* gf = nullptr;
+    fopen_s(&gf, fileName, "w");
+    if (!gf) return;
+    fprintf(gf, "# Result of calling %s\n# on instance %p, method %p\n\n",
+            label ? label : "?", thisPtr, getterAddr);
+    __try {
+        typedef void* (*fn_getter)(void* thisPtr, void* methodInfo);
+        fn_getter f = (fn_getter)getterAddr;
+        void* ret = f(thisPtr, nullptr);
+        fprintf(gf, "returned = %p\n\n", ret);
+        if (ret) {
+            fprintf(gf, "First 0x80 bytes:\n");
+            for (int off = 0; off < 0x80; off += 8) {
+                uintptr_t v = *(uintptr_t*)((uintptr_t)ret + off);
+                fprintf(gf, "  [+0x%02X] %016llX", off, (unsigned long long)v);
+                if (v == 0) fprintf(gf, "  null");
+                else if (v >= 0x10000000ULL && v < 0x00007FFFFFFFFFFFULL) {
+                    MEMORY_BASIC_INFORMATION mbi;
+                    if (VirtualQuery((LPCVOID)v, &mbi, sizeof(mbi)) == sizeof(mbi) && mbi.State == MEM_COMMIT) {
+                        uintptr_t maybeKlass = *(uintptr_t*)v;
+                        fprintf(gf, "  ptr klass?=%p", (void*)maybeKlass);
+                    } else {
+                        fprintf(gf, "  ptr (region invalid)");
+                    }
+                } else if (v < 0x100000000ULL) {
+                    fprintf(gf, "  int=%lu", (unsigned long)v);
+                }
+                fprintf(gf, "\n");
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        fprintf(gf, "\n*** SEH 0x%08lX calling getter ***\n", GetExceptionCode());
+    }
+    fclose(gf);
+    wlog("[worker] %s dumped\n", fileName);
 }
 
 static bool is_readable(const void* ptr, size_t len) {
@@ -645,7 +747,10 @@ static DWORD WINAPI worker_thread(LPVOID) {
             g_getForward = (fn_get_forward)find_method_address(api, coreImage, "UnityEngine", "Transform", "get_forward", 0);
             g_getPosition = (fn_get_position)find_method_address(api, coreImage, "UnityEngine", "Transform", "get_position", 0);
             g_getParent = (fn_get_parent)find_method_address(api, coreImage, "UnityEngine", "Transform", "GetParent", 0);
-            wlog("[worker] Camera: get_main=%p W2S=%p transform=%p forward=%p position=%p parent=%p\n", (void*)g_cameraGetMain, (void*)g_cameraW2S, (void*)g_getTransform, (void*)g_getForward, (void*)g_getPosition, (void*)g_getParent);
+            g_getChildCount = (fn_get_child_count)find_method_address(api, coreImage, "UnityEngine", "Transform", "get_childCount", 0);
+            g_getChild = (fn_get_child)find_method_address(api, coreImage, "UnityEngine", "Transform", "GetChild", 1);
+            g_getName = (fn_get_name)find_method_address(api, coreImage, "UnityEngine", "Object", "get_name", 0);
+            wlog("[worker] Camera: get_main=%p W2S=%p transform=%p forward=%p position=%p parent=%p childCount=%p getChild=%p getName=%p\n", (void*)g_cameraGetMain, (void*)g_cameraW2S, (void*)g_getTransform, (void*)g_getForward, (void*)g_getPosition, (void*)g_getParent, (void*)g_getChildCount, (void*)g_getChild, (void*)g_getName);
         } else {
             wlog("[worker] UnityEngine.CoreModule not found\n");
         }
@@ -685,30 +790,557 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
             wlog("[worker] Animator Type object=%p\n", g_animatorType);
         }
+        // Find UserNameComponent — enumerate ALL matches across namespaces
+        // and pick the one with the most fields (the real component class,
+        // not a stub/interface variant that has 0 fields). Log every hit
+        // to UserName_candidates.txt for eyeball verification.
         if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name) {
+            FILE* uf = nullptr;
+            fopen_s(&uf, CRASH_DIR "UserName_candidates.txt", "w");
+            if (uf) fprintf(uf, "# All classes containing 'UserName' — pick the one with real fields.\n\n");
+
             size_t asmCount3 = 0;
             void* dom3 = api.il2cpp_domain_get();
             void** assemblies3 = api.il2cpp_domain_get_assemblies(dom3, &asmCount3);
-            for (size_t i = 0; i < asmCount3 && !g_userNameKlass; i++) {
+            int bestFieldCount = -1;
+            void* bestKlass = nullptr;
+            char bestSummary[256] = "";
+            int totalMatches = 0;
+            for (size_t i = 0; i < asmCount3; i++) {
                 void* img = api.il2cpp_assembly_get_image(assemblies3[i]);
+                if (!img) continue;
+                const char* imgName = api.il2cpp_image_get_name ? api.il2cpp_image_get_name(img) : "?";
                 size_t classCount = api.il2cpp_image_get_class_count(img);
                 for (size_t j = 0; j < classCount; j++) {
                     void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
                     const char* cn = api.il2cpp_class_get_name(klass);
-                    if (cn && strcmp(cn, "UserNameComponent") == 0) {
-                        g_userNameKlass = klass;
-                        break;
+                    if (!cn) continue;
+                    // Exact-name match only — reject "UserNamesHUD", "UserNameHUDWidget",
+                    // "UserNamesHUDUpdateSystem", etc.
+                    if (strcmp(cn, "UserNameComponent") != 0) continue;
+                    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                    int fc = 0;
+                    if (api.il2cpp_class_get_fields) {
+                        void* iter = nullptr;
+                        while (api.il2cpp_class_get_fields(klass, &iter)) fc++;
+                    }
+                    totalMatches++;
+                    if (uf) fprintf(uf, "match[%d] klass=%p asm=%s ns='%s' name='%s' fields=%d\n",
+                                    totalMatches, klass, imgName, ns ? ns : "", cn, fc);
+                    // Prefer the ECS component in Hologryph.HoloNet.Shared.Users.Components —
+                    // that's the real per-user component the parallel UserContextModule uses.
+                    // Fall back to highest field count otherwise.
+                    bool isHoloNetEcs = ns && strstr(ns, "HoloNet") && strstr(ns, "Users") && strstr(ns, "Components");
+                    bool pickIt = false;
+                    if (isHoloNetEcs) pickIt = true;
+                    else if (!bestKlass && fc > bestFieldCount) pickIt = true;
+                    else if (bestKlass) {
+                        // Don't overwrite the HoloNet ECS pick with a HUD class
+                        const char* curNs = api.il2cpp_class_get_namespace(bestKlass);
+                        bool curIsHoloNet = curNs && strstr(curNs, "HoloNet") && strstr(curNs, "Users");
+                        if (!curIsHoloNet && fc > bestFieldCount) pickIt = true;
+                    }
+                    if (pickIt) {
+                        bestFieldCount = fc;
+                        bestKlass = klass;
+                        snprintf(bestSummary, sizeof(bestSummary),
+                                 "asm=%s ns='%s' name='%s' fields=%d",
+                                 imgName, ns ? ns : "", cn, fc);
                     }
                 }
             }
-            wlog("[worker] UserNameComponent klass=%p\n", g_userNameKlass);
+            g_userNameKlass = bestKlass;
+            if (uf) {
+                fprintf(uf, "\n# CHOSEN: klass=%p %s\n", bestKlass, bestSummary);
+                // Walk the parent chain and dump inherited fields — a 0-field
+                // ECS component still has its actual data on a base class
+                // (typically ValueComponent<T> or a generated Entitas base).
+                if (bestKlass && api.il2cpp_class_get_parent && api.il2cpp_class_get_fields
+                    && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
+                    fprintf(uf, "\n# Inheritance chain (own fields + inherited):\n");
+                    void* cur = bestKlass;
+                    int depth = 0;
+                    while (cur && depth < 8) {
+                        const char* cnCur = api.il2cpp_class_get_name(cur);
+                        const char* nsCur = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(cur) : "";
+                        fprintf(uf, "\n  [depth %d] klass=%p %s.%s\n", depth, cur, nsCur ? nsCur : "", cnCur ? cnCur : "?");
+                        void* fi = nullptr;
+                        int fnum = 0;
+                        while (void* field = api.il2cpp_class_get_fields(cur, &fi)) {
+                            const char* fname = api.il2cpp_field_get_name(field);
+                            size_t foff = api.il2cpp_field_get_offset(field);
+                            fprintf(uf, "      field[%d] name='%s' offset=0x%zX\n",
+                                    fnum++, fname ? fname : "?", foff);
+                        }
+                        if (fnum == 0) fprintf(uf, "      (no fields at this level)\n");
+                        cur = api.il2cpp_class_get_parent(cur);
+                        depth++;
+                    }
+                }
+                fclose(uf);
+            }
+            wlog("[worker] UserNameComponent klass=%p matches=%d best=%s\n",
+                 g_userNameKlass, totalMatches, bestSummary);
         }
+        // Dump every class matching common infra patterns — managers,
+        // systems, session/client/server holders. Player identity + world
+        // state usually live in these singletons, not in ECS components.
+        if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name) {
+            static const char* patterns[] = {
+                "Manager", "System", "Session", "Client", "Server",
+                "Module", "Singleton", "Provider", "Registry", "Cache",
+                "Controller", "Service", "Handler", "Player", "Multiplayer",
+                "Bone", "Anim", "Skeleton", "Rig", "Humanoid",
+                "Account", "Auth", "User"
+            };
+            FILE* mf = nullptr;
+            fopen_s(&mf, CRASH_DIR "ManagerDump.txt", "w");
+            if (mf) fprintf(mf, "# All classes matching manager/system/session/client/server/etc. patterns.\n"
+                                "# Sorted by field count (real data holders float to the top).\n\n");
+
+            struct Hit { void* klass; const char* asm_; const char* ns; const char* name; int fields; };
+            static Hit hits[8192];
+            int hitCount = 0;
+
+            size_t asmCount = 0;
+            void* dom = api.il2cpp_domain_get();
+            void** assemblies = api.il2cpp_domain_get_assemblies(dom, &asmCount);
+            for (size_t i = 0; i < asmCount; i++) {
+                void* img = api.il2cpp_assembly_get_image(assemblies[i]);
+                if (!img) continue;
+                const char* imgName = api.il2cpp_image_get_name ? api.il2cpp_image_get_name(img) : "?";
+                size_t classCount = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < classCount; j++) {
+                    void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
+                    const char* cn = api.il2cpp_class_get_name(klass);
+                    if (!cn) continue;
+                    bool match = false;
+                    for (auto* p : patterns) { if (strstr(cn, p)) { match = true; break; } }
+                    if (!match) continue;
+                    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                    int fc = 0;
+                    if (api.il2cpp_class_get_fields) {
+                        void* iter = nullptr;
+                        while (api.il2cpp_class_get_fields(klass, &iter)) fc++;
+                    }
+                    if (hitCount < (int)(sizeof(hits) / sizeof(hits[0]))) {
+                        hits[hitCount++] = { klass, imgName, ns ? ns : "", cn, fc };
+                    }
+                }
+            }
+            for (int a = 0; a < hitCount - 1; ++a) {
+                int best = a;
+                for (int b = a + 1; b < hitCount; ++b) if (hits[b].fields > hits[best].fields) best = b;
+                if (best != a) { Hit t = hits[a]; hits[a] = hits[best]; hits[best] = t; }
+            }
+            if (mf) {
+                for (int i = 0; i < hitCount; ++i) {
+                    fprintf(mf, "=== [%d] %s.%s   fields=%d   asm=%s   klass=%p ===\n",
+                            i, hits[i].ns, hits[i].name, hits[i].fields, hits[i].asm_, hits[i].klass);
+                    if (hits[i].fields > 0 && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
+                        void* fi = nullptr;
+                        int fnum = 0;
+                        while (void* field = api.il2cpp_class_get_fields(hits[i].klass, &fi)) {
+                            const char* fname = api.il2cpp_field_get_name(field);
+                            size_t foff = api.il2cpp_field_get_offset(field);
+                            fprintf(mf, "    field[%d] name='%s' offset=0x%zX\n",
+                                    fnum++, fname ? fname : "?", foff);
+                        }
+                    }
+                    fprintf(mf, "\n");
+                }
+                fprintf(mf, "# total: %d classes\n", hitCount);
+                fclose(mf);
+            }
+            wlog("[worker] ManagerDump: %d classes -> ManagerDump.txt\n", hitCount);
+        }
+
+        // Bone-container hunt by shape — every class with 3+ fields named
+        // like human bones is a candidate for the pose/skeleton holder. Works
+        // even when the class name doesn't mention "bone" at all (game likely
+        // uses "PoseData", "HumanoidRig", "SkeletonState", etc.).
+        if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name && api.il2cpp_class_get_fields && api.il2cpp_field_get_name) {
+            static const char* boneWords[] = {
+                "Head", "Neck", "Chest", "Spine", "Hips",
+                "Shoulder", "Elbow", "Hand", "Clavicle",
+                "Femur", "Knee", "Ankle", "Toe", "Foot", "Thigh"
+            };
+            FILE* bf = nullptr;
+            fopen_s(&bf, CRASH_DIR "SkeletonSearch.txt", "w");
+            if (bf) fprintf(bf, "# Classes with 3+ fields whose name looks like a human bone.\n"
+                                "# The one with the most bone-named fields is almost certainly\n"
+                                "# the pose/skeleton container.\n\n");
+
+            struct BoneHit { void* klass; const char* asm_; const char* ns; const char* name; int boneMatches; int totalFields; };
+            static BoneHit boneHits[2048];
+            int bhCount = 0;
+
+            size_t asmCount = 0;
+            void* dom = api.il2cpp_domain_get();
+            void** assemblies = api.il2cpp_domain_get_assemblies(dom, &asmCount);
+            for (size_t i = 0; i < asmCount; i++) {
+                void* img = api.il2cpp_assembly_get_image(assemblies[i]);
+                if (!img) continue;
+                const char* imgName = api.il2cpp_image_get_name ? api.il2cpp_image_get_name(img) : "?";
+                size_t classCount = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < classCount; j++) {
+                    void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
+                    const char* cn = api.il2cpp_class_get_name(klass);
+                    if (!cn) continue;
+                    int boneMatches = 0, total = 0;
+                    void* fi = nullptr;
+                    while (void* field = api.il2cpp_class_get_fields(klass, &fi)) {
+                        total++;
+                        const char* fname = api.il2cpp_field_get_name(field);
+                        if (!fname) continue;
+                        for (auto* bw : boneWords) if (strstr(fname, bw)) { boneMatches++; break; }
+                    }
+                    if (boneMatches < 3) continue;
+                    if (bhCount >= (int)(sizeof(boneHits) / sizeof(boneHits[0]))) continue;
+                    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                    boneHits[bhCount++] = { klass, imgName, ns ? ns : "", cn, boneMatches, total };
+                }
+            }
+            // Sort by boneMatches desc
+            for (int a = 0; a < bhCount - 1; ++a) {
+                int best = a;
+                for (int b = a + 1; b < bhCount; ++b)
+                    if (boneHits[b].boneMatches > boneHits[best].boneMatches) best = b;
+                if (best != a) { BoneHit t = boneHits[a]; boneHits[a] = boneHits[best]; boneHits[best] = t; }
+            }
+            if (bf) {
+                for (int i = 0; i < bhCount; ++i) {
+                    fprintf(bf, "=== [%d] %s.%s   boneFields=%d totalFields=%d   asm=%s   klass=%p ===\n",
+                            i, boneHits[i].ns, boneHits[i].name,
+                            boneHits[i].boneMatches, boneHits[i].totalFields,
+                            boneHits[i].asm_, boneHits[i].klass);
+                    if (api.il2cpp_field_get_offset) {
+                        void* fi = nullptr;
+                        int fnum = 0;
+                        while (void* field = api.il2cpp_class_get_fields(boneHits[i].klass, &fi)) {
+                            const char* fname = api.il2cpp_field_get_name(field);
+                            size_t foff = api.il2cpp_field_get_offset(field);
+                            fprintf(bf, "    field[%d] name='%s' offset=0x%zX\n",
+                                    fnum++, fname ? fname : "?", foff);
+                        }
+                    }
+                    fprintf(bf, "\n");
+                }
+                fprintf(bf, "# total: %d candidate classes\n", bhCount);
+                fclose(bf);
+            }
+            wlog("[worker] SkeletonSearch: %d candidates -> SkeletonSearch.txt\n", bhCount);
+        }
+
+        // ------------------------------------------------------------------
+        // Module-instance heap scan — find live instances of Multiplayer,
+        // Network, and User context modules parallel to GameContextModule.
+        // Every Il2CppObject's first qword is its klass pointer. Scan
+        // committed R/W regions for any qword matching our target klasses.
+        // ------------------------------------------------------------------
+        if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class
+            && api.il2cpp_class_get_name && api.il2cpp_class_get_namespace) {
+
+            struct Target { const char* ns; const char* name; void* klass; };
+            static Target targets[] = {
+                { "Hologryph.HoloNet.Shared.Users",              "UserContextModule",                       nullptr },
+                { "Hologryph.HoloNet.Shared.Connections",        "ConnectionContextModule",                 nullptr },
+                { "Hologryph.HoloNet.Client.Connections",        "ClientConnectionContextModule",           nullptr },
+                { "Hologryph.HoloNet.Shared.Connections",        "NetworkStatisticsModule",                 nullptr },
+                { "Hologryph.HoloNet.Client",                    "ClientNetworkControllerModule",           nullptr },
+                { "Hologryph.HoloNet.Shared",                    "NetworkControllerModule",                 nullptr },
+                { "Hologryph.HoloNet.Server",                    "ServerNetworkControllerModuleBase",       nullptr },
+                { "Hologryph.HoloNet.Client.LiteNetLib",         "LiteNetLibClientNetworkTransportModule",  nullptr },
+                { "Hologryph.HoloNet.Server.LiteNetLib",         "LiteNetLibServerNetworkTransportModule",  nullptr },
+                { "Hologryph.Sand.Shared.Game",                  "GameContextModule",                       nullptr },
+            };
+            const int NTARGETS = (int)(sizeof(targets)/sizeof(targets[0]));
+
+            // Resolve klass pointers by (ns, name)
+            size_t asmCount = 0;
+            void* dom = api.il2cpp_domain_get();
+            void** assemblies = api.il2cpp_domain_get_assemblies(dom, &asmCount);
+            for (size_t i = 0; i < asmCount; i++) {
+                void* img = api.il2cpp_assembly_get_image(assemblies[i]);
+                if (!img) continue;
+                size_t classCount = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < classCount; j++) {
+                    void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
+                    const char* cn = api.il2cpp_class_get_name(klass);
+                    const char* ns = api.il2cpp_class_get_namespace(klass);
+                    if (!cn || !ns) continue;
+                    for (int t = 0; t < NTARGETS; t++) {
+                        if (targets[t].klass) continue;
+                        if (strcmp(cn, targets[t].name) == 0 && strcmp(ns, targets[t].ns) == 0) {
+                            targets[t].klass = klass;
+                        }
+                    }
+                }
+            }
+
+            FILE* mif = nullptr;
+            fopen_s(&mif, CRASH_DIR "ModuleInstances.txt", "w");
+            if (mif) {
+                fprintf(mif, "# Live instance hunt for parallel context/network modules.\n");
+                fprintf(mif, "# Each hit is an address whose first qword == the target klass ptr.\n\n");
+                fprintf(mif, "# Resolved klass pointers:\n");
+                for (int t = 0; t < NTARGETS; t++) {
+                    fprintf(mif, "#   %-45s ns=%s  klass=%p\n",
+                            targets[t].name, targets[t].ns, targets[t].klass);
+                }
+                fprintf(mif, "\n");
+                fflush(mif);
+            }
+
+            // Walk committed R/W memory regions and scan qword-aligned words
+            MEMORY_BASIC_INFORMATION mbi;
+            uintptr_t addr = 0;
+            uintptr_t maxAddr = 0x00007FFFFFFFFFFFULL;
+            int totalHits = 0;
+            int regionsScanned = 0;
+            while (addr < maxAddr && VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+                uintptr_t base = (uintptr_t)mbi.BaseAddress;
+                SIZE_T sz = mbi.RegionSize;
+                bool scan = (mbi.State == MEM_COMMIT)
+                    && (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))
+                    && !(mbi.Protect & PAGE_GUARD)
+                    && (mbi.Type == MEM_PRIVATE || mbi.Type == MEM_MAPPED);
+                // Skip absurdly large regions (typically reserved arenas)
+                if (scan && sz <= 0x10000000ULL) {
+                    regionsScanned++;
+                    __try {
+                        uintptr_t* p = (uintptr_t*)base;
+                        uintptr_t* end = (uintptr_t*)(base + sz - sizeof(uintptr_t));
+                        for (; p < end; p++) {
+                            uintptr_t v = *p;
+                            if (v < 0x10000000ULL || v > 0x00007FFFFFFFFFFFULL) continue;
+                            for (int t = 0; t < NTARGETS; t++) {
+                                if (!targets[t].klass) continue;
+                                if (v == (uintptr_t)targets[t].klass) {
+                                    if (mif) fprintf(mif, "HIT  %-45s  instance=%p  (region base=%p size=0x%zX)\n",
+                                                     targets[t].name, (void*)p, (void*)base, (size_t)sz);
+                                    totalHits++;
+                                    break;
+                                }
+                            }
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) { /* skip bad region */ }
+                }
+                if (sz == 0) break;
+                addr = base + sz;
+            }
+
+            if (mif) {
+                fprintf(mif, "\n# scanned %d regions, %d total hits\n", regionsScanned, totalHits);
+                fclose(mif);
+            }
+            wlog("[worker] ModuleInstances: scanned %d regions, %d hits -> ModuleInstances.txt\n", regionsScanned, totalHits);
+
+            // -----------------------------------------------------------
+            // UserContextModule method-signature dumper — enumerate every
+            // method on UserContextModule with its return type + param
+            // types. Once we see e.g. "GetUserList : List<UserData>" we
+            // know exactly which method to call and what to expect back.
+            //
+            // Also captures the LIVE SINGLETON pointer: first hit in the
+            // small-object heap range (0x10000000-0x40000000) that ISN'T
+            // in the metadata cluster is the actual instance.
+            // -----------------------------------------------------------
+            void* userCtxKlass = nullptr;
+            for (int t = 0; t < NTARGETS; t++)
+                if (strcmp(targets[t].name, "UserContextModule") == 0) { userCtxKlass = targets[t].klass; break; }
+
+            // Resolve UserEntity klass in the same assembly as UserContextModule
+            void* userEntityKlass = nullptr;
+            if (api.il2cpp_class_from_name) {
+                for (size_t i = 0; i < asmCount && !userEntityKlass; i++) {
+                    void* img = api.il2cpp_assembly_get_image(assemblies[i]);
+                    if (!img) continue;
+                    userEntityKlass = api.il2cpp_class_from_name(img, "Hologryph.HoloNet.Shared.Users", "UserEntity");
+                    if (userEntityKlass) break;
+                }
+            }
+
+            void* getUsersAddr = dump_klass_methods(api, userCtxKlass, CRASH_DIR "UserContextModule_methods.txt", "get_users");
+            dump_klass_methods(api, userEntityKlass, CRASH_DIR "UserEntity_methods.txt", nullptr);
+
+            if (userCtxKlass) {
+                // ============ Singleton pointer capture ============
+                // Re-scan just for UserContextModule hits, collect them all
+                static uintptr_t hits[512];
+                int nhits = 0;
+                MEMORY_BASIC_INFORMATION mbi2;
+                uintptr_t addr2 = 0;
+                while (addr2 < 0x00007FFFFFFFFFFFULL && VirtualQuery((LPCVOID)addr2, &mbi2, sizeof(mbi2)) == sizeof(mbi2)) {
+                    uintptr_t base = (uintptr_t)mbi2.BaseAddress;
+                    SIZE_T sz = mbi2.RegionSize;
+                    bool scan = (mbi2.State == MEM_COMMIT)
+                        && (mbi2.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))
+                        && !(mbi2.Protect & PAGE_GUARD);
+                    if (scan && sz <= 0x10000000ULL) {
+                        __try {
+                            uintptr_t* p = (uintptr_t*)base;
+                            uintptr_t* end = (uintptr_t*)(base + sz - sizeof(uintptr_t));
+                            for (; p < end; p++) {
+                                if (*p == (uintptr_t)userCtxKlass) {
+                                    if (nhits < 512) hits[nhits++] = (uintptr_t)p;
+                                }
+                            }
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    }
+                    if (sz == 0) break;
+                    addr2 = base + sz;
+                }
+
+                // Find the tightest cluster (max count within a 0x2000 window)
+                uintptr_t bestStart = 0;
+                int bestCount = 0;
+                for (int i = 0; i < nhits; i++) {
+                    int cnt = 0;
+                    for (int j = i; j < nhits && hits[j] < hits[i] + 0x2000; j++) cnt++;
+                    if (cnt > bestCount) { bestCount = cnt; bestStart = hits[i]; }
+                }
+
+                // Capture singleton pointer: the first hit in the small-object
+                // heap (0x10000000-0x40000000) that is NOT inside the metadata
+                // cluster. Metadata table is method descriptors; the real
+                // runtime instance sits alone in the managed heap.
+                g_userContextModuleKlass = userCtxKlass;
+                for (int i = 0; i < nhits; i++) {
+                    if (hits[i] >= 0x10000000ULL && hits[i] < 0x40000000ULL
+                        && !(hits[i] >= bestStart && hits[i] < bestStart + 0x2000)) {
+                        g_userContextModuleInstance = (void*)hits[i];
+                        wlog("[worker] UserContextModule singleton captured: %p (klass %p)\n",
+                             g_userContextModuleInstance, g_userContextModuleKlass);
+                        break;
+                    }
+                }
+                if (!g_userContextModuleInstance && nhits > 0) {
+                    // Fallback — take the first small-heap hit even if it's in the cluster
+                    for (int i = 0; i < nhits; i++) {
+                        if (hits[i] >= 0x10000000ULL && hits[i] < 0x40000000ULL) {
+                            g_userContextModuleInstance = (void*)hits[i];
+                            wlog("[worker] UserContextModule singleton (fallback): %p\n",
+                                 g_userContextModuleInstance);
+                            break;
+                        }
+                    }
+                }
+
+                // Actually CALL get_users() on the singleton — dump the IGroup
+                // so we see its structure and can wire up UserEntity enumeration.
+                call_and_dump_getter(getUsersAddr, g_userContextModuleInstance,
+                                     CRASH_DIR "UsersGroup.txt",
+                                     "UserContextModule.get_users()");
+
+                FILE* uf = nullptr;
+                fopen_s(&uf, CRASH_DIR "UserRecords.txt", "w");
+                if (uf) {
+                    fprintf(uf, "# UserContextModule record dumper — cluster of %d hits starting at %p\n", bestCount, (void*)bestStart);
+                    fprintf(uf, "# Field offsets should be stable per game version.\n");
+                    fprintf(uf, "# Look for: pointers into small-object heap (0x10000000-0x40000000) = strings/objects\n");
+                    fprintf(uf, "# Look for: 8-byte SteamIDs (0x110000xxxxxxxxxx = Steam individual)\n");
+                    fprintf(uf, "# Look for: floats (position xyz — 3 consecutive small floats)\n\n");
+
+                    int dumped = 0;
+                    for (int i = 0; i < nhits && dumped < 8; i++) {
+                        if (hits[i] < bestStart || hits[i] >= bestStart + 0x2000) continue;
+                        uintptr_t rec = hits[i];
+                        fprintf(uf, "=== Record #%d @ %p ===\n", dumped, (void*)rec);
+                        __try {
+                            for (int off = 0; off < 0x90; off += 8) {
+                                uintptr_t v = *(uintptr_t*)(rec + off);
+                                fprintf(uf, "  [+0x%02X] %016llX", off, (unsigned long long)v);
+                                // Type inference
+                                if (v == (uintptr_t)userCtxKlass) fprintf(uf, "  <-- UserContextModule klass");
+                                else if (v >= 0x10000000ULL && v < 0x00007FFFFFFFFFFFULL) {
+                                    MEMORY_BASIC_INFORMATION mbi3;
+                                    if (VirtualQuery((LPCVOID)v, &mbi3, sizeof(mbi3)) == sizeof(mbi3)
+                                        && mbi3.State == MEM_COMMIT) {
+                                        // Try to read as Il2CppString (len at +0x10, wchars at +0x14)
+                                        __try {
+                                            int slen = *(int*)(v + 0x10);
+                                            if (slen > 0 && slen < 64) {
+                                                wchar_t* ws = (wchar_t*)(v + 0x14);
+                                                char nb[65] = {};
+                                                for (int c = 0; c < slen; c++) nb[c] = (char)ws[c];
+                                                bool printable = true;
+                                                for (int c = 0; c < slen; c++) if (nb[c] < 0x20 || nb[c] > 0x7E) { printable = false; break; }
+                                                if (printable) {
+                                                    fprintf(uf, "  string=\"%s\" (len=%d)", nb, slen);
+                                                } else {
+                                                    fprintf(uf, "  ptr (region %p)", mbi3.BaseAddress);
+                                                }
+                                            } else {
+                                                // Might be a klass — first qword of object is klass ptr
+                                                uintptr_t maybeKlass = *(uintptr_t*)v;
+                                                fprintf(uf, "  ptr (klass?=%016llX)", (unsigned long long)maybeKlass);
+                                            }
+                                        } __except(EXCEPTION_EXECUTE_HANDLER) {
+                                            fprintf(uf, "  ptr (unreadable inner)");
+                                        }
+                                    }
+                                } else if (v > 0 && v < 0x100000000ULL) {
+                                    // Small value — maybe 2 ints or a bitfield
+                                    unsigned int lo = (unsigned int)(v & 0xFFFFFFFF);
+                                    unsigned int hi = (unsigned int)((v >> 32) & 0xFFFFFFFF);
+                                    if (hi == 0) fprintf(uf, "  int=%u", lo);
+                                    else fprintf(uf, "  ints=(%u,%u)", lo, hi);
+                                    // Float check
+                                    float fv; memcpy(&fv, &lo, 4);
+                                    if (fv > -10000.0f && fv < 10000.0f && fv != 0.0f) fprintf(uf, "  or float=%.3f", fv);
+                                }
+                                fprintf(uf, "\n");
+                            }
+                            fprintf(uf, "\n");
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {
+                            fprintf(uf, "  *** SEH reading record ***\n\n");
+                        }
+                        dumped++;
+                    }
+                    fclose(uf);
+                }
+                wlog("[worker] UserRecords: cluster of %d hits at %p, dumped %d records -> UserRecords.txt\n",
+                     bestCount, (void*)bestStart, (bestCount < 8 ? bestCount : 8));
+            }
+        }
+
         if (g_userNameKlass && api.il2cpp_class_get_type && api.il2cpp_type_get_object) {
             void* userNameIl2cppType = api.il2cpp_class_get_type(g_userNameKlass);
             if (userNameIl2cppType) {
                 g_userNameType = api.il2cpp_type_get_object(userNameIl2cppType);
             }
             wlog("[worker] UserNameComponent Type object=%p\n", g_userNameType);
+        }
+        if (g_userNameKlass && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
+            FILE* ff = nullptr;
+            fopen_s(&ff, CRASH_DIR "UserNameComponent_fields.txt", "w");
+            if (ff) fprintf(ff, "# Fields of UserNameComponent klass=%p (from live IL2CPP FieldInfo)\n\n", g_userNameKlass);
+            void* iter = nullptr;
+            int fieldCount = 0;
+            while (void* field = api.il2cpp_class_get_fields(g_userNameKlass, &iter)) {
+                const char* fname = api.il2cpp_field_get_name(field);
+                size_t off = api.il2cpp_field_get_offset(field);
+                wlog("[worker] UserNameComponent field '%s' offset=0x%zX\n",
+                     fname ? fname : "?", off);
+                if (ff) fprintf(ff, "field[%d] name='%s' offset=0x%zX\n",
+                                fieldCount, fname ? fname : "?", off);
+                if (g_userNameFieldOffset < 0 && fname &&
+                    (strstr(fname, "ame") || strstr(fname, "Name"))) {
+                    g_userNameFieldOffset = (int)off;
+                }
+                fieldCount++;
+            }
+            if (ff) {
+                fprintf(ff, "\n# Chosen name-field offset: 0x%X\n", g_userNameFieldOffset);
+                fclose(ff);
+            }
+            wlog("[worker] UserNameComponent %d fields; chose offset=0x%X\n",
+                 fieldCount, g_userNameFieldOffset);
         }
         if (api.il2cpp_domain_get && api.il2cpp_domain_get_assemblies && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name && api.il2cpp_class_get_methods && api.il2cpp_method_get_name && api.il2cpp_method_get_param_count) {
             void* fitKlass = nullptr;
@@ -767,9 +1399,20 @@ static DWORD WINAPI worker_thread(LPVOID) {
     {
         int scanCounter = 0;
         while (g_running.load()) {
+            // Heartbeat: every 10 iters (~1s at Sleep(100)). Log wall gap
+            // since previous beat — if we ever see gap > 5000ms it means the
+            // worker thread was suspended (BE/GC/kernel actor), not looping.
+            // Also log time for the previous scan tick so runaway scans are visible.
             static int heartbeat = 0;
+            static DWORD s_lastHbTick = 0;
+            static DWORD s_lastScanMs = 0;
             if (++heartbeat % 10 == 0) {
-                tlog("heartbeat #%d tick=%lu\n", heartbeat, GetTickCount());
+                DWORD nowT = GetTickCount();
+                DWORD gap = s_lastHbTick ? (nowT - s_lastHbTick) : 0;
+                const char* flag = (gap > 5000) ? " <<< STALL DETECTED" : "";
+                wlog("[hb] #%d tick=%lu gapMs=%lu lastScanMs=%lu%s\n",
+                     heartbeat, nowT, gap, s_lastScanMs, flag);
+                s_lastHbTick = nowT;
             }
             void* gcm = (void*)g_gameContextModule;
             if (!is_readable(gcm, 0x18)) {

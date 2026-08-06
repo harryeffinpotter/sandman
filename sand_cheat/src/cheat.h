@@ -34,6 +34,9 @@ typedef uint32_t    (*fn_il2cpp_class_instance_size)(void* klass);
 typedef void*       (*fn_il2cpp_class_get_methods)(void* klass, void** iter);
 typedef const char* (*fn_il2cpp_method_get_name)(void* method);
 typedef uint32_t    (*fn_il2cpp_method_get_param_count)(void* method);
+typedef void*       (*fn_il2cpp_method_get_return_type)(void* method);
+typedef void*       (*fn_il2cpp_method_get_param)(void* method, uint32_t index);
+typedef const char* (*fn_il2cpp_method_get_param_name)(void* method, uint32_t index);
 typedef void*       (*fn_il2cpp_class_get_type)(void* klass);
 typedef void*       (*fn_il2cpp_type_get_object)(void* type);
 typedef void*       (*fn_il2cpp_string_new)(const char* str);
@@ -64,6 +67,9 @@ struct IL2CPP_API {
     fn_il2cpp_class_get_methods         il2cpp_class_get_methods;
     fn_il2cpp_method_get_name           il2cpp_method_get_name;
     fn_il2cpp_method_get_param_count    il2cpp_method_get_param_count;
+    fn_il2cpp_method_get_return_type    il2cpp_method_get_return_type;
+    fn_il2cpp_method_get_param          il2cpp_method_get_param;
+    fn_il2cpp_method_get_param_name     il2cpp_method_get_param_name;
     fn_il2cpp_class_get_type        il2cpp_class_get_type;
     fn_il2cpp_type_get_object       il2cpp_type_get_object;
     fn_il2cpp_string_new            il2cpp_string_new;
@@ -143,6 +149,9 @@ typedef void* (*fn_get_parent)(void* transform, void* method);
 typedef void* (*fn_get_bone_transform)(void* animator, int boneIndex, void* method);
 typedef void* (*fn_get_component_by_type)(void* component, void* type, void* method);
 typedef void* (*fn_get_component_in_children)(void* component, void* type, void* method);
+typedef int (*fn_get_child_count)(void* transform, void* method);
+typedef void* (*fn_get_child)(void* transform, int index, void* method);
+typedef void* (*fn_get_name)(void* obj, void* method);
 
 // ---------------------------------------------------------------------------
 // Globals (defined in cheat.cpp)
@@ -269,6 +278,9 @@ extern std::atomic<bool> g_espShowWalkers;
 extern fn_get_bone_transform g_getBoneTransform;
 extern fn_get_component_by_type g_getComponentByType;
 extern fn_get_component_in_children g_getComponentInChildren;
+extern fn_get_child_count g_getChildCount;
+extern fn_get_child g_getChild;
+extern fn_get_name g_getName;
 extern void* g_animatorType;
 extern std::atomic<bool> g_espShowSkeleton;
 extern std::atomic<bool> g_espShowLootT1;
@@ -280,8 +292,11 @@ extern float g_espLootT3Dist;
 extern uintptr_t g_gaBase;
 extern uintptr_t g_gaSize;
 extern void* g_userNameKlass;
+extern void* g_userContextModuleInstance;
+extern void* g_userContextModuleKlass;
 extern void* g_userNameType;
 extern int   g_userNameFieldOffset;   // Byte offset of the String field inside UserNameComponent, resolved once at boot via il2cpp FieldInfo. -1 = unresolved.
+extern std::atomic<int> g_userNameRescanRequest;  // UI bumps this; worker re-runs UserName klass enumeration next tick.
 
 struct AimbotProfile {
     bool realityAim = true;

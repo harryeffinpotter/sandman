@@ -104,7 +104,10 @@ std::atomic<bool> g_running{true};
 
 WorldVector g_playerPos = {};
 void* g_userNameKlass = nullptr;
+void* g_userContextModuleInstance = nullptr;
+void* g_userContextModuleKlass = nullptr;
 int   g_userNameFieldOffset = -1;
+std::atomic<int> g_userNameRescanRequest{0};
 std::atomic<int> g_entityCount{0};
 
 std::string g_nameFilter;
@@ -152,6 +155,9 @@ std::atomic<bool> g_espShowWalkers{true};
 fn_get_bone_transform g_getBoneTransform = nullptr;
 fn_get_component_by_type g_getComponentByType = nullptr;
 fn_get_component_in_children g_getComponentInChildren = nullptr;
+fn_get_child_count g_getChildCount = nullptr;
+fn_get_child g_getChild = nullptr;
+fn_get_name g_getName = nullptr;
 void* g_animatorType = nullptr;
 void* g_userNameType = nullptr;
 std::atomic<bool> g_espShowSkeleton{false};
@@ -207,6 +213,9 @@ void resolve_all(HMODULE ga, IL2CPP_API& api) {
     RESOLVE(api, ga, il2cpp_class_get_methods);
     RESOLVE(api, ga, il2cpp_method_get_name);
     RESOLVE(api, ga, il2cpp_method_get_param_count);
+    RESOLVE(api, ga, il2cpp_method_get_return_type);
+    RESOLVE(api, ga, il2cpp_method_get_param);
+    RESOLVE(api, ga, il2cpp_method_get_param_name);
     RESOLVE(api, ga, il2cpp_class_get_type);
     RESOLVE(api, ga, il2cpp_type_get_object);
     RESOLVE(api, ga, il2cpp_string_new);
@@ -1529,6 +1538,18 @@ static void dump_all_entities_full(void** entityPtrs, int entityCount) {
 // ---------------------------------------------------------------------------
 // scan_entities
 // ---------------------------------------------------------------------------
+// Free helper — __try can't live in scan_entities() because that function
+// contains C++ objects with destructors (unordered_map, vector).
+static int seh_read_entity_id(void* ent) {
+    __try {
+        if (!ent) return -1;
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (!VirtualQuery(ent, &mbi, sizeof(mbi))) return -1;
+        if (mbi.State != MEM_COMMIT) return -1;
+        return *(int*)((uintptr_t)ent + 0x48);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
 void scan_entities() {
     static int s_wlogTick = 0;
     bool doLog = (++s_wlogTick % 20 == 1);
@@ -1581,6 +1602,13 @@ void scan_entities() {
             }
             entityPtrs = tempEntities.data();
             entityCount = (int)tempEntities.size();
+        }
+
+        // Sanity clamp — if we read a garbage size, don't iterate billions of entries.
+        // Real world entity count peaks around 30k. Anything past 200k is corruption.
+        if (entityCount < 0 || entityCount > 200000) {
+            if (doLog) wlog("[scan] entityCount=%d out of sane range — skipping tick\n", entityCount);
+            return;
         }
 
         g_entityCount.store(entityCount);
@@ -1884,14 +1912,109 @@ void scan_entities() {
         int dbgReadable = 0, dbgValidObj = 0, dbgEnabled = 0, dbgHasBP = 0;
         int dbgNameOK = 0, dbgPassFilter = 0, dbgHasPosParent = 0;
         int heldCount = 0, resolvedParentCount = 0;
+
+        // Per-entity + total-scan time guards.
+        //
+        // Keyed on ENTITY ID (int at +0x48), not pointer — GC may recycle
+        // pointers when entities despawn, and we don't want to inherit
+        // strikes across unrelated entities.
+        //
+        // Sliding window — strikes older than STRIKE_WINDOW_MS decay to zero.
+        // An entity that had one bad moment 20 minutes ago starts fresh.
+        // Only 3 strikes WITHIN the last 60s triggers a 30s cooldown.
+        //
+        // Total budget — if the whole scan exceeds 750ms, bail out this tick.
+        struct StrikeRecord {
+            int strikes;              // consecutive slow hits inside the window
+            DWORD lastStrikeTick;     // when the most recent strike happened
+            DWORD cooldownUntil;      // 0 = not in cooldown
+        };
+        static std::unordered_map<int, StrikeRecord> s_strikes;
+        static int s_skippedCooldown = 0;
+        static int s_totalScansBudgetHit = 0;
+
+        LARGE_INTEGER qpFreq, qpScanStart;
+        QueryPerformanceFrequency(&qpFreq);
+        QueryPerformanceCounter(&qpScanStart);
+        const double MS_PER_TICK = 1000.0 / (double)qpFreq.QuadPart;
+        const double PER_ENTITY_WARN_MS = 50.0;
+        const double PER_ENTITY_STRIKE_MS = 250.0;
+        const double TOTAL_SCAN_BUDGET_MS = 750.0;
+        const int STRIKES_BEFORE_COOLDOWN = 3;
+        const DWORD STRIKE_WINDOW_MS = 60000;   // strikes decay after this
+        const DWORD COOLDOWN_MS = 30000;
+        DWORD nowTick = GetTickCount();
+
+        // Sweep expired records once per tick to keep the map bounded
+        for (auto it = s_strikes.begin(); it != s_strikes.end(); ) {
+            bool stale = (nowTick - it->second.lastStrikeTick > STRIKE_WINDOW_MS * 2)
+                         && (nowTick > it->second.cooldownUntil);
+            if (stale) it = s_strikes.erase(it); else ++it;
+        }
+
         for (int e = 0; e < entityCount; e++) {
+            LARGE_INTEGER qpNow;
+            QueryPerformanceCounter(&qpNow);
+            double elapsedMs = (double)(qpNow.QuadPart - qpScanStart.QuadPart) * MS_PER_TICK;
+            if (elapsedMs > TOTAL_SCAN_BUDGET_MS) {
+                s_totalScansBudgetHit++;
+                wlog("[scan] BUDGET HIT at entity %d/%d after %.1fms — bailing (hits=%d, tracked=%zu)\n",
+                     e, entityCount, elapsedMs, s_totalScansBudgetHit, s_strikes.size());
+                break;
+            }
+
+            void* ent = entityPtrs[e];
+
+            // Grab entity ID for cooldown/strike keying — if this fails, treat as fresh
+            int eid = seh_read_entity_id(ent);
+
+            if (eid >= 0) {
+                auto sit = s_strikes.find(eid);
+                if (sit != s_strikes.end() && nowTick < sit->second.cooldownUntil) {
+                    s_skippedCooldown++;
+                    continue;
+                }
+            }
+
+            LARGE_INTEGER qpEntStart;
+            QueryPerformanceCounter(&qpEntStart);
+
             seh_process_one_entity(
-                entityPtrs[e],
+                ent,
                 playerEntityId, havePlayerPos, playerPos, idToEntity, items,
                 &dbgReadable, &dbgValidObj, &dbgEnabled, &dbgHasBP,
                 &dbgNameOK, &dbgPassFilter, &dbgHasPosParent,
                 &heldCount, &resolvedParentCount, &entitiesPushed);
+
+            LARGE_INTEGER qpEntEnd;
+            QueryPerformanceCounter(&qpEntEnd);
+            double entMs = (double)(qpEntEnd.QuadPart - qpEntStart.QuadPart) * MS_PER_TICK;
+
+            if (entMs > PER_ENTITY_STRIKE_MS && eid >= 0) {
+                auto& rec = s_strikes[eid];
+                // Decay old strikes if window expired
+                if (nowTick - rec.lastStrikeTick > STRIKE_WINDOW_MS) rec.strikes = 0;
+                rec.strikes++;
+                rec.lastStrikeTick = nowTick;
+                if (rec.strikes >= STRIKES_BEFORE_COOLDOWN) {
+                    rec.cooldownUntil = nowTick + COOLDOWN_MS;
+                    wlog("[scan] COOLDOWN entity[%d] ptr=%p eid=%d took %.1fms — skipping %ds (strikes in %ds window: %d)\n",
+                         e, ent, eid, entMs, COOLDOWN_MS / 1000, STRIKE_WINDOW_MS / 1000, rec.strikes);
+                    rec.strikes = 0;
+                } else {
+                    wlog("[scan] STRIKE %d/%d entity[%d] ptr=%p eid=%d took %.1fms (%ds window)\n",
+                         rec.strikes, STRIKES_BEFORE_COOLDOWN, e, ent, eid, entMs, STRIKE_WINDOW_MS / 1000);
+                }
+            } else if (entMs > PER_ENTITY_WARN_MS) {
+                wlog("[scan] SLOW entity[%d] ptr=%p eid=%d took %.1fms\n", e, ent, eid, entMs);
+            }
         }
+
+        if (doLog && (s_strikes.size() > 0 || s_totalScansBudgetHit > 0)) {
+            wlog("[scan] tracked=%zu skippedCooldown=%d budgetHits=%d\n",
+                 s_strikes.size(), s_skippedCooldown, s_totalScansBudgetHit);
+        }
+        s_skippedCooldown = 0;
 
         if (doLog) wlog("[scan] readable=%d validObj=%d enabled=%d hasBP=%d nameOK=%d passFilter=%d hasPosParent=%d pushed=%d\n",
                         dbgReadable, dbgValidObj, dbgEnabled, dbgHasBP, dbgNameOK, dbgPassFilter, dbgHasPosParent, entitiesPushed);
@@ -2040,6 +2163,8 @@ static bool seh_read_position(void* posComp, WorldVector* out) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_read_position] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
+static void hunt_bone_transforms_once(void* viewBehaviour);
+
 static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
     // Latch off after N throws so we don't spam thousands of C++ exceptions
     // per second. Toggled back on if any fresh scan later succeeds.
@@ -2117,6 +2242,10 @@ static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
             if (dumpThis) ringlog::push("[bone-diag] SKIP: no viewBehaviour");
             return false;
         }
+
+        // One-shot: dump this entity's actual Transform hierarchy so we can
+        // see the real bone names the game uses (Head/Neck/Spine/etc.).
+        hunt_bone_transforms_once(viewBehaviour);
 
         g_vehInnerActive = true;
         RtlCaptureContext(&g_vehInnerCtx);
@@ -2248,6 +2377,101 @@ static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
 }
 
 static void probe_bones_once(void* entity) { (void)entity; s_boneProbeCount = 20; }
+
+// ---------------------------------------------------------------------------
+// hunt_bone_transforms_once — walk the entity's Transform hierarchy and log
+// every child named like a human bone ("Head", "Neck", "Spine", "Hips", etc.).
+// Different from the class-shape hunt in main.cpp: this reads the LIVE
+// GameObject hierarchy, so we get real bone names from whatever rig the
+// game uses (Mixamo, Humanoid, custom).
+// Dumps to BoneTransformHunt.txt, fires once per first N entities.
+// ---------------------------------------------------------------------------
+static int s_boneHuntCount = 0;
+static bool s_boneHuntDone = false;
+
+static const char* extract_il2cpp_string_ascii(void* strObj, char* buf, int bufSize) {
+    if (!is_readable(strObj, 0x14)) return nullptr;
+    int len = *(int*)((uintptr_t)strObj + 0x10);
+    if (len <= 0 || len > 128) return nullptr;
+    wchar_t* wc = (wchar_t*)((uintptr_t)strObj + 0x14);
+    if (!is_readable(wc, len * 2)) return nullptr;
+    int n = (len < bufSize - 1) ? len : (bufSize - 1);
+    for (int i = 0; i < n; i++) buf[i] = (char)wc[i];
+    buf[n] = 0;
+    return buf;
+}
+
+static void hunt_walk_recursive(void* tf, int depth, const char* parentPath, FILE* out, int* hits) {
+    if (depth > 8) return;
+    if (!is_readable(tf, 0x10)) return;
+
+    // Get GameObject name — Object.get_name works on Component/Transform too
+    char nameBuf[128] = "?";
+    void* nameStr = g_getName ? g_getName(tf, nullptr) : nullptr;
+    if (nameStr) extract_il2cpp_string_ascii(nameStr, nameBuf, sizeof(nameBuf));
+
+    // Match against bone words
+    static const char* boneWords[] = {
+        "Head", "Neck", "Chest", "Spine", "Hips", "Pelvis",
+        "Shoulder", "UpperArm", "LowerArm", "Elbow", "Hand", "Finger", "Clavicle",
+        "Thigh", "UpperLeg", "LowerLeg", "Knee", "Ankle", "Foot", "Toe", "Femur", "Calf",
+        "Jaw", "Eye"
+    };
+    bool matched = false;
+    for (auto* bw : boneWords) if (strstr(nameBuf, bw)) { matched = true; break; }
+
+    char path[512];
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s/%s", parentPath, nameBuf);
+
+    if (matched) {
+        Vec3 pos = {0,0,0};
+        if (g_getPosition) g_getPosition(&pos, tf, nullptr);
+        fprintf(out, "  MATCH tf=%p depth=%d pos=(%.2f,%.2f,%.2f) path=%s\n",
+                tf, depth, pos.x, pos.y, pos.z, path);
+        (*hits)++;
+    }
+
+    if (!g_getChildCount || !g_getChild) return;
+    int cc = g_getChildCount(tf, nullptr);
+    if (cc <= 0 || cc > 256) return;
+    for (int i = 0; i < cc; i++) {
+        void* child = g_getChild(tf, i, nullptr);
+        if (!child) continue;
+        hunt_walk_recursive(child, depth + 1, path, out, hits);
+    }
+}
+
+static void hunt_bone_transforms_once(void* viewBehaviour) {
+    if (s_boneHuntDone) return;
+    if (s_boneHuntCount >= 5) { s_boneHuntDone = true; return; }
+    if (!g_getTransform || !g_getChildCount || !g_getChild || !g_getName || !g_getPosition) return;
+    if (!is_readable(viewBehaviour, 0x10)) return;
+
+    FILE* bf = nullptr;
+    const char* mode = (s_boneHuntCount == 0) ? "w" : "a";
+    fopen_s(&bf, "C:\\Users\\ysg\\projects\\sand_cheat\\BoneTransformHunt.txt", mode);
+    if (!bf) return;
+
+    __try {
+        void* rootTf = g_getTransform(viewBehaviour, nullptr);
+        fprintf(bf, "=== Entity #%d viewBehaviour=%p rootTransform=%p ===\n",
+                s_boneHuntCount, viewBehaviour, rootTf);
+        if (is_readable(rootTf, 0x10)) {
+            int hits = 0;
+            hunt_walk_recursive(rootTf, 0, "", bf, &hits);
+            fprintf(bf, "  total bone-named children: %d\n\n", hits);
+        } else {
+            fprintf(bf, "  root transform unreadable\n\n");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        fprintf(bf, "  *** SEH 0x%08lX during walk ***\n\n", GetExceptionCode());
+    }
+    fflush(bf);
+    fclose(bf);
+
+    s_boneHuntCount++;
+    if (s_boneHuntCount >= 5) s_boneHuntDone = true;
+}
 #if 0
 static void probe_bones_once_disabled_(void* entity) {
     FILE* bf = fopen("_", "w");

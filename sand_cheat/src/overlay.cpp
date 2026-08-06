@@ -1083,6 +1083,24 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
     static bool s_logged = false;
     if (!s_logged) { dbglog("[hooked_present] FIRST CALL swapchain=%p\n", pSwapChain); s_logged = true; }
 
+    // Render-thread heartbeat — pairs with worker heartbeat. If BOTH stop during
+    // a freeze, external actor (BE / Unity GC) is suspending everything. If only
+    // this one stops but worker keeps beating, main thread is stalled (mutex,
+    // some game-side wait). Log the gap since last present.
+    {
+        static DWORD s_lastPresentTick = 0;
+        static int s_presentCounter = 0;
+        DWORD nowT = GetTickCount();
+        s_presentCounter++;
+        DWORD gap = s_lastPresentTick ? (nowT - s_lastPresentTick) : 0;
+        // Only log big gaps (>500ms = stutter/hitch) or every ~5s of normal frames
+        if (gap > 500 || (s_presentCounter % 300 == 0)) {
+            dbglog("[rhb] present #%d tick=%lu gapMs=%lu%s\n",
+                   s_presentCounter, nowT, gap, gap > 5000 ? " <<< RENDER STALL" : "");
+        }
+        s_lastPresentTick = nowT;
+    }
+
     if (g_overlayDisabled)
         return g_originalPresent(pSwapChain, SyncInterval, Flags);
 
