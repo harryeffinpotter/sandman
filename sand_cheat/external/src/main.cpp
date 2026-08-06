@@ -26,6 +26,8 @@
 
 #include "cmdchannel.h"
 #include "overlay.h"
+#include "state.h"
+#include "ui.h"
 #include "imgui.h"
 
 // -----------------------------------------------------------------------
@@ -105,15 +107,7 @@ static bool ext_read_il2cpp_string(uint32_t pid, uint64_t strObj, std::string& o
 // Bootstrap — verify driver channel is alive, find game, map module
 // -----------------------------------------------------------------------
 
-struct GameContext {
-    uint32_t pid = 0;
-    uint64_t game_assembly_base = 0;
-    uint32_t game_assembly_size = 0;
-    uint64_t sand_exe_base = 0;   // for future use (main module base)
-    uint32_t sand_exe_size = 0;
-};
-
-static bool ext_bootstrap(GameContext& ctx) {
+static bool ext_bootstrap(state::GameCtx& ctx) {
     ext_log("[boot] cmdchannel::init...\n");
     if (!cmdchannel::init()) {
         ext_log("[boot] cmdchannel::init FAILED. Is sand_launcher.exe loaded?\n");
@@ -158,7 +152,7 @@ static bool ext_bootstrap(GameContext& ctx) {
 // target process purely via external reads.
 // -----------------------------------------------------------------------
 
-static void ext_dump_module_probe(const GameContext& ctx) {
+static void ext_dump_module_probe(const state::GameCtx& ctx) {
     uint16_t dos_mz = 0;
     if (!ext_read_val(ctx.pid, ctx.game_assembly_base, dos_mz)) {
         ext_log("[probe] failed to read DOS header\n");
@@ -187,8 +181,7 @@ int main(int argc, char** argv) {
     ext_log("  Zero injection, kernel-driver R/W only\n");
     ext_log("========================================\n\n");
 
-    GameContext ctx;
-    if (!ext_bootstrap(ctx)) {
+    if (!ext_bootstrap(state::g)) {
         ext_log("[main] bootstrap FAILED — exiting.\n");
         ext_log("[main] Prerequisites:\n");
         ext_log("       1. sand_launcher.exe was run this boot session\n");
@@ -197,44 +190,36 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    ext_log("\n[main] bootstrap OK — attached to sand.exe pid=%u\n", ctx.pid);
-    ext_dump_module_probe(ctx);
+    ext_log("\n[main] bootstrap OK — attached to sand.exe pid=%u\n", state::g.pid);
+    ext_dump_module_probe(state::g);
+
+    // Pre-populate memory viewer with GameAssembly.dll base for a first read.
+    snprintf(state::g.mem_viewer_addr, sizeof(state::g.mem_viewer_addr),
+             "%llX", (unsigned long long)state::g.game_assembly_base);
 
     ext_log("\n[main] initializing stream-proof overlay...\n");
-    if (!overlay::init(ctx.pid)) {
+    if (!overlay::init(state::g.pid)) {
         ext_log("[main] overlay init FAILED\n");
         return 2;
     }
     ext_log("[main] overlay up: game=%p overlay=%p\n",
             overlay::game_hwnd(), overlay::overlay_hwnd());
+    ext_log("[main] HOTKEYS: INSERT = click-through toggle, HOME = menu toggle\n");
 
     // Render loop
-    ULONGLONG frame_count = 0;
     ULONGLONG start_tick = GetTickCount64();
     while (overlay::alive()) {
+        ui::poll_hotkeys();
         overlay::pump_messages();
-
-        overlay::frame([]() {
-            ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(420, 200), ImGuiCond_FirstUseEver);
-            ImGui::Begin("sand_external");
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "KWARE-style external overlay");
-            ImGui::Separator();
-            ImGui::Text("Zero injection. Zero HWBP. Zero vtable patches.");
-            ImGui::Text("Reading via kernel driver cmdchannel.");
-            ImGui::Separator();
-            ImGui::Text("Phase 2 done: overlay rendering.");
-            ImGui::Text("Phase 3 next: entity scan port.");
-            ImGui::End();
-        });
-
-        frame_count++;
-        if ((frame_count % 300) == 0) {
+        overlay::frame(ui::draw_all);
+        state::g.frame_count++;
+        if ((state::g.frame_count % 600) == 0) {
             ULONGLONG dt = GetTickCount64() - start_tick;
-            ext_log("[main] rendered %llu frames in %llu ms\n",
-                    (unsigned long long)frame_count, (unsigned long long)dt);
+            ext_log("[main] %llu frames / %llu ms  (avg %.1f fps)\n",
+                    (unsigned long long)state::g.frame_count,
+                    (unsigned long long)dt,
+                    (double)state::g.frame_count * 1000.0 / (double)(dt ? dt : 1));
         }
-
         Sleep(1);
     }
 

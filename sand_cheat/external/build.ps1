@@ -15,6 +15,8 @@ Write-Host "`n=== sand_external Build ===" -ForegroundColor Cyan
 $sources = @(
     "src\main.cpp"
     "src\overlay.cpp"
+    "src\state.cpp"
+    "src\ui.cpp"
     "$launcherSrc\cmdchannel.cpp"
     "$imguiDir\imgui.cpp"
     "$imguiDir\imgui_draw.cpp"
