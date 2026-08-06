@@ -134,16 +134,53 @@ static const uint8_t SHELLCODE_TEMPLATE[SHELLCODE_SIZE] = {
 
 constexpr uint32_t MARKER_DONE = 0xCAFEBABEu;
 
+static bool alloc_safe(uint32_t pid, uint64_t size, uint32_t alloc_type,
+                       uint32_t protect, uint64_t* out_base) {
+    // The 0x70000000-0x7FFF'0000'0000 band collides with system/vendor DLL
+    // loads; drivers, AV, and BE modules cluster there. Prefer addresses
+    // above 0x1'0000'0000 where the classic module band ends.
+    static const uint64_t kHints[] = {
+        0x1'0000'0000ull,
+        0x2'0000'0000ull,
+        0x4'0000'0000ull,
+        0x8'0000'0000ull,
+        0x10'0000'0000ull,
+        0x20'0000'0000ull,
+    };
+    for (uint64_t hint : kHints) {
+        *out_base = 0;
+        if (cmdchannel::alloc_memory(pid, hint, size, alloc_type, protect, out_base)
+            && *out_base != 0) {
+            return true;
+        }
+    }
+    *out_base = 0;
+    return cmdchannel::alloc_memory(pid, 0, size, alloc_type, protect, out_base)
+           && *out_base != 0;
+}
+
 } // namespace
 
 #define IDR_WINIO64       101
 #define IDR_KERNELDRIVER  102
 
 int main(int argc, char* argv[]) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     SetConsoleOutputCP(CP_UTF8);
     banner();
 
+    SetConsoleCtrlHandler([](DWORD ctrl) -> BOOL {
+        if (ctrl == CTRL_C_EVENT || ctrl == CTRL_BREAK_EVENT ||
+            ctrl == CTRL_CLOSE_EVENT || ctrl == CTRL_LOGOFF_EVENT ||
+            ctrl == CTRL_SHUTDOWN_EVENT) {
+            (void)cmdchannel::unhook_hal();
+            ExitProcess(0);
+        }
+        return FALSE;
+    }, TRUE);
+
     auto bail = [](int code) -> int {
+        (void)cmdchannel::unhook_hal();
         std::printf("\n[*] press any key to exit...\n");
         _getch();
         return code;
@@ -240,13 +277,13 @@ int main(int argc, char* argv[]) {
 
     {
         uint8_t buf[16] = {};
-        if (ioctl::read_physical(byovd_ctx.device, 0, buf, sizeof(buf))) {
+        if (ioctl::read_physical(byovd_ctx.device, 0x1000, buf, sizeof(buf))) {
             bool all_zero = true;
             for (int i = 0; i < 16; ++i) if (buf[i] != 0) { all_zero = false; break; }
-            std::printf("[+] phys 0x0 readable (first 16 %s)\n",
+            std::printf("[+] phys 0x1000 readable (first 16 %s)\n",
                         all_zero ? "zero" : "nonzero");
         } else {
-            std::printf("[!] read_physical(0) failed\n");
+            std::printf("[!] read_physical(0x1000) failed\n");
         }
     }
 
@@ -393,15 +430,104 @@ int main(int argc, char* argv[]) {
                                         kdriver_plain.data(), kdriver_plain.size(),
                                         allocated, imp_stats);
 
+                                    uint64_t pte_base = 0;
+                                    {
+                                        static const uint8_t PTE_PAT[]  = { 0x48, 0xC1, 0xE9, 0x09, 0x48, 0xB8 };
+                                        static const uint8_t PTE_MASK[] = { 1, 1, 1, 1, 1, 1 };
+                                        llog("scanning for MiGetPteAddress pattern...\n");
+                                        uint64_t pte_match = kern_scan::scan_pattern(
+                                            byovd_ctx.device, cr3,
+                                            text->va_start, text->va_end,
+                                            PTE_PAT, PTE_MASK, sizeof(PTE_PAT));
+                                        if (!pte_match) {
+                                            std::printf("[!] MiGetPteAddress pattern not found — cannot set section protection\n");
+                                            llog("FAIL: MiGetPteAddress pattern not found\n");
+                                            byovd::unload(byovd_ctx);
+                                            return bail(31);
+                                        }
+                                        llog("MiGetPteAddress pattern @ %016llX\n", (unsigned long long)pte_match);
+
+                                        uint8_t fn_bytes[32] = {};
+                                        if (!ioctl::read_kernel_virtual(byovd_ctx.device, pte_match, fn_bytes, 32)) {
+                                            std::printf("[!] MiGetPteAddress read failed\n");
+                                            llog("FAIL: MiGetPteAddress bytes read\n");
+                                            byovd::unload(byovd_ctx);
+                                            return bail(31);
+                                        }
+
+                                        if (fn_bytes[17] != 0x48 || (fn_bytes[18] != 0xB8 && fn_bytes[18] != 0xB9)) {
+                                            std::printf("[!] MiGetPteAddress layout unexpected at +17: %02X %02X (want 48 B8/B9)\n",
+                                                        fn_bytes[17], fn_bytes[18]);
+                                            std::printf("    raw: ");
+                                            for (int bi = 0; bi < 32; ++bi) std::printf("%02X ", fn_bytes[bi]);
+                                            std::printf("\n");
+                                            llog("FAIL: MiGetPteAddress unexpected layout at +17: %02X %02X\n",
+                                                 fn_bytes[17], fn_bytes[18]);
+                                            byovd::unload(byovd_ctx);
+                                            return bail(31);
+                                        }
+
+                                        std::memcpy(&pte_base, fn_bytes + 19, 8);
+
+                                        std::printf("[+] PTE_BASE = %016llX (from MiGetPteAddress @ %016llX)\n",
+                                                    (unsigned long long)pte_base, (unsigned long long)pte_match);
+                                        llog("PTE_BASE=%016llX\n", (unsigned long long)pte_base);
+
+                                        if (pte_base < 0xFFFF800000000000ULL || (pte_base & 0xFFF) != 0) {
+                                            std::printf("[!] PTE_BASE looks invalid (not kernel-range or not page-aligned)\n");
+                                            llog("FAIL: PTE_BASE invalid range/alignment\n");
+                                            byovd::unload(byovd_ctx);
+                                            return bail(31);
+                                        }
+
+                                        uint64_t smoke_pte_va = pte_base + (((allocated >> 12) << 3) & 0x7FFFFFFFF8ULL);
+                                        uint64_t smoke_pte = 0;
+                                        if (!ioctl::read_kernel_virtual(byovd_ctx.device, smoke_pte_va, &smoke_pte, 8)) {
+                                            std::printf("[!] PTE_BASE smoke test: read PTE for allocated base failed\n");
+                                            llog("FAIL: PTE_BASE smoke read\n");
+                                            byovd::unload(byovd_ctx);
+                                            return bail(31);
+                                        }
+                                        bool pte_present = (smoke_pte & 1) != 0;
+                                        std::printf("[*] PTE_BASE smoke: alloc PTE VA=%016llX val=%016llX present=%s\n",
+                                                    (unsigned long long)smoke_pte_va,
+                                                    (unsigned long long)smoke_pte,
+                                                    pte_present ? "YES" : "NO");
+                                        llog("PTE_BASE smoke: alloc_va=%016llX pte_va=%016llX val=%016llX present=%s\n",
+                                             (unsigned long long)allocated,
+                                             (unsigned long long)smoke_pte_va,
+                                             (unsigned long long)smoke_pte,
+                                             pte_present ? "YES" : "NO");
+                                        if (!pte_present) {
+                                            std::printf("[!] PTE_BASE smoke FAILED — PTE not present for allocated VA\n");
+                                            llog("FAIL: PTE_BASE smoke — not present\n");
+                                            byovd::unload(byovd_ctx);
+                                            return bail(31);
+                                        }
+                                    }
+
                                     std::printf("[*] setting section protections...\n");
+                                    llog("apply_section_protection start (base=%016llX pte_base=%016llX)\n",
+                                         (unsigned long long)allocated, (unsigned long long)pte_base);
                                     if (!kern_map::apply_section_protection(
                                             byovd_ctx.device, cr3,
                                             kdriver_plain.data(), kdriver_plain.size(),
-                                            allocated)) {
+                                            allocated, pte_base)) {
                                         std::printf("[!] apply_section_protection failed — skipping DriverEntry call\n");
+                                        llog("FAIL: apply_section_protection\n");
                                         byovd::unload(byovd_ctx);
                                         return bail(30);
                                     }
+                                    llog("apply_section_protection OK\n");
+
+                                    std::printf("[*] flushing TLB for mapped pages...\n");
+                                    llog("flush_tlb_range start (va=%016llX size=0x%X)\n",
+                                         (unsigned long long)allocated, size_of_image);
+                                    if (!syscall_hijack::flush_tlb_range(hij, allocated, size_of_image)) {
+                                        std::printf("[!] TLB flush failed — DriverEntry may crash\n");
+                                        llog("WARN: flush_tlb_range failed\n");
+                                    }
+                                    llog("flush_tlb_range done\n");
 
                                     auto* dos12 = reinterpret_cast<IMAGE_DOS_HEADER*>(
                                         kdriver_plain.data());
@@ -409,6 +535,28 @@ int main(int argc, char* argv[]) {
                                         kdriver_plain.data() + dos12->e_lfanew);
                                     uint32_t entry_rva = nt12->OptionalHeader.AddressOfEntryPoint;
                                     uint64_t entry_kva = allocated + entry_rva;
+
+                                    {
+                                        uint64_t ep_page = entry_kva & ~0xFFFULL;
+                                        uint64_t ep_pte_va = pte_base + (((ep_page >> 12) << 3) & 0x7FFFFFFFF8ULL);
+                                        uint64_t ep_pte = 0;
+                                        ioctl::read_kernel_virtual(byovd_ctx.device, ep_pte_va, &ep_pte, 8);
+                                        bool nx_set = (ep_pte >> 63) & 1;
+                                        llog("SAFETY CHECK: entry_kva=%016llX pte_va=%016llX pte=%016llX NX=%d\n",
+                                             (unsigned long long)entry_kva,
+                                             (unsigned long long)ep_pte_va,
+                                             (unsigned long long)ep_pte, nx_set);
+                                        std::printf("[*] SAFETY CHECK: entry PTE=%016llX NX=%s\n",
+                                                    (unsigned long long)ep_pte,
+                                                    nx_set ? "SET (WOULD BSOD!)" : "clear (safe)");
+                                        if (nx_set) {
+                                            std::printf("[!] NX still set on DriverEntry page — aborting to prevent BSOD\n");
+                                            std::printf("[!] PTE write did not take effect. Check launcher_trace.txt\n");
+                                            llog("ABORT: NX still set, refusing DriverEntry call\n");
+                                            byovd::unload(byovd_ctx);
+                                            return bail(32);
+                                        }
+                                    }
 
                                     uint64_t p14_scratch = 0;
                                     if (syscall_hijack::invoke(hij, alloc_fn,
@@ -629,7 +777,10 @@ int main(int argc, char* argv[]) {
         (unsigned long long)parsed.image_base, parsed.size_of_image, parsed.entry_rva,
         parsed.section_count);
 
-    // Arm image-load notify — test heartbeat first to verify command channel
+    // Arm image-load notify — test heartbeat first to verify command channel.
+    // BE respawn pattern: BE spawns Sand.exe once for integrity check, kills
+    // it, respawns a fresh one for actual gameplay. We loop the inject phase
+    // so each new Sand.exe gets a fresh Stage 2 mapped into it.
     {
         volatile unsigned char hb_test = 0;
         uint64_t hb_addr = reinterpret_cast<uint64_t>(const_cast<unsigned char*>(&hb_test));
@@ -637,9 +788,45 @@ int main(int argc, char* argv[]) {
         std::printf("[*] heartbeat test: rc=%s val=%u\n", hb_ok ? "ok" : "FAIL", (unsigned)hb_test);
         llog("heartbeat test: rc=%s val=%u\n", hb_ok ? "ok" : "FAIL", (unsigned)hb_test);
     }
+
+    uint32_t inject_run = 0;
+    for (;; ++inject_run) {
+        std::printf("\n[*] === inject cycle %u — arming image-load notify ===\n", inject_run);
+        llog("=== inject cycle %u ===\n", inject_run);
+
+        if (inject_run == 0) {
+            std::printf("[*] === arm cycle 0 (SKIPPED — throwaway) ===\n");
+            llog("arm cycle 0 SKIPPED\n");
+            const wchar_t* skip_target = L"Sand.exe";
+            size_t skip_tlen = 8;
+            unsigned char skip_abody[0x18] = {0};
+            *reinterpret_cast<uint16_t*>(skip_abody + 0x00) = 0x7C4A;
+            *reinterpret_cast<uint32_t*>(skip_abody + 0x04) = 9;
+            *reinterpret_cast<uint16_t*>(skip_abody + 0x08) = static_cast<uint16_t>(skip_tlen);
+            *reinterpret_cast<uint64_t*>(skip_abody + 0x10) = reinterpret_cast<uint64_t>(skip_target);
+            int32_t arc = cmdchannel::send_raw(skip_abody, sizeof(skip_abody));
+            std::printf("[*] arm_image_notify raw NTSTATUS=0x%08X (skip mode)\n", (unsigned)arc);
+            llog("arm_image_notify NTSTATUS=0x%08X (skip mode)\n", (unsigned)arc);
+            if (arc != 0) {
+                std::printf("[!] arm_image_notify failed on skip cycle\n");
+                continue;
+            }
+            std::printf("[*] Waiting for throwaway Sand.exe to appear...\n");
+            uint32_t skip_pid = 0;
+            while (skip_pid == 0) {
+                Sleep(50);
+                (void)cmdchannel::query_armed_pid(&skip_pid);
+            }
+            std::printf("[+] throwaway Sand.exe caught (PID %u) — NOT injecting, waiting for real game spawn\n", skip_pid);
+            llog("throwaway pid=%u — skipping inject\n", skip_pid);
+            // The arm is one-shot; the driver returned the PID and disarmed
+            // internally. Loop increments inject_run and arms again for the
+            // next spawn, which is the real game.
+            continue;
+        }
     {
-        const wchar_t* target = L"sand_be.exe";
-        size_t tlen = 11;
+        const wchar_t* target = L"Sand.exe";
+        size_t tlen = 8;
         unsigned char abody[0x18] = {0};
         *reinterpret_cast<uint16_t*>(abody + 0x00) = 0x7C4A;
         *reinterpret_cast<uint32_t*>(abody + 0x04) = 9;
@@ -677,14 +864,35 @@ int main(int argc, char* argv[]) {
     llog("game PID=%u\n", game_pid);
 
     // Wait for process init (PEB/Ldr population)
-    std::printf("[*] waiting 2 s for process initialization...\n");
+    std::printf("[*] waiting for process modules to load...\n");
     Sleep(2000);
+
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, game_pid);
+        if (snap != INVALID_HANDLE_VALUE) {
+            MODULEENTRY32W me = {sizeof(me)};
+            int count = 0;
+            if (Module32FirstW(snap, &me)) {
+                do {
+                    if (count < 10) {
+                        std::printf("[*] usermode module[%d]: %ls base=%p size=0x%X\n",
+                                    count, me.szModule, me.modBaseAddr, me.modBaseSize);
+                    }
+                    count++;
+                } while (Module32NextW(snap, &me));
+            }
+            std::printf("[*] usermode module enumeration: %d total modules found\n", count);
+            llog("usermode module enum: %d modules\n", count);
+            CloseHandle(snap);
+        } else {
+            llog("Toolhelp not available (err=%lu), using kernel walker\n", GetLastError());
+        }
+    }
 
     // Allocate memory in game
     const uint32_t alloc_size = (parsed.size_of_image + 0xFFF) & ~0xFFFu;
     uint64_t stage2_base = 0;
-    if (!cmdchannel::alloc_memory(game_pid, 0, alloc_size,
-                                   0x3000, 0x04, &stage2_base)) {
+    if (!alloc_safe(game_pid, alloc_size, 0x3000, 0x04, &stage2_base)) {
         llog("FAIL: alloc_memory for stage2\n");
         std::printf("[!] Stage 2 memory allocation failed\n");
         return bail(14);
@@ -694,12 +902,44 @@ int main(int argc, char* argv[]) {
     llog("stage2_base=%016llX size=0x%X\n",
         (unsigned long long)stage2_base, alloc_size);
 
-    // Resolve imports
+    {
+        uint64_t test_base = 0;
+        uint32_t test_size = 0;
+
+        unsigned char tbody[0x38] = {0};
+        *reinterpret_cast<uint16_t*>(tbody + 0x00) = 0x7C4A;
+        *reinterpret_cast<uint32_t*>(tbody + 0x04) = 2;
+        *reinterpret_cast<uint32_t*>(tbody + 0x08) = game_pid;
+        const wchar_t* test_name = L"KERNEL32.dll";
+        size_t tlen = wcslen(test_name);
+        *reinterpret_cast<uint16_t*>(tbody + 0x0C) = static_cast<uint16_t>(tlen);
+        *reinterpret_cast<uint64_t*>(tbody + 0x10) = reinterpret_cast<uint64_t>(test_name);
+        *reinterpret_cast<uint64_t*>(tbody + 0x18) = reinterpret_cast<uint64_t>(&test_base);
+        *reinterpret_cast<uint64_t*>(tbody + 0x20) = reinterpret_cast<uint64_t>(&test_size);
+
+        int32_t raw_st = cmdchannel::send_raw(tbody, sizeof(tbody));
+        std::printf("[*] DIAG find_module(KERNEL32.dll): NTSTATUS=0x%08X base=%016llX walked=%u\n",
+                    (unsigned)raw_st, (unsigned long long)test_base, test_size);
+        llog("DIAG find_module KERNEL32: st=0x%08X base=%016llX walked=%u\n",
+             (unsigned)raw_st, (unsigned long long)test_base, test_size);
+    }
+
     resolve_imports::stats ri{};
-    llog("calling resolve_imports pid=%u\n", game_pid);
-    if (!resolve_imports::resolve(game_pid, stage2.data(), stage2.size(), parsed, ri)) {
-        llog("FAIL: resolve_imports\n");
-        std::printf("[!] import resolve FAIL\n");
+    bool imports_ok = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        ri = {};
+        llog("calling resolve_imports pid=%u attempt=%d\n", game_pid, attempt);
+        if (resolve_imports::resolve(game_pid, stage2.data(), stage2.size(), parsed, ri)) {
+            imports_ok = true;
+            break;
+        }
+        std::printf("[*] imports incomplete (attempt %d), waiting for modules...\n", attempt + 1);
+        llog("resolve_imports attempt %d failed, retrying...\n", attempt);
+        Sleep(3000);
+    }
+    if (!imports_ok) {
+        llog("FAIL: resolve_imports after all retries\n");
+        std::printf("[!] import resolve FAIL after 100 attempts\n");
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
         return bail(15);
     }
@@ -773,8 +1013,7 @@ int main(int argc, char* argv[]) {
     // Invoker shellcode: allocate, build, write, execute via remote thread
     // =====================================================================
     uint64_t sc_base = 0;
-    if (!cmdchannel::alloc_memory(game_pid, 0, 0x1000,
-                                   0x3000, 0x04, &sc_base)) {
+    if (!alloc_safe(game_pid, 0x1000, 0x3000, 0x04, &sc_base)) {
         llog("FAIL: alloc shellcode page\n");
         std::printf("[!] shellcode page allocation failed\n");
         cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
@@ -830,6 +1069,51 @@ int main(int argc, char* argv[]) {
     }
     std::printf("[+] shellcode page NX cleared\n");
 
+    {
+        HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, game_pid);
+        DWORD exit_code = STILL_ACTIVE;
+        if (hp) {
+            GetExitCodeProcess(hp, &exit_code);
+            CloseHandle(hp);
+        }
+        if (exit_code != STILL_ACTIVE) {
+            llog("PRE_THREAD: target dead exit_code=0x%X\n", (unsigned)exit_code);
+            std::printf("[!] target dead before thread create exit=0x%X\n", (unsigned)exit_code);
+            cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+            cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
+            return bail(23);
+        }
+    }
+
+    {
+        uint8_t sc_readback[32] = {0};
+        int32_t rc_sc = cmdchannel::read_memory_rc(game_pid, sc_base,
+            reinterpret_cast<uint64_t>(sc_readback), sizeof(sc_readback));
+
+        if (rc_sc != 0) {
+            llog("VERIFY_READ_FAIL: sc_rc=0x%08X\n", (unsigned)rc_sc);
+            std::printf("[!] verify read failed sc=0x%08X\n", (unsigned)rc_sc);
+            cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+            cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
+            return bail(22);
+        }
+        bool sc_ok = (std::memcmp(sc_readback, sc_buf, sizeof(sc_readback)) == 0);
+        if (!sc_ok) {
+            llog("VERIFY_MISMATCH: sc_ok=%d\n", sc_ok);
+            char hex[65]; auto dump = [&](const uint8_t* p, int n){
+                for (int i = 0; i < n && i*2 < 64; ++i) std::snprintf(hex + i*2, 3, "%02X", p[i]);
+                hex[n*2] = 0;
+            };
+            dump(sc_readback, 32); llog("  sc_read:  %s\n", hex);
+            dump(reinterpret_cast<const uint8_t*>(sc_buf), 32); llog("  sc_want:  %s\n", hex);
+            std::printf("[!] verify mismatch sc_ok=%d — write tampered\n", sc_ok);
+            cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
+            cmdchannel::free_memory(game_pid, stage2_base, 0, 0x8000);
+            return bail(22);
+        }
+        llog("VERIFY_OK: shellcode intact\n");
+    }
+
     // Create remote thread
     uint32_t tid = 0;
     if (!cmdchannel::create_remote_thread(game_pid, sc_base, stage2_base, &tid)) {
@@ -848,14 +1132,35 @@ int main(int argc, char* argv[]) {
         constexpr uint32_t TIMEOUT  = 10000;
         constexpr uint32_t MAX_ITER = TIMEOUT / POLL_MS;
         bool fired = false;
+        bool read_failed = false;
         uint32_t elapsed = 0;
         for (uint32_t i = 0; i < MAX_ITER; ++i) {
             Sleep(POLL_MS);
             elapsed += POLL_MS;
             uint32_t mark = 0;
-            if (!cmdchannel::read_memory(game_pid, marker_va,
-                                         reinterpret_cast<uint64_t>(&mark), 4)) {
-                std::printf("[!] marker READ failed during poll\n");
+            int32_t rc = cmdchannel::read_memory_rc(game_pid, marker_va,
+                                                    reinterpret_cast<uint64_t>(&mark), 4);
+            if (rc != 0) {
+                int alive;
+                DWORD exit_code = 0;
+                HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, game_pid);
+                if (hp) {
+                    if (GetExitCodeProcess(hp, &exit_code)) {
+                        alive = (exit_code == STILL_ACTIVE) ? 1 : 0;
+                    } else {
+                        alive = 1;
+                        exit_code = GetLastError();
+                    }
+                    CloseHandle(hp);
+                } else {
+                    alive = -1;
+                    exit_code = GetLastError();
+                }
+                llog("READ_FAIL: rc=0x%08X pid_alive=%d exit_code=0x%X iter=%u elapsed=%u ms\n",
+                     (unsigned)rc, alive, (unsigned)exit_code, i, elapsed);
+                std::printf("[!] marker READ failed: rc=0x%08X pid_alive=%d exit_code=0x%X\n",
+                            (unsigned)rc, alive, (unsigned)exit_code);
+                read_failed = true;
                 break;
             }
             if (mark == MARKER_DONE) {
@@ -866,8 +1171,10 @@ int main(int argc, char* argv[]) {
             }
         }
         if (!fired) {
-            llog("TIMEOUT: DllMain did NOT complete in %u ms\n", TIMEOUT);
-            std::printf("[!] timeout — DllMain did NOT complete within %u ms\n", TIMEOUT);
+            if (!read_failed) {
+                llog("TIMEOUT: DllMain did NOT complete in %u ms\n", TIMEOUT);
+                std::printf("[!] timeout — DllMain did NOT complete within %u ms\n", TIMEOUT);
+            }
             cmdchannel::free_memory(game_pid, sc_base, 0, 0x8000);
             return bail(24);
         }
@@ -879,11 +1186,46 @@ int main(int argc, char* argv[]) {
     std::printf("[+] shellcode page freed\n");
     llog("shellcode page freed\n");
 
-    std::printf("[+] Stage 2 is LIVE at %016llX (entry=%016llX)\n",
+    std::printf("[+] Stage 2 is LIVE in PID %u at %016llX (entry=%016llX)\n",
+                game_pid,
                 static_cast<unsigned long long>(stage2_base),
                 static_cast<unsigned long long>(entry_va));
-    std::printf("[*] Launcher exits now. Stage 2 persists until game process exits.\n");
-    llog("=== LAUNCHER (EARLY) COMPLETE ===\n");
+    std::printf("[*] Cycle %u complete — re-arming for next Sand.exe spawn (Ctrl+C to quit)\n",
+                inject_run);
+    llog("=== inject cycle %u COMPLETE (pid=%u) ===\n", inject_run, game_pid);
 
-    return bail(0);
+    if (inject_run == 1) {
+        struct MonCtx { uint32_t pid; };
+        MonCtx* ctx = new MonCtx{game_pid};
+        HANDLE hMon = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+            MonCtx* c = (MonCtx*)p;
+            uint32_t pid = c->pid;
+            delete c;
+            HANDLE hp = OpenProcess(SYNCHRONIZE, FALSE, pid);
+            if (!hp) {
+                (void)cmdchannel::unhook_hal();
+                std::printf("[!] could not open game PID %u for monitoring; unhook fired, exiting\n", pid);
+                ExitProcess(0);
+            }
+            for (;;) {
+                DWORD r = WaitForSingleObject(hp, 2000);
+                if (r == WAIT_OBJECT_0) {
+                    CloseHandle(hp);
+                    (void)cmdchannel::unhook_hal();
+                    std::printf("\n[*] game process %u ended - unhook fired, exiting\n", pid);
+                    ExitProcess(0);
+                }
+                if (r == WAIT_FAILED) {
+                    CloseHandle(hp);
+                    (void)cmdchannel::unhook_hal();
+                    std::printf("[!] wait failed on PID %u; unhook fired, exiting\n", pid);
+                    ExitProcess(0);
+                }
+            }
+        }, ctx, 0, nullptr);
+        if (hMon) CloseHandle(hMon);
+    }
+
+    // Loop back to re-arm for the next Sand.exe (BE respawn or manual restart).
+    } // end for (;; ++inject_run)
 }

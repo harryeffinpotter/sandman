@@ -39,11 +39,10 @@ struct ImportResolveStats {
 // section's IMAGE_SCN_MEM_* characteristics. Necessary because
 // MmAllocateIndependentPages returns pages as RW + NX; .text needs executable
 // permission before DriverEntry is invoked, else #PF → bugcheck 0xFC.
-// Implemented by direct PTE manipulation via physmem writes (no syscall
-// hijack needed, no pattern scan for MiProtectVirtualMemory).
+// Uses PTE self-map kernel VAs (pte_base) to read/write PTEs directly.
 bool apply_section_protection(HANDLE device, uint64_t cr3,
                               const uint8_t* pe_buf, size_t pe_size,
-                              uint64_t kernel_base);
+                              uint64_t kernel_base, uint64_t pte_base);
 
 // Phase 11 — walk the mapped driver's IMAGE_DIRECTORY_ENTRY_IMPORT, for each
 // imported function look up its address in the target kernel module's export

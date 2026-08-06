@@ -84,6 +84,7 @@ copy /Y "$(TargetDir)sand_cheat.pdb" "$(ProjectDir)launcher\sand_cheat.pdb"</Com
     <ClCompile Include="src\cheat.cpp" />
     <ClCompile Include="src\overlay.cpp" />
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\pe_resolve.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
     <ClCompile Include="imgui\imgui_tables.cpp" />

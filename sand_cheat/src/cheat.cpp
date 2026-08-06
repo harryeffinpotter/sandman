@@ -1,9 +1,12 @@
 #include "cheat.h"
+#include "pe_resolve.h"
+#include "debug_log.h"
 
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
 #include <cstring>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -13,20 +16,16 @@
 #include <tlhelp32.h>
 
 static void wlog(const char* fmt, ...) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\worker_debug.txt", "a");
-    if (!f) return;
-    fprintf(f, "[%lu] ", GetTickCount());
-    va_list a; va_start(a, fmt);
-    vfprintf(f, fmt, a);
-    va_end(a);
-    fflush(f); fclose(f);
+    char tmp[256];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
+    ringlog::push("[w] %s", tmp);
 }
 
 // ---------------------------------------------------------------------------
 // RESOLVE macro
 // ---------------------------------------------------------------------------
 #define RESOLVE(api, mod, name) \
-    api.name = (fn_##name)GetProcAddress(mod, #name);
+    api.name = (fn_##name)pe_resolve::get_proc(mod, #name);
 
 // ---------------------------------------------------------------------------
 // Global variable definitions
@@ -75,6 +74,7 @@ int g_idx_mob_ghoul = -1;
 int g_idx_mob_living_sand = -1;
 int g_idx_mob_living_sand_jr = -1;
 int g_idx_ai_agent = -1;
+int g_idx_user_name = -1;
 
 std::vector<ItemInfo> g_items;
 CRITICAL_SECTION g_itemsLock;
@@ -206,18 +206,18 @@ void resolve_all(HMODULE ga, IL2CPP_API& api) {
     RESOLVE(api, ga, il2cpp_string_new);
 }
 
+// Inline byte probe; local SEH catches AVs before VEH.
 static bool is_readable(const void* ptr, size_t len) {
-    if (!ptr) return false;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (!VirtualQuery(ptr, &mbi, sizeof(mbi))) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    DWORD prot = mbi.Protect & 0xFF;
-    if (!(prot == PAGE_READONLY || prot == PAGE_READWRITE ||
-          prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE ||
-          prot == PAGE_WRITECOPY || prot == PAGE_EXECUTE_WRITECOPY))
+    if (!ptr || !len) return false;
+    __try {
+        volatile const unsigned char* p = reinterpret_cast<const unsigned char*>(ptr);
+        volatile unsigned char first = p[0];
+        volatile unsigned char last  = p[len - 1];
+        (void)first; (void)last;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
-    uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    return ((uintptr_t)ptr + len) <= regionEnd;
+    }
 }
 
 static bool is_valid_obj(void* ptr) {
@@ -618,24 +618,28 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "MobGhoulData") == 0)         g_idx_mob_ghoul = i;
         else if (strcmp(narrow, "MobLivingSandData") == 0)    g_idx_mob_living_sand = i;
         else if (strcmp(narrow, "MobLivingSandJrData") == 0)  g_idx_mob_living_sand_jr = i;
+        else if (strcmp(narrow, "UserNameComponent") == 0)    g_idx_user_name = i;
         else if (strcmp(narrow, "AiAgentData") == 0)          g_idx_ai_agent = i;
     }
 
-    FILE* dumpF = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\component_names.txt", "w");
-    if (dumpF) {
-        for (int i = 0; i < count; i++) {
-            void* str = elements[i];
-            if (!is_readable(str, 0x14)) { fprintf(dumpF, "%d: <null>\n", i); continue; }
-            int len2 = *(int*)((uintptr_t)str + 0x10);
-            if (len2 <= 0 || len2 > 200) { fprintf(dumpF, "%d: <invalid len %d>\n", i, len2); continue; }
-            wchar_t* wc = (wchar_t*)((uintptr_t)str + 0x14);
-            char nm[256];
-            for (int c2 = 0; c2 < len2 && c2 < 255; c2++) nm[c2] = (char)wc[c2];
-            nm[(len2 < 255) ? len2 : 255] = 0;
-            fprintf(dumpF, "%d: %s\n", i, nm);
+    ringlog::push("[player-diag] discovered g_idx_user_name=%d g_idx_account_id=%d out of %d components",
+                  g_idx_user_name, g_idx_account_id, count);
+
+    for (int i = 0; i < count; i++) {
+        void* str = elements[i];
+        if (!is_readable(str, 0x14)) continue;
+        int len = *(int*)((uintptr_t)str + 0x10);
+        if (len <= 0 || len > 200) continue;
+        wchar_t* wchars = (wchar_t*)((uintptr_t)str + 0x14);
+        char narrow[256];
+        for (int c = 0; c < len && c < 255; c++) narrow[c] = (char)wchars[c];
+        narrow[(len < 255) ? len : 255] = 0;
+        char low[256];
+        for (int c = 0; narrow[c]; ++c) low[c] = (char)tolower((unsigned char)narrow[c]);
+        low[255] = 0;
+        if (strstr(low, "name") || strstr(low, "user") || strstr(low, "account") || strstr(low, "profile") || strstr(low, "nick")) {
+            ringlog::push("[player-diag] component[%d] = '%s'", i, narrow);
         }
-        fflush(dumpF);
-        fclose(dumpF);
     }
 
     return true;
@@ -976,6 +980,282 @@ static std::string get_display_name(const std::string& raw) {
 }
 
 
+// Extracted from loop for per-entity SEH (C++ objects cannot cross __try).
+static void process_one_entity(
+    void* entity,
+    int playerEntityId,
+    bool havePlayerPos,
+    const WorldVector& playerPos,
+    const std::unordered_map<int, void*>& idToEntity,
+    std::vector<ItemInfo>& items,
+    int* pDbgReadable, int* pDbgValidObj, int* pDbgEnabled, int* pDbgHasBP,
+    int* pDbgNameOK, int* pDbgPassFilter, int* pDbgHasPosParent,
+    int* pHeldCount, int* pResolvedParentCount, int* pEntitiesPushed)
+{
+    if (!is_readable(entity, 0x68)) return;
+    (*pDbgReadable)++;
+    if (!is_valid_obj(entity)) return;
+    (*pDbgValidObj)++;
+
+    bool isEnabled = *(bool*)((uintptr_t)entity + 0x4C);
+    if (!isEnabled) return;
+    (*pDbgEnabled)++;
+
+    void* bpComp = get_component(entity, g_idx_blueprint);
+    if (!is_readable(bpComp, 0x18)) return;
+    (*pDbgHasBP)++;
+
+    void* nameStr = *(void**)((uintptr_t)bpComp + 0x10);
+    std::string name = read_il2cpp_string(nameStr);
+    if (name.empty()) return;
+    (*pDbgNameOK)++;
+
+    int eid = *(int*)((uintptr_t)entity + 0x48);
+    if (eid == playerEntityId) return;
+
+    if (name.rfind("item_containerBox", 0) == 0) return;
+    if (name.rfind("env_", 0) == 0) return;
+    if (name.rfind("Ground", 0) == 0) return;
+    if (name.rfind("prop_", 0) == 0) return;
+    if (name.rfind("cde_", 0) == 0) return;
+    if (name.rfind("walker_", 0) == 0) return;
+    if (name == "Sun") return;
+    if (name.rfind("LandingCutScene", 0) == 0) return;
+    if (name.rfind("Shot Projectile", 0) == 0) return;
+    (*pDbgPassFilter)++;
+
+    void* posComp = get_component(entity, g_idx_position);
+    bool hasParent = (g_idx_parent >= 0 && get_component(entity, g_idx_parent));
+    if (!posComp && !hasParent) return;
+    (*pDbgHasPosParent)++;
+
+    ItemInfo info;
+    info.name = name;
+    info.entityId = eid;
+    info.entityPtr = entity;
+    info.distance = -1.0f;
+    info.hasTransformPos = false;
+    info.hasBones = false;
+    info.isCreature = false;
+    info.lootTier = 0;
+    info.isWeapon = false;
+    if (g_idx_item_type >= 0) {
+        void* itdComp = get_component(entity, g_idx_item_type);
+        if (itdComp) {
+            int itemType = *(int*)((uintptr_t)itdComp + 0x10);
+            info.isWeapon = (itemType == 1);
+        }
+    }
+    info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
+    info.isHeldByPlayer = false;
+    if (hasParent && g_idx_parent >= 0) {
+        void* curEntity = entity;
+        // Cap at 5 hops - deep chains are almost certainly circular refs on corrupt data.
+        for (int depth = 0; depth < 5; ++depth) {
+            void* parComp = get_component(curEntity, g_idx_parent);
+            if (!is_readable(parComp, 0x18)) break;
+            int parentId = *(int*)((uintptr_t)parComp + 0x10);
+            if (parentId <= 0) break;
+            if (parentId == playerEntityId) {
+                info.isHeldByPlayer = true;
+                break;
+            }
+            auto pit = idToEntity.find(parentId);
+            if (pit == idToEntity.end()) break;
+            curEntity = pit->second;
+            if (!is_readable(curEntity, 0x68)) break;
+        }
+    }
+    if (info.isHeldByPlayer) (*pHeldCount)++;
+    info.hasOwnPosition = (posComp != nullptr);
+    info.hasViewPos = false;
+    info.velX = 0; info.velY = 0; info.velZ = 0;
+    info.lastPosTime = 0;
+
+    info.serverId = -1;
+    if (g_idx_id >= 0) {
+        void* idComp = get_component(entity, g_idx_id);
+        if (idComp) info.serverId = *(int*)((uintptr_t)idComp + 0x10);
+    }
+
+    WorldVector resolvedPos = {};
+    bool hasResolvedPos = false;
+
+    if (posComp) {
+        resolvedPos = *(WorldVector*)((uintptr_t)posComp + 0x10);
+        hasResolvedPos = true;
+    } else if (hasParent && g_idx_id >= 0) {
+        void* parComp = get_component(entity, g_idx_parent);
+        if (parComp) {
+            int parentId = *(int*)((uintptr_t)parComp + 0x10);
+            auto it = idToEntity.find(parentId);
+            if (it != idToEntity.end()) {
+                void* parentPos = get_component(it->second, g_idx_position);
+                if (parentPos) {
+                    resolvedPos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
+                    hasResolvedPos = true;
+                    (*pResolvedParentCount)++;
+                }
+            }
+        }
+    }
+
+    info.pos = resolvedPos;
+    if (havePlayerPos && hasResolvedPos) {
+        float dx = (resolvedPos.cx - playerPos.cx) * CHUNK_SIZE + (resolvedPos.x - playerPos.x);
+        float dy = resolvedPos.y - playerPos.y;
+        float dz = (resolvedPos.cy - playerPos.cy) * CHUNK_SIZE + (resolvedPos.z - playerPos.z);
+        info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
+    }
+
+    if (name.rfind("PlayerAvatar", 0) == 0) {
+        info.displayName = "";
+        static bool s_playerDiagDone = false;
+        bool dumpThis = !s_playerDiagDone;
+        if (dumpThis) s_playerDiagDone = true;
+
+        if (dumpThis) {
+            ringlog::push("[player-diag] avatar eid=%d ptr=%p g_idx_user_name=%d g_idx_account_id=%d",
+                          eid, entity, g_idx_user_name, g_idx_account_id);
+        }
+
+        if (g_idx_user_name >= 0) {
+            void* unc = get_component(entity, g_idx_user_name);
+            if (dumpThis) ringlog::push("[player-diag] UserNameComponent ptr=%p readable=%d",
+                                        unc, is_readable(unc, 0x40) ? 1 : 0);
+            if (is_readable(unc, 0x40)) {
+                if (dumpThis) {
+                    unsigned char* raw = (unsigned char*)unc;
+                    char hex[3*0x40 + 8]; int off = 0;
+                    for (int i = 0; i < 0x40; ++i) {
+                        off += snprintf(hex + off, sizeof(hex) - off, "%02X ", raw[i]);
+                    }
+                    ringlog::push("[player-diag] UNC[0x00..0x40]: %s", hex);
+                    for (int probe = 0x08; probe <= 0x38; probe += 0x08) {
+                        void* pp = *(void**)((uintptr_t)unc + probe);
+                        if (is_readable(pp, 0x18)) {
+                            int len = *(int*)((uintptr_t)pp + 0x10);
+                            std::string s = (len > 0 && len < 128) ? read_il2cpp_string(pp) : std::string();
+                            ringlog::push("[player-diag]   +0x%02X -> %p (len=%d '%s')",
+                                          probe, pp, len, s.c_str());
+                        } else {
+                            ringlog::push("[player-diag]   +0x%02X -> %p (not readable as string)",
+                                          probe, pp);
+                        }
+                    }
+                }
+                void* namePtr = *(void**)((uintptr_t)unc + 0x10);
+                std::string pn = read_il2cpp_string(namePtr);
+                if (!pn.empty()) info.displayName = pn;
+            }
+        } else if (dumpThis) {
+            ringlog::push("[player-diag] g_idx_user_name is -1 - discover_component_indices didn't find 'UserNameComponent'");
+            ringlog::push("[player-diag] check discover_component_indices log for exact class-name strings in the names array");
+        }
+
+        if (dumpThis && info.displayName.empty() && g_idx_account_id >= 0) {
+            void* acc = get_component(entity, g_idx_account_id);
+            if (is_readable(acc, 0x20)) {
+                unsigned char* raw = (unsigned char*)acc;
+                char hex[3*0x20 + 8]; int off = 0;
+                for (int i = 0; i < 0x20; ++i) {
+                    off += snprintf(hex + off, sizeof(hex) - off, "%02X ", raw[i]);
+                }
+                ringlog::push("[player-diag] AccountId component[0x00..0x20]: %s", hex);
+            }
+        }
+    } else if (name.rfind("EXPEDITION_WALKER", 0) == 0 || name.rfind("walker_", 0) == 0) {
+        void* ownerAvatar = nullptr;
+        int ownerEid = 0;
+        if (g_idx_parent >= 0) {
+            void* cur = entity;
+            for (int depth = 0; depth < 5; ++depth) {
+                void* parComp = get_component(cur, g_idx_parent);
+                if (!is_readable(parComp, 0x18)) break;
+                int parentId = *(int*)((uintptr_t)parComp + 0x10);
+                if (parentId <= 0) break;
+                auto pit = idToEntity.find(parentId);
+                if (pit == idToEntity.end()) break;
+                void* parEntity = pit->second;
+                if (!is_readable(parEntity, 0x68)) break;
+
+                if (g_idx_blueprint >= 0) {
+                    void* parBp = get_component(parEntity, g_idx_blueprint);
+                    if (is_readable(parBp, 0x18)) {
+                        void* parNamePtr = *(void**)((uintptr_t)parBp + 0x10);
+                        std::string parName = read_il2cpp_string(parNamePtr);
+                        if (parName.rfind("PlayerAvatar", 0) == 0) {
+                            ownerAvatar = parEntity;
+                            ownerEid = parentId;
+                            break;
+                        }
+                    }
+                }
+                cur = parEntity;
+            }
+        }
+
+        if (!ownerAvatar) {
+            info.displayName = name;
+        } else if (ownerEid == playerEntityId) {
+            info.displayName = "My Trampler";
+        } else {
+            std::string ownerName;
+            if (g_idx_user_name >= 0) {
+                void* unc = get_component(ownerAvatar, g_idx_user_name);
+                if (is_readable(unc, 0x18)) {
+                    void* np = *(void**)((uintptr_t)unc + 0x10);
+                    ownerName = read_il2cpp_string(np);
+                }
+            }
+            info.displayName = (ownerName.empty() ? std::string("Player") : ownerName) + "'s Trampler";
+        }
+    } else {
+        info.displayName = get_display_name(name);
+        if (name.find("_t3_") != std::string::npos || name.find("_T3_") != std::string::npos)
+            info.lootTier = 3;
+        else if (name.find("_t2_") != std::string::npos || name.find("_T2_") != std::string::npos)
+            info.lootTier = 2;
+        else if (name.find("_t1_") != std::string::npos || name.find("_T1_") != std::string::npos)
+            info.lootTier = 1;
+        if (name.rfind("Mob", 0) == 0 || name.rfind("mob_", 0) == 0
+            || name.rfind("Ai", 0) == 0 || name.rfind("Sentinel", 0) == 0
+            || name.rfind("Trampler", 0) == 0) {
+            info.isCreature = true;
+        }
+    }
+
+    bool isPlayer = (name.rfind("PlayerAvatar", 0) == 0);
+    if (isPlayer || info.isCreature) {
+        memset(info.bonePositions, 0, sizeof(info.bonePositions));
+        info.hasBones = seh_resolve_bones(entity, info.bonePositions);
+    }
+
+    (*pEntitiesPushed)++;
+    items.push_back(std::move(info));
+}
+
+static void seh_process_one_entity(
+    void* entity,
+    int playerEntityId,
+    bool havePlayerPos,
+    const WorldVector& playerPos,
+    const std::unordered_map<int, void*>& idToEntity,
+    std::vector<ItemInfo>& items,
+    int* pDbgReadable, int* pDbgValidObj, int* pDbgEnabled, int* pDbgHasBP,
+    int* pDbgNameOK, int* pDbgPassFilter, int* pDbgHasPosParent,
+    int* pHeldCount, int* pResolvedParentCount, int* pEntitiesPushed)
+{
+    __try {
+        process_one_entity(
+            entity, playerEntityId, havePlayerPos, playerPos, idToEntity, items,
+            pDbgReadable, pDbgValidObj, pDbgEnabled, pDbgHasBP,
+            pDbgNameOK, pDbgPassFilter, pDbgHasPosParent,
+            pHeldCount, pResolvedParentCount, pEntitiesPushed);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 // ---------------------------------------------------------------------------
 // scan_entities
 // ---------------------------------------------------------------------------
@@ -1038,10 +1318,11 @@ void scan_entities() {
                         entityCount, is_readable(cache, 0x20) ? "cache+0x98" : "hashSet+0x58",
                         cache, context);
 
+#if 0
         static bool s_diagDone = false;
         if (!s_diagDone && entityCount > 0 && entityPtrs) {
             s_diagDone = true;
-            FILE* df = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\entity_diag.txt", "w");
+            FILE* df = fopen("_", "w");
             auto dout = [&](const char* fmt, ...) {
                 va_list a; va_start(a, fmt);
                 char buf[2048]; vsnprintf(buf, sizeof(buf), fmt, a);
@@ -1210,6 +1491,7 @@ void scan_entities() {
 
             if (df) { fclose(df); }
         }
+#endif
 
         WorldVector playerPos = {};
         bool havePlayerPos = false;
@@ -1275,10 +1557,11 @@ void scan_entities() {
             }
         }
 
+#if 0
         static int s_scanDiagCount = 0;
         if (s_scanDiagCount < 3 && entityCount > 0) {
             s_scanDiagCount++;
-            FILE* sd = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\scan_diag.txt", "w");
+            FILE* sd = fopen("_", "w");
             if (sd) {
                 fprintf(sd, "=== SCAN DIAG #%d: entityCount=%d ===\n", s_scanDiagCount, entityCount);
                 fprintf(sd, "g_idx_blueprint=%d g_idx_position=%d g_idx_parent=%d g_idx_id=%d\n",
@@ -1308,12 +1591,9 @@ void scan_entities() {
                     (int)idToEntity.size(), (int)niceNameByParentId.size());
                 fflush(sd);
                 fclose(sd);
-                {
-                    FILE* sl = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\scan_diag.txt", "a");
-                    if (sl) { fprintf(sl, "\n--- ENTITY LOOP STARTING (entityCount=%d) ---\n", entityCount); fflush(sl); fclose(sl); }
-                }
             }
         }
+#endif
 
         std::vector<ItemInfo> items;
         int vehEntityRecoveries = 0;
@@ -1323,132 +1603,12 @@ void scan_entities() {
         int dbgNameOK = 0, dbgPassFilter = 0, dbgHasPosParent = 0;
         int heldCount = 0, resolvedParentCount = 0;
         for (int e = 0; e < entityCount; e++) {
-            void* entity = entityPtrs[e];
-            if (!is_readable(entity, 0x68)) continue;
-            dbgReadable++;
-            if (!is_valid_obj(entity)) continue;
-            dbgValidObj++;
-
-            bool isEnabled = *(bool*)((uintptr_t)entity + 0x4C);
-            if (!isEnabled) continue;
-            dbgEnabled++;
-
-            void* bpComp = get_component(entity, g_idx_blueprint);
-            if (!is_readable(bpComp, 0x18)) continue;
-            dbgHasBP++;
-
-            void* nameStr = *(void**)((uintptr_t)bpComp + 0x10);
-            std::string name = read_il2cpp_string(nameStr);
-            if (name.empty()) continue;
-            dbgNameOK++;
-
-            int eid = *(int*)((uintptr_t)entity + 0x48);
-            if (eid == playerEntityId) continue;
-
-            if (name.rfind("item_containerBox", 0) == 0) continue;
-            if (name.rfind("env_", 0) == 0) continue;
-            if (name.rfind("Ground", 0) == 0) continue;
-            if (name.rfind("prop_", 0) == 0) continue;
-            if (name.rfind("cde_", 0) == 0) continue;
-            if (name.rfind("walker_", 0) == 0) continue;
-            if (name == "Sun") continue;
-            if (name.rfind("LandingCutScene", 0) == 0) continue;
-            if (name.rfind("Shot Projectile", 0) == 0) continue;
-            dbgPassFilter++;
-
-            void* posComp = get_component(entity, g_idx_position);
-            bool hasParent = (g_idx_parent >= 0 && get_component(entity, g_idx_parent));
-            if (!posComp && !hasParent) continue;
-            dbgHasPosParent++;
-
-            ItemInfo info;
-            info.name = name;
-            info.entityId = eid;
-            info.entityPtr = entity;
-            info.distance = -1.0f;
-            info.hasTransformPos = false;
-            info.hasBones = false;
-            info.isCreature = false;
-            info.lootTier = 0;
-            info.isWeapon = false;
-            if (g_idx_item_type >= 0) {
-                void* itdComp = get_component(entity, g_idx_item_type);
-                if (itdComp) {
-                    int itemType = *(int*)((uintptr_t)itdComp + 0x10);
-                    info.isWeapon = (itemType == 1);
-                }
-            }
-            info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
-            info.isHeldByPlayer = hasParent;
-            if (hasParent) heldCount++;
-            info.hasOwnPosition = (posComp != nullptr);
-            info.hasViewPos = false;
-            info.velX = 0; info.velY = 0; info.velZ = 0;
-            info.lastPosTime = 0;
-
-            info.serverId = -1;
-            if (g_idx_id >= 0) {
-                void* idComp = get_component(entity, g_idx_id);
-                if (idComp) info.serverId = *(int*)((uintptr_t)idComp + 0x10);
-            }
-
-            WorldVector resolvedPos = {};
-            bool hasResolvedPos = false;
-
-            if (posComp) {
-                resolvedPos = *(WorldVector*)((uintptr_t)posComp + 0x10);
-                hasResolvedPos = true;
-            } else if (hasParent && g_idx_id >= 0) {
-                void* parComp = get_component(entity, g_idx_parent);
-                if (parComp) {
-                    int parentId = *(int*)((uintptr_t)parComp + 0x10);
-                    auto it = idToEntity.find(parentId);
-                    if (it != idToEntity.end()) {
-                        void* parentPos = get_component(it->second, g_idx_position);
-                        if (parentPos) {
-                            resolvedPos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
-                            hasResolvedPos = true;
-                            resolvedParentCount++;
-                        }
-                    }
-                }
-            }
-
-            info.pos = resolvedPos;
-            if (havePlayerPos && hasResolvedPos) {
-                float dx = (resolvedPos.cx - playerPos.cx) * CHUNK_SIZE + (resolvedPos.x - playerPos.x);
-                float dy = resolvedPos.y - playerPos.y;
-                float dz = (resolvedPos.cy - playerPos.cy) * CHUNK_SIZE + (resolvedPos.z - playerPos.z);
-                info.distance = sqrtf(dx * dx + dy * dy + dz * dz);
-            }
-
-            if (name.rfind("PlayerAvatar", 0) == 0) {
-                info.displayName = "";
-            } else if (name.rfind("EXPEDITION_WALKER", 0) == 0 || name.rfind("walker_", 0) == 0) {
-                info.displayName = name;
-            } else {
-                info.displayName = get_display_name(name);
-                if (name.find("_t3_") != std::string::npos || name.find("_T3_") != std::string::npos)
-                    info.lootTier = 3;
-                else if (name.find("_t2_") != std::string::npos || name.find("_T2_") != std::string::npos)
-                    info.lootTier = 2;
-                else if (name.find("_t1_") != std::string::npos || name.find("_T1_") != std::string::npos)
-                    info.lootTier = 1;
-                if (name.rfind("Mob", 0) == 0 || name.rfind("mob_", 0) == 0
-                    || name.rfind("Ai", 0) == 0 || name.rfind("Sentinel", 0) == 0
-                    || name.rfind("Trampler", 0) == 0) {
-                    info.isCreature = true;
-                }
-            }
-
-            bool isPlayer = (name.rfind("PlayerAvatar", 0) == 0);
-            if (isPlayer || info.isCreature) {
-                memset(info.bonePositions, 0, sizeof(info.bonePositions));
-                info.hasBones = seh_resolve_bones(entity, info.bonePositions);
-            }
-
-            entitiesPushed++;
-            items.push_back(std::move(info));
+            seh_process_one_entity(
+                entityPtrs[e],
+                playerEntityId, havePlayerPos, playerPos, idToEntity, items,
+                &dbgReadable, &dbgValidObj, &dbgEnabled, &dbgHasBP,
+                &dbgNameOK, &dbgPassFilter, &dbgHasPosParent,
+                &heldCount, &resolvedParentCount, &entitiesPushed);
         }
 
         if (doLog) wlog("[scan] readable=%d validObj=%d enabled=%d hasBP=%d nameOK=%d passFilter=%d hasPosParent=%d pushed=%d\n",
@@ -1456,11 +1616,12 @@ void scan_entities() {
         if (doLog) wlog("[scan] heldItems=%d resolvedParents=%d idToEntitySize=%d\n",
                         heldCount, resolvedParentCount, (int)idToEntity.size());
 
+#if 0
         {
             static int s_itemCountLogCount = 0;
             if (s_itemCountLogCount < 3) {
                 s_itemCountLogCount++;
-                FILE* sf = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\scan_diag.txt", "a");
+                FILE* sf = fopen("_", "a");
                 if (sf) {
                     fprintf(sf, "\n--- ENTITY LOOP DONE ---\n");
                     fprintf(sf, "ITEMS PRODUCED: %d\n", entitiesPushed);
@@ -1480,6 +1641,7 @@ void scan_entities() {
                 }
             }
         }
+#endif
 
         size_t itemCount = items.size();
         std::vector<size_t> order(itemCount);
@@ -1597,45 +1759,76 @@ static bool seh_read_position(void* posComp, WorldVector* out) {
 }
 
 static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
-    if (!g_getBoneTransform || !g_getPosition) return false;
-    if (!g_getComponentInChildren && !g_getComponentByType) return false;
-    if (!g_animatorType) return false;
+    static int s_boneDiagCount = 0;
+    bool dumpThis = (s_boneDiagCount < 10);
+    if (dumpThis) s_boneDiagCount++;
+
+    if (dumpThis) ringlog::push("[bone-diag] entity=%p getBT=%p getPos=%p getCIC=%p getCBT=%p animType=%p",
+        entity, (void*)g_getBoneTransform, (void*)g_getPosition, (void*)g_getComponentInChildren, (void*)g_getComponentByType, g_animatorType);
+
+    if (!g_getBoneTransform || !g_getPosition) {
+        if (dumpThis) ringlog::push("[bone-diag] SKIP: getBoneTransform/getPosition null");
+        return false;
+    }
+    if (!g_getComponentInChildren && !g_getComponentByType) {
+        if (dumpThis) ringlog::push("[bone-diag] SKIP: both getComponent* null");
+        return false;
+    }
+    if (!g_animatorType) {
+        if (dumpThis) ringlog::push("[bone-diag] SKIP: animatorType null");
+        return false;
+    }
     __try {
         void* viewBehaviour = nullptr;
 
         if (g_idx_view >= 0) {
             void* viewComp = get_component(entity, g_idx_view);
+            void* vb = nullptr;
             if (is_readable(viewComp, 0x18)) {
-                void* vb = *(void**)((uintptr_t)viewComp + 0x10);
+                vb = *(void**)((uintptr_t)viewComp + 0x10);
                 if (is_readable(vb, 0x10) && is_valid_obj(vb))
                     viewBehaviour = vb;
             }
+            if (dumpThis) ringlog::push("[bone-diag] path0 view: comp=%p vb=%p", viewComp, vb);
         }
 
         if (!viewBehaviour && g_idx_view_data >= 0) {
             void* vdComp = get_component(entity, g_idx_view_data);
+            void* vb = nullptr;
             if (is_readable(vdComp, 0x18)) {
-                void* vb = *(void**)((uintptr_t)vdComp + 0x10);
+                vb = *(void**)((uintptr_t)vdComp + 0x10);
                 if (is_readable(vb, 0x10) && is_valid_obj(vb))
                     viewBehaviour = vb;
             }
+            if (dumpThis) ringlog::push("[bone-diag] path1 view_data: comp=%p vb=%p", vdComp, vb);
         }
 
         static const int* vbIndices[] = {
             &g_idx_char_ctrl_vb, &g_idx_fps_ctrl_vb,
             &g_idx_mob_vb, &g_idx_simple_anim_vb
         };
-        for (int vi = 0; !viewBehaviour && vi < 4; vi++) {
+        for (int vi = 0; vi < 4; vi++) {
+            if (viewBehaviour) break;
             int idx = *vbIndices[vi];
-            if (idx < 0) continue;
-            void* comp = get_component(entity, idx);
-            if (!is_readable(comp, 0x18)) continue;
-            void* vb = *(void**)((uintptr_t)comp + 0x10);
-            if (is_readable(vb, 0x10) && is_valid_obj(vb))
-                viewBehaviour = vb;
+            void* comp = nullptr;
+            void* vb = nullptr;
+            if (idx >= 0) {
+                comp = get_component(entity, idx);
+                if (is_readable(comp, 0x18)) {
+                    vb = *(void**)((uintptr_t)comp + 0x10);
+                    if (is_readable(vb, 0x10) && is_valid_obj(vb))
+                        viewBehaviour = vb;
+                }
+            }
+            if (dumpThis) ringlog::push("[bone-diag] path%d: comp=%p vb=%p", vi + 2, comp, vb);
         }
 
-        if (!viewBehaviour || !is_valid_obj(viewBehaviour)) return false;
+        if (dumpThis) ringlog::push("[bone-diag] final viewBehaviour=%p", viewBehaviour);
+
+        if (!viewBehaviour || !is_valid_obj(viewBehaviour)) {
+            if (dumpThis) ringlog::push("[bone-diag] SKIP: no viewBehaviour");
+            return false;
+        }
 
         g_vehInnerActive = true;
         RtlCaptureContext(&g_vehInnerCtx);
@@ -1646,28 +1839,43 @@ static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
             return false;
         }
 
-        void* animator = nullptr;
-        if (g_getComponentInChildren)
-            animator = g_getComponentInChildren(viewBehaviour, g_animatorType, nullptr);
-        if (!animator && g_getComponentByType)
-            animator = g_getComponentByType(viewBehaviour, g_animatorType, nullptr);
-        if (!is_readable(animator, 0x10) || !is_valid_obj(animator)) { g_vehInnerActive = false; return false; }
-        static const int USED_BONES[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,54};
+        void* animator_cic = g_getComponentInChildren ? g_getComponentInChildren(viewBehaviour, g_animatorType, nullptr) : nullptr;
+        void* animator_cbt = (!animator_cic && g_getComponentByType) ? g_getComponentByType(viewBehaviour, g_animatorType, nullptr) : nullptr;
+        void* animator = animator_cic ? animator_cic : animator_cbt;
+        if (dumpThis) ringlog::push("[bone-diag] animator cic=%p cbt=%p final=%p", animator_cic, animator_cbt, animator);
+        if (!is_readable(animator, 0x10) || !is_valid_obj(animator)) {
+            if (dumpThis) ringlog::push("[bone-diag] SKIP: animator unreadable");
+            g_vehInnerActive = false;
+            return false;
+        }
+        // Forum reference (offsets may drift):
+        // 0=Head 1=Neck 2=Chest 3=Spine2 4=Spine1 5=Hips
+        // 6-9 L_Clavicle/Shoulder/Elbow/Hand, 10-13 R_*
+        // 14-17 L_Femur/Knee/Ankle/Toe, 18-21 R_*, _Count=22
+        static const int USED_BONES[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21};
         bool anyBone = false;
-        for (int ub = 0; ub < 20; ub++) {
+        int validCount = 0;
+        for (int ub = 0; ub < (int)(sizeof(USED_BONES)/sizeof(USED_BONES[0])); ub++) {
             int bi = USED_BONES[ub];
             void* boneTf = g_getBoneTransform(animator, bi, nullptr);
-            if (is_readable(boneTf, 0x10)) {
-                Vec3 bpos;
-                g_getPosition(&bpos, boneTf, nullptr);
-                if (!std::isnan(bpos.x) && !std::isnan(bpos.y) && !std::isnan(bpos.z)) {
-                    bones[bi].pos = bpos;
-                    bones[bi].valid = true;
-                    anyBone = true;
-                }
+            if (!is_readable(boneTf, 0x10)) {
+                if (dumpThis && ub < 3) ringlog::push("[bone-diag] bone %d transform=%p unreadable_or_null", bi, boneTf);
+                continue;
+            }
+            Vec3 bpos;
+            g_getPosition(&bpos, boneTf, nullptr);
+            int isnan_flag = (std::isnan(bpos.x) || std::isnan(bpos.y) || std::isnan(bpos.z)) ? 1 : 0;
+            if (dumpThis && ub < 3) ringlog::push("[bone-diag] bone %d transform=%p pos=(%.2f,%.2f,%.2f) nan=%d",
+                bi, boneTf, bpos.x, bpos.y, bpos.z, isnan_flag);
+            if (!isnan_flag) {
+                bones[bi].pos = bpos;
+                bones[bi].valid = true;
+                anyBone = true;
+                validCount++;
             }
         }
         g_vehInnerActive = false;
+        if (dumpThis) ringlog::push("[bone-diag] done anyBone=%d totalValid=%d", anyBone?1:0, validCount);
         return anyBone;
     } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_bones] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
@@ -1742,13 +1950,10 @@ static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
     return false;
 }
 
-static void probe_bones_once(void* entity) {
-    if (s_boneProbeCount >= 20) return;
-    if (g_idx_view < 0 || !g_getBoneTransform || !g_getTransform || !g_getPosition) return;
-    if (!g_getComponentInChildren && !g_getComponentByType) return;
-    if (!g_animatorType) return;
-
-    FILE* bf = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\bone_probe.txt", "w");
+static void probe_bones_once(void* entity) { (void)entity; s_boneProbeCount = 20; }
+#if 0
+static void probe_bones_once_disabled_(void* entity) {
+    FILE* bf = fopen("_", "w");
     if (!bf) return;
 
     fprintf(bf, "Bone probe for entity %p\n", entity);
@@ -1817,11 +2022,14 @@ static void probe_bones_once(void* entity) {
     fclose(bf);
     s_boneProbeCount = 20;
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // dump_entities_to_file
 // ---------------------------------------------------------------------------
-void dump_entities_to_file() {
+void dump_entities_to_file() { g_dumpEntities.store(false); }
+#if 0
+void dump_entities_to_file_disabled_() {
     void* gcm = (void*)g_gameContextModule;
     if (!gcm) { g_dumpEntities.store(false); return; }
 
@@ -1908,9 +2116,12 @@ void dump_entities_to_file() {
     fclose(ef);
     g_dumpEntities.store(false);
 }
+#endif
 
-void dump_shop_classes(IL2CPP_API& api) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\shop_probe.txt", "w");
+void dump_shop_classes(IL2CPP_API&) { }
+#if 0
+void dump_shop_classes_disabled_(IL2CPP_API& api) {
+    FILE* f = fopen("_", "w");
     if (!f) return;
     fprintf(f, "=== SHOP/STORE IL2CPP CLASS SCAN ===\n\n");
 
@@ -1975,24 +2186,9 @@ void dump_shop_classes(IL2CPP_API& api) {
     fprintf(f, "\nTotal matching classes: %d\n", matchCount);
     fclose(f);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // probe_context_to_file
 // ---------------------------------------------------------------------------
-void probe_context_to_file() {
-    void* gcm = (void*)g_gameContextModule;
-
-    FILE* pf = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\probe.txt", "w");
-    if (!pf) { g_probeContext.store(false); return; }
-
-    if (gcm) {
-        fprintf(pf, "[PROBE] GameContextModule at %p\n", gcm);
-        fprintf(pf, "[INFO] Component indices: BP=%d Pos=%d IA=%d INA=%d Intrs=%d IT=%d Par=%d ItemT=%d Id=%d\n",
-                g_idx_blueprint, g_idx_position, g_idx_interactible,
-                g_idx_interact_not_active, g_idx_interactions,
-                g_idx_interact_target, g_idx_parent, g_idx_item_type, g_idx_id);
-    }
-
-    fclose(pf);
-    g_probeContext.store(false);
-}
+void probe_context_to_file() { g_probeContext.store(false); }

@@ -27,4 +27,6 @@ bool invoke(const Context& ctx, uint64_t target_kva,
 
 bool smoke_test(const Context& ctx, uint64_t kqpc_kva);
 
+bool flush_tlb_range(const Context& ctx, uint64_t va_start, size_t size);
+
 } // namespace syscall_hijack

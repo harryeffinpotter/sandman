@@ -65,7 +65,14 @@ void widen_dll_name(const char* ascii, wchar_t* wide, size_t wide_cap) {
 bool load_module_bytes(uint32_t pid, const wchar_t* wname, cached_module& out) {
     uint64_t base = 0;
     uint32_t size = 0;
-    if (!cmdchannel::find_module(pid, wname, &base, &size)) return false;
+    int32_t st = cmdchannel::find_module_ex(pid, wname, &base, &size);
+    if (st != 0 || base == 0) {
+        llog("find_module FAIL '%ls' st=0x%08X walked=%u base=%016llX\n",
+             wname, (unsigned)st, size, (unsigned long long)base);
+        return false;
+    }
+    llog("find_module OK '%ls' base=%016llX size=%u\n",
+         wname, (unsigned long long)base, size);
 
     out.data.resize(size);
     for (size_t off = 0; off < size; off += READ_CHUNK) {
@@ -229,6 +236,14 @@ bool resolve(uint32_t pid,
              stats& out) {
     out = {};
 
+    {
+        uint64_t sb = 0;
+        uint32_t ssz = 0;
+        int32_t sst = cmdchannel::find_module_ex(pid, L"ntdll.dll", &sb, &ssz);
+        llog("SENTINEL find_module ntdll.dll pid=%u st=0x%08X walked/size=%u base=%016llX\n",
+             pid, (unsigned)sst, ssz, (unsigned long long)sb);
+    }
+
     if (parsed.import_rva == 0 || parsed.import_size == 0) {
         std::printf("[*] resolve_imports: empty import directory — nothing to resolve\n");
         return true;
@@ -255,8 +270,24 @@ bool resolve(uint32_t pid,
         widen_dll_name(dll_name, wname, 64);
         cached_module* m = r.get_or_load(wname);
         if (!m) {
-            std::printf("[!] resolve_imports: module '%s' not in target PEB\n", dll_name);
-            out.dlls_missing++;
+            // Missing DLL is only a real failure if its thunk table has
+            // actual entries our stage2 depends on. Linkers routinely emit
+            // phantom IMAGE_IMPORT_DESCRIPTORs (empty IAT) — those are
+            // safe to skip and must not gate the retry loop.
+            uint32_t empty_oft_rva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk
+                                                              : desc->FirstThunk;
+            uint32_t empty_oft_raw = rva_to_raw_local(parsed, empty_oft_rva);
+            bool has_symbols = false;
+            if (empty_oft_raw != 0 && empty_oft_raw + sizeof(uint64_t) <= pe_size) {
+                auto* thunks = reinterpret_cast<uint64_t*>(pe_buf_mut + empty_oft_raw);
+                has_symbols = (thunks[0] != 0);
+            }
+            if (has_symbols) {
+                std::printf("[!] resolve_imports: module '%s' not in target PEB\n", dll_name);
+                out.dlls_missing++;
+            } else {
+                llog("resolve_imports: phantom import '%s' (empty IAT) — ignored\n", dll_name);
+            }
             continue;
         }
         out.dlls_found++;

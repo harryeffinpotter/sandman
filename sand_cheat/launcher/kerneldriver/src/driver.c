@@ -435,6 +435,19 @@ static NTSTATUS cmd_create_thread(UCHAR* body, ULONG body_size) {
     return st;
 }
 
+static NTSTATUS cmd_unhook_hal(UCHAR* body, ULONG body_size) {
+    (void)body; (void)body_size;
+    if (g_hal_slot_ptr && g_hal_original) {
+        // Aligned 8-byte store: naturally atomic on x64.
+        // Leave g_hal_original set so any in-flight dispatcher call that
+        // already loaded our function pointer can still fall through to
+        // the original via the passthrough branch.
+        *g_hal_slot_ptr = (PVOID)g_hal_original;
+        g_hal_slot_ptr = NULL;
+    }
+    return STATUS_SUCCESS;
+}
+
 // Phase 14.5: READ_MEMORY (cmd 0). Body layout (48 bytes total, spec §5.3):
 //   +0x00 magic    (u16=0x7C4A, already verified)
 //   +0x02 reserved (u16)
@@ -566,9 +579,7 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
     PEPROCESS   target = NULL;
     KAPC_STATE_RE apc_state;
     PPEB_RE     peb;
-    PPEB_LDR_DATA_RE ldr;
     PLIST_ENTRY head, cur;
-    PLDR_DATA_TABLE_ENTRY_RE e;
     ULONGLONG   found_base = 0;
     ULONG       found_size = 0;
     BOOLEAN     found = FALSE;
@@ -592,7 +603,21 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
     pAttach = (KeStackAttachProcess_t)      g_resolved_apis[API_KeStackAttachProcess];
     pDetach = (KeUnstackDetachProcess_t)    g_resolved_apis[API_KeUnstackDetachProcess];
     pGetPeb = (PsGetProcessPeb_t)           g_resolved_apis[API_PsGetProcessPeb];
-    if (!pLookup || !pDeref || !pAttach || !pDetach || !pGetPeb) return STATUS_PROCEDURE_NOT_FOUND;
+    {
+        MmCopyVirtualMemory_t pCopy =
+            (MmCopyVirtualMemory_t)g_resolved_apis[API_MmCopyVirtualMemory];
+        IoGetCurrentProcess_t pCurr =
+            (IoGetCurrentProcess_t)g_resolved_apis[API_IoGetCurrentProcess];
+        PEPROCESS caller_proc;
+
+        if (!pLookup || !pDeref || !pAttach || !pDetach || !pGetPeb || !pCopy || !pCurr)
+            return STATUS_PROCEDURE_NOT_FOUND;
+
+    // Capture caller process BEFORE any attach — KeStackAttachProcess swaps
+    // the current-process pointer, so pCurr() while attached returns target,
+    // not the real caller. MmCopyVirtualMemory's TargetProcess must be the
+    // process whose address space the kernel-stack dest lives in.
+    caller_proc = pCurr();
 
     // Copy name from launcher VA → kernel stack (still in launcher context).
     // Zero-terminate explicitly so _wcsicmp is safe.
@@ -602,15 +627,52 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
     st = pLookup((HANDLE)(ULONG_PTR)pid, &target);
     if (!NT_SUCCESS(st) || !target) return STATUS_INVALID_HANDLE;
 
-    // Enter target VA space. From here, target's user VAs are accessible.
-    pAttach(target, &apc_state);
+    // PsGetProcessPeb reads EPROCESS.Peb — no attach needed.
     peb = (PPEB_RE)pGetPeb(target);
-    if (peb && peb->Ldr) {
-        ldr = peb->Ldr;
+    if (!peb) {
+        pDeref(target);
+        return (NTSTATUS)0xE0000001;
+    }
+
+    // Probe (unattached): MmCopyVirtualMemory handles cross-process attach
+    // internally and is SEH-safe — pages the source page in on demand,
+    // returns NTSTATUS error on truly invalid src. If the probes pass, the
+    // Ldr chain is guaranteed readable for the direct walk that follows.
+    {
+        PPEB_LDR_DATA_RE  probed_ldr = NULL;
+        LIST_ENTRY        probed_head;
+        SIZE_T            got = 0;
+
+        st = pCopy(target, &peb->Ldr, caller_proc,
+                   &probed_ldr, sizeof(probed_ldr), KernelMode, &got);
+        if (!NT_SUCCESS(st) || !probed_ldr) {
+            pDeref(target);
+            return (NTSTATUS)0xE0000004;
+        }
+
+        st = pCopy(target, &probed_ldr->InLoadOrderModuleList, caller_proc,
+                   &probed_head, sizeof(probed_head), KernelMode, &got);
+        if (!NT_SUCCESS(st)) {
+            pDeref(target);
+            return (NTSTATUS)0xE0000005;
+        }
+    }
+
+    // Probes passed — attach for the direct walk. The original walking code
+    // is preserved verbatim; the only difference from the pre-BSOD version
+    // is the two probes above that force the PEB/Ldr pages resident and
+    // filter out truly-torn processes before we can crash on them.
+    pAttach(target, &apc_state);
+    {
+        PPEB_LDR_DATA_RE ldr = peb->Ldr;
+        PLDR_DATA_TABLE_ENTRY_RE e;
+        ULONG walk_count = 0;
+
         head = &ldr->InLoadOrderModuleList;
-        cur = head->Flink;
-        while (cur && cur != head) {
+        cur  = head->Flink;
+        while (cur && cur != head && walk_count < 2000) {
             e = CONTAINING_RECORD(cur, LDR_DATA_TABLE_ENTRY_RE, InLoadOrderLinks);
+            walk_count++;
             if (e->BaseDllName.Buffer &&
                 e->BaseDllName.Length == name_len * sizeof(WCHAR) &&
                 _wcsicmp(e->BaseDllName.Buffer, name_buf) == 0) {
@@ -621,9 +683,18 @@ static NTSTATUS cmd_find_module(UCHAR* body, ULONG body_size) {
             }
             cur = cur->Flink;
         }
+        if (!found && out_size_ptr && is_usermode_range(out_size_ptr, sizeof(ULONG))) {
+            safe_memcpy(out_size_ptr, &walk_count, sizeof(walk_count));
+        }
+        if (!found && walk_count == 0) {
+            pDetach(&apc_state);
+            pDeref(target);
+            return (NTSTATUS)0xE0000003;
+        }
     }
     pDetach(&apc_state);
     pDeref(target);
+    } // pCopy/pCurr scope
 
     if (!found) return STATUS_NOT_FOUND;
 
@@ -1077,6 +1148,9 @@ static NTSTATUS our_hal_dispatcher(PVOID a1, PVOID a2, PVOID a3, PVOID a4) {
             break;
         case 11:
             status = cmd_create_thread(body, buffer_size);
+            break;
+        case 12:
+            status = cmd_unhook_hal(body, buffer_size);
             break;
         default:
             status = STATUS_NOT_IMPLEMENTED;

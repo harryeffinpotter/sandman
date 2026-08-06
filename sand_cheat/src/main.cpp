@@ -1,5 +1,7 @@
 #include "cheat.h"
 #include "overlay.h"
+#include "pe_resolve.h"
+#include "debug_log.h"
 #include <cstdio>
 #include <cstdarg>
 #include <csignal>
@@ -16,38 +18,68 @@
 
 #define CRASH_DIR "C:\\Users\\ysg\\projects\\sand_cheat\\"
 
-static void wlog(const char* fmt, ...) {
-    FILE* f = fopen(CRASH_DIR "worker_debug.txt", "a");
-    if (!f) return;
-    fprintf(f, "[%lu] ", GetTickCount());
-    va_list a; va_start(a, fmt);
-    vfprintf(f, fmt, a);
-    va_end(a);
-    fflush(f); fclose(f);
-}
+namespace {
+#ifndef _NTDEF_
+typedef LONG NTSTATUS;
+#endif
 
-static void tlog(const char* fmt, ...) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\injection_trace.txt", "a");
-    if (!f) return;
-    fprintf(f, "[%lu] ", GetTickCount());
-    va_list a; va_start(a, fmt);
-    vfprintf(f, fmt, a);
-    va_end(a);
-    fflush(f); fclose(f);
-}
+typedef struct _LDR_UNICODE_STRING {
+    USHORT Length; USHORT MaximumLength; PWSTR Buffer;
+} LDR_UNICODE_STRING;
 
-static FILE* open_crash_log(const char* mode = "a") {
-    const char* path = CRASH_DIR "crash_info.txt";
-    if (mode[0] == 'a') {
-        WIN32_FILE_ATTRIBUTE_DATA fad = {};
-        if (GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
-            ULONGLONG size = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-            if (size > 10 * 1024 * 1024)
-                return fopen(path, "w");
-        }
+typedef struct _LDR_DLL_LOADED_NOTIFICATION_DATA {
+    ULONG Flags;
+    const LDR_UNICODE_STRING* FullDllName;
+    const LDR_UNICODE_STRING* BaseDllName;
+    PVOID DllBase;
+    ULONG SizeOfImage;
+} LDR_DLL_LOADED_NOTIFICATION_DATA;
+
+typedef union _LDR_DLL_NOTIFICATION_DATA {
+    LDR_DLL_LOADED_NOTIFICATION_DATA Loaded;
+    LDR_DLL_LOADED_NOTIFICATION_DATA Unloaded;
+} LDR_DLL_NOTIFICATION_DATA;
+
+typedef VOID (NTAPI *LDR_DLL_NOTIFICATION_FUNCTION)(ULONG NotificationReason,
+    const LDR_DLL_NOTIFICATION_DATA* NotificationData, PVOID Context);
+
+typedef NTSTATUS (NTAPI *pLdrRegisterDllNotification)(ULONG Flags,
+    LDR_DLL_NOTIFICATION_FUNCTION NotificationFunction, PVOID Context, PVOID* Cookie);
+
+typedef NTSTATUS (NTAPI *pLdrUnregisterDllNotification)(PVOID Cookie);
+
+#define LDR_DLL_NOTIFICATION_REASON_LOADED 1
+
+static void NTAPI dll_load_cb(ULONG reason, const LDR_DLL_NOTIFICATION_DATA* data, PVOID ctx) {
+    if (reason != LDR_DLL_NOTIFICATION_REASON_LOADED) return;
+    if (!data || !data->Loaded.BaseDllName || !data->Loaded.BaseDllName->Buffer) return;
+    const wchar_t* target = L"GameAssembly.dll";
+    USHORT chars = data->Loaded.BaseDllName->Length / 2;
+    USHORT want = 16;
+    if (chars != want) return;
+    const wchar_t* b = data->Loaded.BaseDllName->Buffer;
+    for (USHORT i = 0; i < want; ++i) {
+        wchar_t x = b[i], y = target[i];
+        if (x >= L'A' && x <= L'Z') x += 32;
+        if (y >= L'A' && y <= L'Z') y += 32;
+        if (x != y) return;
     }
-    return fopen(path, mode);
+    HANDLE evt = (HANDLE)ctx;
+    if (evt) SetEvent(evt);
 }
+} // namespace
+
+static void wlog(const char* fmt, ...) {
+    char tmp[256];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
+    ringlog::push("[w] %s", tmp);
+}
+static void tlog(const char* fmt, ...) {
+    char tmp[256];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
+    ringlog::push("[t] %s", tmp);
+}
+static FILE* open_crash_log(const char* /*mode*/ = "a") { return nullptr; }
 
 volatile DWORD g_workerThreadId = 0;
 volatile DWORD g_renderThreadId = 0;
@@ -304,16 +336,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static LONG WINAPI final_crash_handler(EXCEPTION_POINTERS* ep) {
-    if (InterlockedCompareExchange(&g_dumpWritten, 1, 0) == 0) {
-        FILE* f = open_crash_log();
-        if (f) {
-            fprintf(f, "\n\n!!! UNHANDLED EXCEPTION - PROCESS DYING !!!\n\n");
-            write_full_crash(f, ep);
-            fclose(f);
-        }
-        write_minidump(ep);
-    }
+static LONG WINAPI final_crash_handler(EXCEPTION_POINTERS*) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -433,43 +456,52 @@ static bool safe_overlay_init() {
 }
 
 static DWORD WINAPI worker_thread(LPVOID) {
+    Sleep(15000);
     g_workerThreadId = GetCurrentThreadId();
-    tlog("worker_thread ENTERED tid=%lu pid=%lu\n", g_workerThreadId, GetCurrentProcessId());
-    tlog("worker thread start addr check: NtCurrentTeb=%p\n", NtCurrentTeb());
 
-    if (GetFileAttributesA(CRASH_DIR "debug_wait.txt") != INVALID_FILE_ATTRIBUTES) {
-        tlog("debug_wait.txt found — spinning until debugger attaches...\n");
-        while (!IsDebuggerPresent()) Sleep(100);
-        tlog("debugger attached! breaking...\n");
-        __debugbreak();
+    cache_isbadreadptr_range();
+    static bool s_vehInstalled = false;
+    if (!s_vehInstalled) {
+        AddVectoredExceptionHandler(1, crash_handler);
+        s_vehInstalled = true;
     }
 
     SetUnhandledExceptionFilter(final_crash_handler);
     std::set_terminate(on_terminate);
     signal(SIGABRT, on_abort_signal);
-    tlog("exception handlers installed\n");
-    cache_isbadreadptr_range();
-    AddVectoredExceptionHandler(1, crash_handler);
-    tlog("VEH crash_handler installed (IsBadReadPtr filter: %016llX-%016llX)\n",
-         (unsigned long long)g_isbadreadptr_start, (unsigned long long)g_isbadreadptr_end);
-    {
-        FILE* f = fopen(CRASH_DIR "crash_info.txt", "w");
-        if (f) { fprintf(f, "=== Session started ===\n\n"); fflush(f); fclose(f); }
-    }
-    tlog("crash_info.txt session file written\n");
-    wlog("[worker] PID=%lu\n", GetCurrentProcessId());
-    tlog("initializing critical section\n");
     InitializeCriticalSection(&g_itemsLock);
     tlog("critical section initialized\n");
 
-    tlog("waiting for GameAssembly.dll...\n");
-    HMODULE ga = nullptr;
-    while (!ga && g_running.load()) {
-        ga = GetModuleHandleA("GameAssembly.dll");
-        if (!ga) Sleep(500);
+    HMODULE ga = pe_resolve::find_module("GameAssembly.dll");
+    if (!ga) {
+        tlog("GameAssembly.dll not yet loaded - registering DLL notification\n");
+        HMODULE ntdll = pe_resolve::find_module("ntdll.dll");
+        auto pReg = (pLdrRegisterDllNotification)pe_resolve::get_proc(ntdll, "LdrRegisterDllNotification");
+        auto pUnreg = (pLdrUnregisterDllNotification)pe_resolve::get_proc(ntdll, "LdrUnregisterDllNotification");
+        if (!pReg || !pUnreg) {
+            tlog("LdrRegisterDllNotification unavailable - falling back to slow poll\n");
+            while (!ga && g_running.load()) {
+                Sleep(5000);
+                ga = pe_resolve::find_module("GameAssembly.dll");
+            }
+        } else {
+            HANDLE evt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            PVOID cookie = nullptr;
+            NTSTATUS st = pReg(0, dll_load_cb, (PVOID)evt, &cookie);
+            tlog("LdrRegisterDllNotification NTSTATUS=0x%08lX cookie=%p\n", (long)st, cookie);
+            // Race-safe: check once more AFTER registering in case GameAssembly.dll
+            // loaded between our first check and the callback register.
+            ga = pe_resolve::find_module("GameAssembly.dll");
+            if (!ga) {
+                WaitForSingleObject(evt, INFINITE);
+                ga = pe_resolve::find_module("GameAssembly.dll");
+            }
+            if (cookie) pUnreg(cookie);
+            CloseHandle(evt);
+        }
     }
     if (!ga) return 0;
-    tlog("GameAssembly.dll found at %p\n", ga);
+    tlog("GameAssembly.dll found at %p (tier=%s)\n", ga, pe_resolve::last_tier());
 
     IL2CPP_API api;
     tlog("calling resolve_all...\n");
@@ -739,7 +771,8 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
 
             g_workerVehActive = true;
-            if (scanCounter % 5 == 0) {
+            int scan_mod = g_dupeMode.load() ? 1 : 5;
+            if (scanCounter % scan_mod == 0) {
                 safe_scan_tick(scanCounter);
             }
             if (g_dumpShopClasses.load()) { dump_shop_classes(api); g_dumpShopClasses.store(false); }
@@ -795,25 +828,8 @@ cleanup:
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        {
-            FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\injection_trace.txt", "w");
-            if (f) {
-                fprintf(f, "=== DLLMAIN ENTERED ===\n");
-                fprintf(f, "hModule=%p reason=%lu PID=%lu TID=%lu tick=%lu\n",
-                    hModule, reason, GetCurrentProcessId(), GetCurrentThreadId(), GetTickCount());
-                fflush(f); fclose(f);
-            }
-        }
-        {
-            FILE* fw = fopen(CRASH_DIR "worker_debug.txt", "w");
-            if (fw) fclose(fw);
-        }
         DisableThreadLibraryCalls(hModule);
-        tlog("DisableThreadLibraryCalls done\n");
-        DWORD tid = 0;
-        HANDLE h = CreateThread(nullptr, 0, worker_thread, nullptr, 0, &tid);
-        tlog("CreateThread returned handle=%p tid=%lu err=%lu\n", h, tid, GetLastError());
-        tlog("our DLL base=%p\n", hModule);
+        CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
     }
     return TRUE;
 }
