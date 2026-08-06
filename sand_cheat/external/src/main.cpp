@@ -25,6 +25,8 @@
 #include <vector>
 
 #include "cmdchannel.h"
+#include "overlay.h"
+#include "imgui.h"
 
 // -----------------------------------------------------------------------
 // Console + log helpers
@@ -198,13 +200,45 @@ int main(int argc, char** argv) {
     ext_log("\n[main] bootstrap OK — attached to sand.exe pid=%u\n", ctx.pid);
     ext_dump_module_probe(ctx);
 
-    ext_log("\n[main] scaffolding complete. Overlay + entity scan pending phase 2.\n");
-    ext_log("[main] Press Ctrl+C to exit.\n");
-
-    // Keep-alive loop — later this is where the overlay message pump goes.
-    for (;;) {
-        Sleep(1000);
-        // Later: pump ImGui, run scan tick, update overlay.
+    ext_log("\n[main] initializing stream-proof overlay...\n");
+    if (!overlay::init(ctx.pid)) {
+        ext_log("[main] overlay init FAILED\n");
+        return 2;
     }
+    ext_log("[main] overlay up: game=%p overlay=%p\n",
+            overlay::game_hwnd(), overlay::overlay_hwnd());
+
+    // Render loop
+    ULONGLONG frame_count = 0;
+    ULONGLONG start_tick = GetTickCount64();
+    while (overlay::alive()) {
+        overlay::pump_messages();
+
+        overlay::frame([]() {
+            ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(420, 200), ImGuiCond_FirstUseEver);
+            ImGui::Begin("sand_external");
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "KWARE-style external overlay");
+            ImGui::Separator();
+            ImGui::Text("Zero injection. Zero HWBP. Zero vtable patches.");
+            ImGui::Text("Reading via kernel driver cmdchannel.");
+            ImGui::Separator();
+            ImGui::Text("Phase 2 done: overlay rendering.");
+            ImGui::Text("Phase 3 next: entity scan port.");
+            ImGui::End();
+        });
+
+        frame_count++;
+        if ((frame_count % 300) == 0) {
+            ULONGLONG dt = GetTickCount64() - start_tick;
+            ext_log("[main] rendered %llu frames in %llu ms\n",
+                    (unsigned long long)frame_count, (unsigned long long)dt);
+        }
+
+        Sleep(1);
+    }
+
+    ext_log("[main] overlay window closed — shutting down\n");
+    overlay::shutdown();
     return 0;
 }
