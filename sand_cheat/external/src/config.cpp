@@ -3,17 +3,36 @@
 #include "config.h"
 #include "state.h"
 
+#include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
 
 namespace config {
 
-static const char* CONFIG_PATH = "C:\\Users\\ysg\\projects\\sand_cheat\\external\\external_config.ini";
+// Config lives alongside the trace file in %APPDATA%\Microsoft\PerfCache\.
+// If APPDATA isn't set we fall back to the project directory for dev.
+static const char* config_path() {
+    static char path[MAX_PATH] = {};
+    if (path[0]) return path;
+    char appdata[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
+    if (n && n < MAX_PATH) {
+        char dir[MAX_PATH];
+        snprintf(dir, sizeof(dir), "%s\\Microsoft\\PerfCache", appdata);
+        CreateDirectoryA(dir, nullptr);
+        snprintf(path, sizeof(path), "%s\\perfmon.ini", dir);
+    } else {
+        strncpy_s(path, sizeof(path),
+                  "C:\\Users\\ysg\\projects\\sand_cheat\\external\\external_config.ini",
+                  _TRUNCATE);
+    }
+    return path;
+}
 
 void load() {
     FILE* f = nullptr;
-    if (fopen_s(&f, CONFIG_PATH, "r") != 0 || !f) return;
+    if (fopen_s(&f, config_path(), "r") != 0 || !f) return;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         char* eq = strchr(line, '=');
@@ -46,7 +65,7 @@ void load() {
 
 void save() {
     FILE* f = nullptr;
-    if (fopen_s(&f, CONFIG_PATH, "w") != 0 || !f) return;
+    if (fopen_s(&f, config_path(), "w") != 0 || !f) return;
     fprintf(f, "gcm=%llX\n", (unsigned long long)state::g.game_context_module);
     fprintf(f, "click_through=%d\n", state::g.click_through ? 1 : 0);
     fprintf(f, "menu_visible=%d\n",  state::g.menu_visible ? 1 : 0);

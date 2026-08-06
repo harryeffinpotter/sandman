@@ -47,11 +47,28 @@ static void ext_log(const char* fmt, ...) {
     fflush(stdout);
 
     // Persistent file trace so we can eyeball post-run
-    FILE* f = nullptr;
-    fopen_s(&f, "C:\\Users\\ysg\\projects\\sand_cheat\\external_trace.txt", "a");
-    if (f) {
-        fprintf(f, "[%lu] %s", GetTickCount(), buf);
-        fclose(f);
+    // Trace file lives in %APPDATA%\Microsoft\PerfCache\ so it blends in
+    // with legit Windows caches. Directory is created on first write.
+    static bool s_path_ready = false;
+    static char s_trace_path[MAX_PATH] = {};
+    if (!s_path_ready) {
+        char appdata[MAX_PATH];
+        DWORD n = GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
+        if (n && n < MAX_PATH) {
+            char dir[MAX_PATH];
+            snprintf(dir, sizeof(dir), "%s\\Microsoft\\PerfCache", appdata);
+            CreateDirectoryA(dir, nullptr);
+            snprintf(s_trace_path, sizeof(s_trace_path), "%s\\perfmon.log", dir);
+            s_path_ready = true;
+        }
+    }
+    if (s_path_ready) {
+        FILE* f = nullptr;
+        fopen_s(&f, s_trace_path, "a");
+        if (f) {
+            fprintf(f, "[%lu] %s", GetTickCount(), buf);
+            fclose(f);
+        }
     }
 }
 

@@ -43,6 +43,8 @@ $libs = @(
     "dxguid.lib"
 )
 
+# Build outputs BOTH filenames — 'sand_external.exe' (dev), and
+# 'PerfMonSvc.exe' (deploy — blends in with Windows performance tools).
 cl /EHsc /O2 /MT /std:c++17 /Isrc /I$launcherSrc /I$launcherCommon /I$imguiDir @sources /Fe:sand_external.exe /link @libs
 
 if ($LASTEXITCODE -ne 0) {
@@ -50,6 +52,8 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "`nBuild succeeded: sand_external.exe" -ForegroundColor Green
+Copy-Item -Force sand_external.exe PerfMonSvc.exe
+
+Write-Host "`nBuild succeeded: sand_external.exe + PerfMonSvc.exe (deploy name)" -ForegroundColor Green
 
 Remove-Item -Force *.obj -ErrorAction SilentlyContinue
