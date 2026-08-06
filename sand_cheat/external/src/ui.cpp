@@ -4,6 +4,7 @@
 #include "state.h"
 #include "overlay.h"
 #include "cmdchannel.h"
+#include "scan.h"
 
 #include "imgui.h"
 #include <windows.h>
@@ -128,13 +129,32 @@ void draw_memory_viewer() {
 void draw_entity_list() {
     auto& g = state::g;
     ImGui::SetNextWindowPos(ImVec2(20, 300), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(460, 300), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(460, 340), ImGuiCond_FirstUseEver);
     ImGui::Begin("entities");
-    if (g.entity_count == 0) {
-        ImGui::TextDisabled("no entities loaded — scan.cpp not wired yet");
-    } else {
-        ImGui::Text("live entities: %llu", (unsigned long long)g.entity_count);
+
+    ImGui::InputText("GameContextModule (hex)", g.gcm_input, sizeof(g.gcm_input));
+    if (ImGui::Button("Apply GCM")) {
+        g.game_context_module = parse_hex_addr(g.gcm_input);
+        g.scan_enabled = (g.game_context_module != 0);
     }
+    ImGui::SameLine();
+    ImGui::Checkbox("scan enabled", &g.scan_enabled);
+    ImGui::Separator();
+    ImGui::Text("last scan:      %llu ms", (unsigned long long)g.last_scan_ms);
+    ImGui::Text("entity count:   %llu",   (unsigned long long)g.entity_count);
+    ImGui::Separator();
+
+    // Snapshot
+    static std::vector<scan::Entity> snap;
+    scan::copy_snapshot(snap);
+    ImGui::BeginChild("entlist", ImVec2(0, 200), true);
+    for (size_t i = 0; i < snap.size() && i < 200; i++) {
+        const auto& e = snap[i];
+        ImGui::Text("[%3zu] id=%d en=%d ptr=%llX", i, e.id, e.enabled ? 1 : 0,
+                    (unsigned long long)e.ptr);
+    }
+    if (snap.size() > 200) ImGui::TextDisabled("... %zu more ...", snap.size() - 200);
+    ImGui::EndChild();
     ImGui::End();
 }
 

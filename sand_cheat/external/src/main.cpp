@@ -28,6 +28,7 @@
 #include "overlay.h"
 #include "state.h"
 #include "ui.h"
+#include "scan.h"
 #include "imgui.h"
 
 // -----------------------------------------------------------------------
@@ -208,17 +209,29 @@ int main(int argc, char** argv) {
 
     // Render loop
     ULONGLONG start_tick = GetTickCount64();
+    ULONGLONG last_scan_tick = 0;
     while (overlay::alive()) {
         ui::poll_hotkeys();
         overlay::pump_messages();
+
+        // Scan tick — throttle to every ~200ms so we don't hammer the kernel
+        // driver. UI stays smooth because rendering is decoupled.
+        ULONGLONG now = GetTickCount64();
+        if (state::g.scan_enabled && (now - last_scan_tick) >= 200) {
+            last_scan_tick = now;
+            scan::tick();
+        }
+
         overlay::frame(ui::draw_all);
         state::g.frame_count++;
         if ((state::g.frame_count % 600) == 0) {
-            ULONGLONG dt = GetTickCount64() - start_tick;
-            ext_log("[main] %llu frames / %llu ms  (avg %.1f fps)\n",
+            ULONGLONG dt = now - start_tick;
+            ext_log("[main] %llu frames / %llu ms  (avg %.1f fps)  entities=%llu  scanMs=%llu\n",
                     (unsigned long long)state::g.frame_count,
                     (unsigned long long)dt,
-                    (double)state::g.frame_count * 1000.0 / (double)(dt ? dt : 1));
+                    (double)state::g.frame_count * 1000.0 / (double)(dt ? dt : 1),
+                    (unsigned long long)state::g.entity_count,
+                    (unsigned long long)state::g.last_scan_ms);
         }
         Sleep(1);
     }

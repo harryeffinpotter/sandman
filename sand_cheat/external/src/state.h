@@ -29,6 +29,11 @@ struct GameCtx {
     bool     menu_visible        = true;
     char     mem_viewer_addr[32] = "0";
     int      mem_viewer_bytes    = 128;
+
+    // GCM entry — LO pastes address from crash_info.txt.
+    // Auto-discovery lives in Phase 6.
+    char     gcm_input[32]       = "0";
+    bool     scan_enabled        = false;
 };
 
 extern GameCtx g;

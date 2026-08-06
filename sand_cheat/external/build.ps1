@@ -17,6 +17,7 @@ $sources = @(
     "src\overlay.cpp"
     "src\state.cpp"
     "src\ui.cpp"
+    "src\scan.cpp"
     "$launcherSrc\cmdchannel.cpp"
     "$imguiDir\imgui.cpp"
     "$imguiDir\imgui_draw.cpp"
