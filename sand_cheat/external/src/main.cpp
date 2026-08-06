@@ -29,6 +29,7 @@
 #include "state.h"
 #include "ui.h"
 #include "scan.h"
+#include "config.h"
 #include "imgui.h"
 
 // -----------------------------------------------------------------------
@@ -182,6 +183,8 @@ int main(int argc, char** argv) {
     ext_log("  Zero injection, kernel-driver R/W only\n");
     ext_log("========================================\n\n");
 
+    config::load();
+
     if (!ext_bootstrap(state::g)) {
         ext_log("[main] bootstrap FAILED — exiting.\n");
         ext_log("[main] Prerequisites:\n");
@@ -237,6 +240,7 @@ int main(int argc, char** argv) {
     }
 
     ext_log("[main] overlay window closed — shutting down\n");
+    config::save();
     overlay::shutdown();
     return 0;
 }
