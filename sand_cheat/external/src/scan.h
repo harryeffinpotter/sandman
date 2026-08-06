@@ -22,6 +22,9 @@ struct Entity {
     bool     has_pos = false;
     // Computed each tick when player is known
     float    distance = -1.0f;
+    // Health data — populated if HealthData component present
+    float    hp     = -1;
+    float    hp_max = -1;
     // Classification (set by scan post-processing)
     bool     is_player = false;
     bool     is_mob    = false;
@@ -69,6 +72,7 @@ struct ComponentIndices {
     int weapon_overheat  = -1;
     int cheat_walker_fly = -1;
     int cheat_walker_spd = -1;
+    int health_data      = -1;
 };
 extern ComponentIndices g_indices;
 

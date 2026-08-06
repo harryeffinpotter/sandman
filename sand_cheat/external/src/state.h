@@ -34,6 +34,11 @@ struct GameCtx {
     // Auto-discovery lives in Phase 6.
     char     gcm_input[32]       = "0";
     bool     scan_enabled        = false;
+
+    // Manually designated "self" entity id. When 0, scan uses heuristic
+    // (first PlayerAvatar with position). When set, scan uses this
+    // entity as the reference point for distance sorting + radar centering.
+    int32_t  self_entity_id      = 0;
 };
 
 extern GameCtx g;

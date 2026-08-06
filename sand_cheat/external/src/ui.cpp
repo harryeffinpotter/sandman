@@ -278,20 +278,40 @@ void draw_entity_list() {
             if (e.name.find(filter) == std::string::npos) continue;
         }
         if (shown >= 200) break;
-        // Colour by category
         ImVec4 c(0.75f, 0.75f, 0.75f, 1.0f);
         if (e.is_self)        c = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
         else if (e.is_player) c = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
         else if (e.is_walker) c = ImVec4(1.0f, 0.9f, 0.4f, 1.0f);
         else if (e.is_mob)    c = ImVec4(1.0f, 0.6f, 0.3f, 1.0f);
-        ImGui::PushStyleColor(ImGuiCol_Text, c);
-        if (e.has_pos) {
-            ImGui::Text("[%5d] %-30s dist=%6.1f pos=(%.0f,%.0f,%.0f)",
-                        e.id, e.name.empty() ? "(no name)" : e.name.c_str(),
-                        e.distance, e.x, e.y, e.z);
+
+        // Selectable row — click to designate as self, right-click to lock as interact target
+        char label[256];
+        if (e.has_pos && e.hp_max > 0) {
+            snprintf(label, sizeof(label), "[%5d] %-28s d=%6.1fm hp=%.0f/%.0f",
+                     e.id, e.name.empty() ? "(no name)" : e.name.c_str(),
+                     e.distance, e.hp, e.hp_max);
+        } else if (e.has_pos) {
+            snprintf(label, sizeof(label), "[%5d] %-28s d=%6.1fm pos=(%.0f,%.0f)",
+                     e.id, e.name.empty() ? "(no name)" : e.name.c_str(),
+                     e.distance, e.x, e.z);
         } else {
-            ImGui::Text("[%5d] %-30s (no pos)",
-                        e.id, e.name.empty() ? "(no name)" : e.name.c_str());
+            snprintf(label, sizeof(label), "[%5d] %-28s (no pos)",
+                     e.id, e.name.empty() ? "(no name)" : e.name.c_str());
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, c);
+        bool selected = (e.id == state::g.self_entity_id);
+        if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_AllowDoubleClick)) {
+            if (ImGui::IsMouseDoubleClicked(0)) {
+                state::g.self_entity_id = e.id;
+            }
+        }
+        if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Set as SELF")) state::g.self_entity_id = e.id;
+            if (ImGui::MenuItem("Lock as interact target")) {
+                writeops::g_cfg.locked_target_id = e.id;
+                writeops::g_cfg.force_interact_lock = true;
+            }
+            ImGui::EndPopup();
         }
         ImGui::PopStyleColor();
         shown++;

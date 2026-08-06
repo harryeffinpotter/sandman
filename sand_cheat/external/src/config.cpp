@@ -37,6 +37,8 @@ void load() {
             state::g.click_through = (atoi(val) != 0);
         } else if (strcmp(key, "menu_visible") == 0) {
             state::g.menu_visible = (atoi(val) != 0);
+        } else if (strcmp(key, "self_entity_id") == 0) {
+            state::g.self_entity_id = atoi(val);
         }
     }
     fclose(f);
@@ -48,6 +50,7 @@ void save() {
     fprintf(f, "gcm=%llX\n", (unsigned long long)state::g.game_context_module);
     fprintf(f, "click_through=%d\n", state::g.click_through ? 1 : 0);
     fprintf(f, "menu_visible=%d\n",  state::g.menu_visible ? 1 : 0);
+    fprintf(f, "self_entity_id=%d\n", state::g.self_entity_id);
     fclose(f);
 }
 

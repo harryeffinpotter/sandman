@@ -134,6 +134,7 @@ bool discover_indices_internal(uint64_t gcm) {
         { "WeaponOverheat",    &ComponentIndices::weapon_overheat },
         { "CheatWalkerFly",    &ComponentIndices::cheat_walker_fly },
         { "CheatWalkerSpeedMultiplier", &ComponentIndices::cheat_walker_spd },
+        { "HealthData",        &ComponentIndices::health_data },
     };
 
     for (int i = 0; i < size; i++) {
@@ -272,6 +273,18 @@ bool tick() {
             }
         }
 
+        // Health data (HealthData +0x10 = current, +0x14 = max — game-common layout)
+        if (g_indices.health_data >= 0) {
+            uint64_t hd = get_component(p, g_indices.health_data);
+            if (hd) {
+                float cur = 0, mx = 0;
+                if (ext_read_val(hd + 0x10, cur) && ext_read_val(hd + 0x14, mx)) {
+                    e.hp = cur;
+                    e.hp_max = mx;
+                }
+            }
+        }
+
         // Classify entity
         if (!e.name.empty()) {
             if (e.name.rfind("PlayerAvatar", 0) == 0)         e.is_player = true;
@@ -284,23 +297,36 @@ bool tick() {
         temp.push_back(std::move(e));
     }
 
-    // Player detection — find the entity that has both UserNameComponent
-    // AND a position, and match to the CURRENT process's user (heuristic:
-    // in single-player or as the local user, that's usually the closest
-    // player-typed entity to the camera. For now pick the first PlayerAvatar
-    // with a position and call it self — real "which user is me" needs
-    // AccountId comparison against something we can only get post-login.)
+    // Player detection —
+    //   1. if operator manually set state::g.self_entity_id, use that
+    //   2. else pick first PlayerAvatar with a position (heuristic)
     PlayerInfo pi{};
-    for (auto& e : temp) {
-        if (e.is_player && e.has_pos) {
-            pi.found = true;
-            pi.entity_ptr = e.ptr;
-            pi.id = e.id;
-            pi.ax = e.cx * CHUNK_SIZE + e.x;
-            pi.ay = e.y;
-            pi.az = e.cy * CHUNK_SIZE + e.z;
-            e.is_self = true;
-            break;
+    if (state::g.self_entity_id > 0) {
+        for (auto& e : temp) {
+            if (e.id == state::g.self_entity_id && e.has_pos) {
+                pi.found = true;
+                pi.entity_ptr = e.ptr;
+                pi.id = e.id;
+                pi.ax = e.cx * CHUNK_SIZE + e.x;
+                pi.ay = e.y;
+                pi.az = e.cy * CHUNK_SIZE + e.z;
+                e.is_self = true;
+                break;
+            }
+        }
+    }
+    if (!pi.found) {
+        for (auto& e : temp) {
+            if (e.is_player && e.has_pos) {
+                pi.found = true;
+                pi.entity_ptr = e.ptr;
+                pi.id = e.id;
+                pi.ax = e.cx * CHUNK_SIZE + e.x;
+                pi.ay = e.y;
+                pi.az = e.cy * CHUNK_SIZE + e.z;
+                e.is_self = true;
+                break;
+            }
         }
     }
     g_player = pi;
