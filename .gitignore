@@ -41,6 +41,7 @@ Vulnerable Drivers/
 sand_cheat/injection_trace.txt
 sand_cheat/worker_debug.txt
 sand_cheat/crash_info.txt
+sand_cheat/dll_ringlog.txt
 sand_cheat/sand_crash.dmp
 sand_cheat/scan_diag.txt
 sand_cheat/overlay_debug.txt
@@ -57,6 +58,8 @@ sand_cheat/imgui_layout.ini
 # Encrypted driver payloads
 sand_cheat/launcher/kerneldriver_enc.bin
 sand_cheat/launcher/winio64_enc.bin
+sand_cheat/iqvw64_enc.bin
+sand_cheat.zip
 
 # OS / editor junk
 Thumbs.db

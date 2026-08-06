@@ -200,6 +200,10 @@ static ID3D11DeviceContext* g_overlayContext = nullptr;
 static IDXGISwapChain1* g_overlaySwapChain = nullptr;
 static ID3D11RenderTargetView* g_overlayRTV = nullptr;
 static bool g_overlayImguiInit = false;
+// Set from UI, consumed at top of hooked_present before NewFrame. Toggling
+// mid-frame tore down ImGui_ImplDX11 while the current draw was in flight and
+// AV'd inside d3d11.dll on RenderDrawData.
+static std::atomic<int> g_streamProofSwapRequest{0}; // 0=none, 1=enable, 2=disable
 static IDCompositionDevice* g_dcompDevice = nullptr;
 static IDCompositionTarget* g_dcompTarget = nullptr;
 static IDCompositionVisual* g_dcompVisual = nullptr;
@@ -842,7 +846,13 @@ static void create_stream_proof_overlay() {
     MARGINS margins = {-1, -1, -1, -1};
     DwmExtendFrameIntoClientArea(g_overlayHwnd, &margins);
 
-    SetWindowDisplayAffinity(g_overlayHwnd, 0x00000011);
+    // WDA_MONITOR (0x1): user sees the window normally; screen-capture APIs
+    // (OBS Game/Display Capture, PrintScreen, DXGI Desktop Duplication) get
+    // black where the window is. WDA_EXCLUDEFROMCAPTURE (0x11) can also hide
+    // from the user under some Win11 compositor states.
+    SetWindowDisplayAffinity(g_overlayHwnd, 0x00000001);
+    SetWindowPos(g_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
@@ -1091,17 +1101,35 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
     static int s_frameCount = 0;
     if (s_frameCount < 5) { dbglog("[frame %d] start\n", s_frameCount); }
 
+    {
+        int req = g_streamProofSwapRequest.exchange(0);
+        if (req == 1 && !g_overlayImguiInit) {
+            create_stream_proof_overlay();
+            if (g_overlayHwnd && g_overlayDevice && g_overlayContext) {
+                ImGui_ImplDX11_Shutdown();
+                ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
+                g_overlayImguiInit = true;
+                g_streamProof.store(true);
+                dbglog("[stream-proof] enabled (deferred)\n");
+            } else {
+                dbglog("[stream-proof] enable failed, staying on game device\n");
+                g_streamProof.store(false);
+            }
+        } else if (req == 2 && g_overlayImguiInit) {
+            ImGui_ImplDX11_Shutdown();
+            ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+            g_overlayImguiInit = false;
+            destroy_stream_proof_overlay();
+            g_streamProof.store(false);
+            dbglog("[stream-proof] disabled (deferred)\n");
+        }
+    }
+
     ImGui_ImplDX11_NewFrame();
     if (s_frameCount < 5) { dbglog("[frame %d] dx11 newframe ok\n", s_frameCount); }
     ImGui_ImplWin32_NewFrame();
     if (s_frameCount < 5) { dbglog("[frame %d] win32 newframe ok\n", s_frameCount); }
     ImGui::NewFrame();
-    {
-        POINT pt;
-        GetCursorPos(&pt);
-        ScreenToClient(g_gameHwnd, &pt);
-        ImGui::GetIO().MousePos = ImVec2((float)pt.x, (float)pt.y);
-    }
     if (s_frameCount < 5) { dbglog("[frame %d] imgui newframe ok\n", s_frameCount); }
 
     if (g_menuVisible) {
@@ -1580,19 +1608,9 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bool sp = g_streamProof.load();
                     if (ImGui::Checkbox("Stream Proof", &sp)) {
                         if (sp && !g_overlayImguiInit) {
-                            create_stream_proof_overlay();
-                            if (g_overlayHwnd && g_overlayDevice && g_overlayContext) {
-                                ImGui_ImplDX11_Shutdown();
-                                ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
-                                g_overlayImguiInit = true;
-                                g_streamProof.store(true);
-                            }
+                            g_streamProofSwapRequest.store(1);
                         } else if (!sp && g_overlayImguiInit) {
-                            ImGui_ImplDX11_Shutdown();
-                            ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-                            g_overlayImguiInit = false;
-                            destroy_stream_proof_overlay();
-                            g_streamProof.store(false);
+                            g_streamProofSwapRequest.store(2);
                         } else {
                             g_streamProof.store(sp);
                         }

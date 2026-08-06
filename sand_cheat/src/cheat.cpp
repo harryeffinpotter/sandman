@@ -625,6 +625,7 @@ bool discover_component_indices(void* gameContextModule) {
     ringlog::push("[player-diag] discovered g_idx_user_name=%d g_idx_account_id=%d out of %d components",
                   g_idx_user_name, g_idx_account_id, count);
 
+    ringlog::push("[component-dump] ALL %d component names follow", count);
     for (int i = 0; i < count; i++) {
         void* str = elements[i];
         if (!is_readable(str, 0x14)) continue;
@@ -634,13 +635,9 @@ bool discover_component_indices(void* gameContextModule) {
         char narrow[256];
         for (int c = 0; c < len && c < 255; c++) narrow[c] = (char)wchars[c];
         narrow[(len < 255) ? len : 255] = 0;
-        char low[256];
-        for (int c = 0; narrow[c]; ++c) low[c] = (char)tolower((unsigned char)narrow[c]);
-        low[255] = 0;
-        if (strstr(low, "name") || strstr(low, "user") || strstr(low, "account") || strstr(low, "profile") || strstr(low, "nick")) {
-            ringlog::push("[player-diag] component[%d] = '%s'", i, narrow);
-        }
+        ringlog::push("[component-dump] [%d] %s", i, narrow);
     }
+    ringlog::push("[component-dump] END");
 
     return true;
 }
@@ -1110,59 +1107,91 @@ static void process_one_entity(
 
     if (name.rfind("PlayerAvatar", 0) == 0) {
         info.displayName = "";
-        static bool s_playerDiagDone = false;
-        bool dumpThis = !s_playerDiagDone;
-        if (dumpThis) s_playerDiagDone = true;
 
-        if (dumpThis) {
-            ringlog::push("[player-diag] avatar eid=%d ptr=%p g_idx_user_name=%d g_idx_account_id=%d",
-                          eid, entity, g_idx_user_name, g_idx_account_id);
+        // Runtime auto-discovery + cache. Once we find a (componentIndex,
+        // byteOffset) whose pointer field yields a username-shaped string,
+        // every subsequent PlayerAvatar hits the cached pair directly.
+        // Zero hardcoded class names, zero hardcoded offsets — the game can
+        // rename and re-order components across updates without breaking us.
+        static int s_nameCompIdx = -1;
+        static int s_nameByteOff = -1;
+        static bool s_discoveryLogged = false;
+
+        auto looks_like_username = [](const std::string& s) -> bool {
+            int len = (int)s.size();
+            if (len < 3 || len > 32) return false;
+            int letters = 0, alnum = 0, other = 0;
+            for (unsigned char c : s) {
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) { letters++; alnum++; }
+                else if (c >= '0' && c <= '9') alnum++;
+                else if (c == '_' || c == '-' || c == '.' || c == ' ') other++;
+                else return false;
+            }
+            if (letters < 1) return false;
+            if (alnum + other != len) return false;
+            static const char* junk[] = {
+                "PlayerAvatar", "UserName", "AccountId", "Blueprint",
+                "Position", "Component", "Empty", "empty", "None", "null",
+                "true", "false"
+            };
+            for (auto* j : junk) if (s == j) return false;
+            return true;
+        };
+
+        auto try_read_username = [&](void* comp, int off) -> std::string {
+            if (!is_readable(comp, off + 8)) return {};
+            void* p = *(void**)((uintptr_t)comp + off);
+            if (!p || !is_readable(p, 0x14)) return {};
+            int len = *(int*)((uintptr_t)p + 0x10);
+            if (len < 3 || len > 64) return {};
+            return read_il2cpp_string(p);
+        };
+
+        if (s_nameCompIdx >= 0 && s_nameByteOff >= 0) {
+            void* comp = get_component(entity, s_nameCompIdx);
+            if (comp) {
+                std::string pn = try_read_username(comp, s_nameByteOff);
+                if (looks_like_username(pn)) info.displayName = pn;
+            }
         }
 
-        if (g_idx_user_name >= 0) {
-            void* unc = get_component(entity, g_idx_user_name);
-            if (dumpThis) ringlog::push("[player-diag] UserNameComponent ptr=%p readable=%d",
-                                        unc, is_readable(unc, 0x40) ? 1 : 0);
-            if (is_readable(unc, 0x40)) {
-                if (dumpThis) {
-                    unsigned char* raw = (unsigned char*)unc;
-                    char hex[3*0x40 + 8]; int off = 0;
-                    for (int i = 0; i < 0x40; ++i) {
-                        off += snprintf(hex + off, sizeof(hex) - off, "%02X ", raw[i]);
-                    }
-                    ringlog::push("[player-diag] UNC[0x00..0x40]: %s", hex);
-                    for (int probe = 0x08; probe <= 0x38; probe += 0x08) {
-                        void* pp = *(void**)((uintptr_t)unc + probe);
-                        if (is_readable(pp, 0x18)) {
-                            int len = *(int*)((uintptr_t)pp + 0x10);
-                            std::string s = (len > 0 && len < 128) ? read_il2cpp_string(pp) : std::string();
-                            ringlog::push("[player-diag]   +0x%02X -> %p (len=%d '%s')",
-                                          probe, pp, len, s.c_str());
-                        } else {
-                            ringlog::push("[player-diag]   +0x%02X -> %p (not readable as string)",
-                                          probe, pp);
-                        }
-                    }
-                }
-                void* namePtr = *(void**)((uintptr_t)unc + 0x10);
-                std::string pn = read_il2cpp_string(namePtr);
-                if (!pn.empty()) info.displayName = pn;
+        if (info.displayName.empty()) {
+            void* gcm = (void*)g_gameContextModule;
+            int totalComponents = 0;
+            if (gcm && is_readable((void*)((uintptr_t)gcm + 0x20), 8)) {
+                void* cn = *(void**)((uintptr_t)gcm + 0x20);
+                if (is_readable(cn, 0x20)) totalComponents = *(int*)((uintptr_t)cn + 0x18);
             }
-        } else if (dumpThis) {
-            ringlog::push("[player-diag] g_idx_user_name is -1 - discover_component_indices didn't find 'UserNameComponent'");
-            ringlog::push("[player-diag] check discover_component_indices log for exact class-name strings in the names array");
-        }
+            if (totalComponents <= 0 || totalComponents > 4096) totalComponents = 512;
 
-        if (dumpThis && info.displayName.empty() && g_idx_account_id >= 0) {
-            void* acc = get_component(entity, g_idx_account_id);
-            if (is_readable(acc, 0x20)) {
-                unsigned char* raw = (unsigned char*)acc;
-                char hex[3*0x20 + 8]; int off = 0;
-                for (int i = 0; i < 0x20; ++i) {
-                    off += snprintf(hex + off, sizeof(hex) - off, "%02X ", raw[i]);
-                }
-                ringlog::push("[player-diag] AccountId component[0x00..0x20]: %s", hex);
+            if (!s_discoveryLogged) {
+                ringlog::push("[player-discover] eid=%d entity=%p scanning %d component slots",
+                              eid, entity, totalComponents);
             }
+
+            for (int i = 0; i < totalComponents; ++i) {
+                void* comp = get_component(entity, i);
+                if (!comp || !is_readable(comp, 0x40)) continue;
+
+                for (int off = 0x08; off <= 0x38; off += 0x08) {
+                    std::string s = try_read_username(comp, off);
+                    if (!looks_like_username(s)) continue;
+                    s_nameCompIdx = i;
+                    s_nameByteOff = off;
+                    info.displayName = s;
+                    if (!s_discoveryLogged) {
+                        ringlog::push("[player-discover] HIT componentIdx=%d byteOff=0x%02X name='%s'",
+                                      i, off, s.c_str());
+                    }
+                    break;
+                }
+                if (!info.displayName.empty()) break;
+            }
+
+            if (!s_discoveryLogged && info.displayName.empty()) {
+                ringlog::push("[player-discover] no username-shaped string found on entity=%p", entity);
+            }
+            s_discoveryLogged = true;
         }
     } else if (name.rfind("EXPEDITION_WALKER", 0) == 0 || name.rfind("walker_", 0) == 0) {
         void* ownerAvatar = nullptr;

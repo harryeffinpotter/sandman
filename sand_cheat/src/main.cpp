@@ -17,6 +17,7 @@
 #endif
 
 #define CRASH_DIR "C:\\Users\\ysg\\projects\\sand_cheat\\"
+#define CRASH_DIR_W L"C:\\Users\\ysg\\projects\\sand_cheat\\"
 
 namespace {
 #ifndef _NTDEF_
@@ -79,7 +80,11 @@ static void tlog(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
     ringlog::push("[t] %s", tmp);
 }
-static FILE* open_crash_log(const char* /*mode*/ = "a") { return nullptr; }
+static FILE* open_crash_log(const char* mode = "a") {
+    FILE* f = nullptr;
+    if (fopen_s(&f, CRASH_DIR "crash_info.txt", mode) != 0) return nullptr;
+    return f;
+}
 
 volatile DWORD g_workerThreadId = 0;
 volatile DWORD g_renderThreadId = 0;
@@ -456,16 +461,28 @@ static bool safe_overlay_init() {
 }
 
 static DWORD WINAPI worker_thread(LPVOID) {
-    Sleep(15000);
-    g_workerThreadId = GetCurrentThreadId();
+    ringlog::push("[worker] START tid=%lu tick=%lu", GetCurrentThreadId(), GetTickCount());
+    ringlog::force_flush();
 
+    g_workerThreadId = GetCurrentThreadId();
+    ringlog::push("[worker] pre cache_isbadreadptr_range");
+    ringlog::force_flush();
     cache_isbadreadptr_range();
+    ringlog::push("[worker] post cache_isbadreadptr_range");
+    ringlog::force_flush();
+
     static bool s_vehInstalled = false;
     if (!s_vehInstalled) {
+        ringlog::push("[worker] pre AddVectoredExceptionHandler");
+        ringlog::force_flush();
         AddVectoredExceptionHandler(1, crash_handler);
         s_vehInstalled = true;
+        ringlog::push("[worker] post AddVectoredExceptionHandler");
+        ringlog::force_flush();
     }
 
+    ringlog::push("[worker] pre SetUnhandledExceptionFilter");
+    ringlog::force_flush();
     SetUnhandledExceptionFilter(final_crash_handler);
     std::set_terminate(on_terminate);
     signal(SIGABRT, on_abort_signal);
@@ -828,8 +845,18 @@ cleanup:
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hModule);
-        CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
+        // RTSS parking-zone injection can invoke DllMain multiple times because
+        // RTSS calls the hijacked slot every frame until the launcher restores
+        // it. Idempotent guard: only spawn one worker across all invocations.
+        static LONG s_workerSpawned = 0;
+        if (InterlockedCompareExchange(&s_workerSpawned, 1, 0) == 0) {
+            ringlog::clear();
+            ringlog::set_disk_mirror(CRASH_DIR_W L"dll_ringlog.txt");
+            ringlog::push("[dllmain] PROCESS_ATTACH hModule=%p pid=%lu tid=%lu tick=%lu",
+                hModule, GetCurrentProcessId(), GetCurrentThreadId(), GetTickCount());
+            DisableThreadLibraryCalls(hModule);
+            CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
+        }
     }
     return TRUE;
 }

@@ -326,18 +326,19 @@ bool invoke_dllmain(uint32_t game_pid,
     std::printf("[+] invoke_stage2: invoker parking staged (shellcode@+0x%X, marker@+0x%X)\n",
                 INVOKER_SHELLCODE_OFF, INVOKER_MARKER_OFF);
 
-    // (5) Flip invoker parking to PAGE_EXECUTE_READWRITE.
-    constexpr uint32_t PAGE_EXECUTE_READWRITE_VAL = 0x40;
-    uint32_t inv_old_protect = 0;
-    if (!cmdchannel::protect_memory(game_pid, inv_va, INVOKER_TOTAL,
-                                    PAGE_EXECUTE_READWRITE_VAL,
-                                    &inv_old_protect)) {
-        std::printf("[!] invoke_stage2: invoker PROTECT -> RWX failed\n");
+    // Make invoker page executable via PTE NX clear. VAD stays PAGE_READWRITE,
+    // no ZwProtectVirtualMemory syscall for MEM_PRIVATE+EXECUTE (BEDaisy hook).
+    const uint32_t inv_prot_size = (INVOKER_TOTAL + 0xFFFu) & ~0xFFFu;
+    if (!cmdchannel::set_pte_nx(game_pid, inv_va, inv_prot_size,
+                                cmdchannel::PTE_FLAG_CLEAR_NX)) {
+        llog("FAIL: invoker PTE NX clear\n");
+        std::printf("[!] invoke_stage2: invoker PTE NX clear failed\n");
         return false;
     }
-    llog("invoker PROTECT RW->RWX old=0x%X\n", inv_old_protect);
-    std::printf("[+] invoke_stage2: invoker PROTECT RW -> RWX (old=0x%X)\n",
-                inv_old_protect);
+    const uint32_t inv_old_protect = 0x04;
+    llog("invoker PTE NX cleared va=%016llX size=0x%X\n",
+        (unsigned long long)inv_va, inv_prot_size);
+    std::printf("[+] invoke_stage2: invoker PTE NX cleared (VAD stays RW)\n");
 
     // (6) Plant target = stub_va. Next Present tick, RTSS calls our shellcode
     // directly via the function-pointer dispatch:
@@ -427,15 +428,30 @@ bool invoke_dllmain(uint32_t game_pid,
     // stub. LarpDLL's RealThreadProc replants on its own (mode-aware) once
     // DllMain returns — race-safe since the saved_body we read matches what
     // LarpDLL's plant logic expects for its mode.
-    cmdchannel::write_memory(game_pid, plant_slot_va,
+    llog("STEP 8: restoring plant slot va=%016llX -> saved_body=%016llX\n",
+         (unsigned long long)plant_slot_va, (unsigned long long)saved_body);
+    bool restore_ok = cmdchannel::write_memory(game_pid, plant_slot_va,
                              reinterpret_cast<uint64_t>(&saved_body), 8);
+    llog("STEP 8: plant slot write %s\n", restore_ok ? "OK" : "FAIL");
+
+    uint64_t slot_readback = 0;
+    if (cmdchannel::read_memory(game_pid, plant_slot_va,
+                                reinterpret_cast<uint64_t>(&slot_readback), 8)) {
+        llog("STEP 8: plant slot readback=%016llX (expected=%016llX) match=%d\n",
+             (unsigned long long)slot_readback, (unsigned long long)saved_body,
+             (slot_readback == saved_body) ? 1 : 0);
+    } else {
+        llog("STEP 8: plant slot readback FAILED\n");
+    }
 
     // Restore plant slot's original page protection (RX in DETOURS mode, no-op
     // in STANDARD mode where it was already RW).
     {
         uint32_t discard = 0;
-        cmdchannel::protect_memory(game_pid, plant_slot_va, 8,
+        bool prot_ok = cmdchannel::protect_memory(game_pid, plant_slot_va, 8,
                                    plant_old_protect, &discard);
+        llog("STEP 8b: plant slot protect restore prot=0x%X %s\n",
+             plant_old_protect, prot_ok ? "OK" : "FAIL");
     }
     std::printf("[+] invoke_stage2: %s plant slot restored (val=saved_body, prot=0x%X)\n",
                 mode_tag, plant_old_protect);
@@ -446,19 +462,45 @@ bool invoke_dllmain(uint32_t game_pid,
     // or flip the invoker page from RWX → RW while that call is running,
     // its return from DllMain AVs at stub+0x4F (post `call rax`) → Theia
     // killswitch kills the game. Sleep 500 ms bounds the worst case.
+    llog("STEP 8c: draining in-flight shellcode Sleep(500)\n");
     std::printf("[*] invoke_stage2: draining in-flight shellcode (500 ms)...\n");
     Sleep(500);
+    llog("STEP 8c: drain complete\n");
 
     // (9) Scrub invoker parking only. Stage 2 region stays resident —
     // DllMain is done but hook_e900_asm + shadow_onpaint_asm live in
     // Stage 2 .text and must remain executable.
+    llog("STEP 9: zeroing invoker parking va=%016llX size=0x%X\n",
+         (unsigned long long)inv_va, (unsigned)INVOKER_TOTAL);
     uint8_t zero_buf[INVOKER_TOTAL] = {};
-    cmdchannel::write_memory(game_pid, inv_va,
+    bool zero_ok = cmdchannel::write_memory(game_pid, inv_va,
                              reinterpret_cast<uint64_t>(zero_buf),
                              INVOKER_TOTAL);
+    llog("STEP 9: invoker zero write %s\n", zero_ok ? "OK" : "FAIL");
     uint32_t discard = 0;
-    cmdchannel::protect_memory(game_pid, inv_va, INVOKER_TOTAL,
+    bool inv_prot_ok = cmdchannel::protect_memory(game_pid, inv_va, INVOKER_TOTAL,
                                inv_old_protect, &discard);
+    llog("STEP 9: invoker protect restore prot=0x%X %s\n",
+         inv_old_protect, inv_prot_ok ? "OK" : "FAIL");
+
+    uint64_t s2_first_qw = 0xAAAAAAAAAAAAAAAAull;
+    uint64_t s2_last_qw  = 0xBBBBBBBBBBBBBBBBull;
+    bool s2_rd1 = cmdchannel::read_memory(game_pid, stage2_base,
+                                  reinterpret_cast<uint64_t>(&s2_first_qw), 8);
+    bool s2_rd2 = cmdchannel::read_memory(game_pid, stage2_base + stage2_size - 8,
+                                  reinterpret_cast<uint64_t>(&s2_last_qw), 8);
+    llog("STEP 10: stage2 read1=%d(%016llX) read2=%d(%016llX) @%016llX+0x%X\n",
+         s2_rd1 ? 1 : 0, (unsigned long long)s2_first_qw,
+         s2_rd2 ? 1 : 0, (unsigned long long)s2_last_qw,
+         (unsigned long long)stage2_base, stage2_size);
+
+    uint64_t s2_entry_qw = 0xCCCCCCCCCCCCCCCCull;
+    bool s2_rd3 = cmdchannel::read_memory(game_pid, stage2_base + entry_rva,
+                                  reinterpret_cast<uint64_t>(&s2_entry_qw), 8);
+    llog("STEP 10b: stage2 entry read=%d val=%016llX @%016llX\n",
+         s2_rd3 ? 1 : 0, (unsigned long long)s2_entry_qw,
+         (unsigned long long)(stage2_base + entry_rva));
+
     llog("invoker parking scrubbed, returning fired=%d\n", fired?1:0);
     std::printf("[+] invoke_stage2: invoker parking scrubbed\n");
 
