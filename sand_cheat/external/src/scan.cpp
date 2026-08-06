@@ -7,6 +7,7 @@
 #include "scan.h"
 #include "state.h"
 #include "cmdchannel.h"
+#include "writeops.h"
 
 #include <windows.h>
 #include <mutex>
@@ -91,12 +92,7 @@ uint64_t dict_slim_lookup(uint64_t dict, int32_t key) {
     return 0;
 }
 
-uint64_t get_component(uint64_t entity, int idx) {
-    if (idx < 0 || !entity) return 0;
-    uint64_t dict = 0;
-    if (!ext_read_val(entity + 0x50, dict)) return 0;
-    return dict_slim_lookup(dict, idx);
-}
+// (definition moved to public API below)
 
 // ---------- Component discovery ----------
 bool discover_indices_internal(uint64_t gcm) {
@@ -130,6 +126,9 @@ bool discover_indices_internal(uint64_t gcm) {
         { "LargeItemData",     &ComponentIndices::large_item },
         { "ItemTypeData",      &ComponentIndices::item_type  },
         { "Id",                &ComponentIndices::id         },
+        { "InteractTarget",    &ComponentIndices::interact_target },
+        { "InteractibleActive",&ComponentIndices::interactible },
+        { "Invincible",        &ComponentIndices::invincible },
     };
 
     for (int i = 0; i < size; i++) {
@@ -166,6 +165,13 @@ bool ext_read_ptr_array(uint64_t src, size_t n, std::vector<uint64_t>& out) {
 } // namespace
 
 // ---------- Public API ----------
+
+uint64_t get_component(uint64_t entity, int idx) {
+    if (idx < 0 || !entity) return 0;
+    uint64_t dict = 0;
+    if (!ext_read_val(entity + 0x50, dict)) return 0;
+    return dict_slim_lookup(dict, idx);
+}
 
 bool discover_component_indices() {
     if (!state::g.game_context_module) return false;
@@ -311,6 +317,9 @@ bool tick() {
         g_snap = std::move(temp);
     }
     state::g.entity_count = entity_count;
+
+    // Apply any enabled writes after the scan populated player + indices.
+    writeops::apply_all();
 
     QueryPerformanceCounter(&t1);
     state::g.last_scan_ms = (uint64_t)((t1.QuadPart - t0.QuadPart) * 1000 / freq.QuadPart);

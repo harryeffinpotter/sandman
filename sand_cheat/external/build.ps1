@@ -20,6 +20,7 @@ $sources = @(
     "src\scan.cpp"
     "src\finder.cpp"
     "src\config.cpp"
+    "src\writeops.cpp"
     "$launcherSrc\cmdchannel.cpp"
     "$imguiDir\imgui.cpp"
     "$imguiDir\imgui_draw.cpp"

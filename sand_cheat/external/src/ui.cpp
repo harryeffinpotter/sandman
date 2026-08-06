@@ -6,6 +6,7 @@
 #include "cmdchannel.h"
 #include "scan.h"
 #include "finder.h"
+#include "writeops.h"
 
 #include "imgui.h"
 #include <windows.h>
@@ -326,12 +327,59 @@ void poll_hotkeys() {
     home_prev = home_now;
 }
 
+void draw_writeops() {
+    ImGui::SetNextWindowPos(ImVec2(500, 420), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(560, 240), ImGuiCond_FirstUseEver);
+    ImGui::Begin("write ops");
+    ImGui::Text("Live mutations to game state via kernel driver writes.");
+    ImGui::Separator();
+
+    ImGui::Checkbox("Force interact target lock", &writeops::g_cfg.force_interact_lock);
+    ImGui::TextDisabled("Overrides player's InteractTarget every tick.");
+    ImGui::InputInt("locked target entity id", &writeops::g_cfg.locked_target_id);
+
+    if (scan::g_player.found && ImGui::Button("Lock nearest player")) {
+        static std::vector<scan::Entity> snap;
+        scan::copy_snapshot(snap);
+        float best_d = 1e9f;
+        int best_id = -1;
+        for (const auto& e : snap) {
+            if (!e.is_player || e.is_self || !e.has_pos) continue;
+            if (e.distance >= 0 && e.distance < best_d) {
+                best_d = e.distance;
+                best_id = e.id;
+            }
+        }
+        if (best_id > 0) writeops::g_cfg.locked_target_id = best_id;
+    }
+    ImGui::SameLine();
+    if (scan::g_player.found && ImGui::Button("Lock nearest mob")) {
+        static std::vector<scan::Entity> snap;
+        scan::copy_snapshot(snap);
+        float best_d = 1e9f;
+        int best_id = -1;
+        for (const auto& e : snap) {
+            if (!e.is_mob || !e.has_pos) continue;
+            if (e.distance >= 0 && e.distance < best_d) {
+                best_d = e.distance;
+                best_id = e.id;
+            }
+        }
+        if (best_id > 0) writeops::g_cfg.locked_target_id = best_id;
+    }
+    ImGui::Separator();
+    ImGui::TextDisabled("More features next phase (turret rapid fire, no recoil,");
+    ImGui::TextDisabled("weapon velocity, invincibility).");
+    ImGui::End();
+}
+
 void draw_all() {
     if (!state::g.menu_visible) return;
     draw_overview();
     draw_memory_viewer();
     draw_entity_list();
     draw_radar();
+    draw_writeops();
 }
 
 } // namespace ui

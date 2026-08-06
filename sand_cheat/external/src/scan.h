@@ -48,21 +48,27 @@ bool discover_component_indices();
 
 // Introspected indices — negative if not found in the current session.
 struct ComponentIndices {
-    int position   = -1;
-    int blueprint  = -1;
-    int view       = -1;
-    int view_data  = -1;
-    int parent     = -1;
-    int nice_name  = -1;
-    int account_id = -1;
-    int user_name  = -1;
-    int mob_state  = -1;
-    int ai_agent   = -1;
-    int large_item = -1;
-    int item_type  = -1;
-    int id         = -1;
+    int position         = -1;
+    int blueprint        = -1;
+    int view             = -1;
+    int view_data        = -1;
+    int parent           = -1;
+    int nice_name        = -1;
+    int account_id       = -1;
+    int user_name        = -1;
+    int mob_state        = -1;
+    int ai_agent         = -1;
+    int large_item       = -1;
+    int item_type        = -1;
+    int id               = -1;
+    int interact_target  = -1;   // write target here to force interact
+    int interactible     = -1;   // marks entities the player can interact with
+    int invincible       = -1;   // add this component to make invincible
 };
 extern ComponentIndices g_indices;
+
+// Public component lookup for write path.
+uint64_t get_component(uint64_t entity, int idx);
 
 // One scan tick — cheap when nothing changed, does a full walk when
 // state::g.game_context_module is set. Populates the shared entity
