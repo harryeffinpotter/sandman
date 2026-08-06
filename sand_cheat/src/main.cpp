@@ -520,9 +520,10 @@ static DWORD WINAPI worker_thread(LPVOID) {
     if (!ga) return 0;
     tlog("GameAssembly.dll found at %p (tier=%s)\n", ga, pe_resolve::last_tier());
 
-    IL2CPP_API api;
+    static IL2CPP_API api;
     tlog("calling resolve_all...\n");
     resolve_all(ga, api);
+    set_il2cpp_api_ptr(&api);
     tlog("resolve_all done. domain_get=%p thread_attach=%p domain_get_assemblies=%p assembly_get_image=%p image_get_class_count=%p image_get_class=%p class_get_name=%p class_from_name=%p class_get_methods=%p method_get_name=%p method_get_param_count=%p image_get_name=%p class_get_type=%p type_get_object=%p string_new=%p\n",
         (void*)api.il2cpp_domain_get, (void*)api.il2cpp_thread_attach,
         (void*)api.il2cpp_domain_get_assemblies, (void*)api.il2cpp_assembly_get_image,

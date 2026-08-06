@@ -281,6 +281,7 @@ extern uintptr_t g_gaBase;
 extern uintptr_t g_gaSize;
 extern void* g_userNameKlass;
 extern void* g_userNameType;
+extern int   g_userNameFieldOffset;   // Byte offset of the String field inside UserNameComponent, resolved once at boot via il2cpp FieldInfo. -1 = unresolved.
 
 struct AimbotProfile {
     bool realityAim = true;
@@ -329,6 +330,7 @@ extern bool g_mobAimbotSame;
 // Functions
 // ---------------------------------------------------------------------------
 void resolve_all(HMODULE ga, IL2CPP_API& api);
+void set_il2cpp_api_ptr(IL2CPP_API* p);
 bool install_hook(Hook& h, void* target, void* detour, int steal_count = 16);
 
 extern HWBPHook g_hwbpHooks[4];

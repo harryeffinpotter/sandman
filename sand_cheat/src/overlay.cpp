@@ -851,8 +851,6 @@ static void create_stream_proof_overlay() {
     // black where the window is. WDA_EXCLUDEFROMCAPTURE (0x11) can also hide
     // from the user under some Win11 compositor states.
     SetWindowDisplayAffinity(g_overlayHwnd, 0x00000001);
-    SetWindowPos(g_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
@@ -1737,7 +1735,26 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             if (ImGui::BeginTabItem("Debug")) {
                 if (ImGui::Button("Clear")) ringlog::clear();
                 ImGui::SameLine();
+                bool paused = ringlog::is_paused();
+                if (ImGui::Checkbox("Pause", &paused)) ringlog::set_paused(paused);
+                ImGui::SameLine();
+                ImGui::TextColored(paused ? ImVec4(1, 0.6f, 0.3f, 1) : ImVec4(0.6f, 1, 0.6f, 1),
+                    paused ? "[PAUSED]" : "[live]");
+                ImGui::SameLine();
+                static char s_dumpStatus[128] = "";
+                static ULONGLONG s_dumpStatusExpiry = 0;
+                if (ImGui::Button("Save Log")) {
+                    size_t n = ringlog::dump_ring_to_file(
+                        L"C:\\Users\\ysg\\projects\\sand_cheat\\ring_snapshot.txt");
+                    snprintf(s_dumpStatus, sizeof(s_dumpStatus),
+                        "wrote %zu lines -> ring_snapshot.txt", n);
+                    s_dumpStatusExpiry = GetTickCount64() + 4000;
+                }
+                ImGui::SameLine();
                 ImGui::Text("Lines: %zu / %zu", ringlog::count(), ringlog::RING_CAP);
+                if (s_dumpStatus[0] && GetTickCount64() < s_dumpStatusExpiry) {
+                    ImGui::TextColored(ImVec4(0.4f, 1, 0.7f, 1), "%s", s_dumpStatus);
+                }
                 ImGui::Separator();
 
                 ImGui::BeginChild("DebugLogScroll", ImVec2(0, 0), true,

@@ -67,3 +67,8 @@ Thumbs.db
 *.user
 *.vs/
 .vs/
+sand_cheat/ComponentDump.txt
+sand_cheat/entity_names.txt
+sand_cheat/entity_dump.txt
+sand_cheat/ring_snapshot.txt
+sand_cheat/crashdumps/

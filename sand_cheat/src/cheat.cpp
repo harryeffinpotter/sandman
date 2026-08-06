@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 #include <tlhelp32.h>
 
 static void wlog(const char* fmt, ...) {
@@ -34,6 +35,10 @@ volatile void* g_gameContextModule = nullptr;
 volatile void* g_findInteractSystem = nullptr;
 volatile bool g_hooked = false;
 std::atomic<bool> g_hwbpActive{false};
+
+static IL2CPP_API* g_apiPtr = nullptr;
+static IL2CPP_API* get_il2cpp_api() { return g_apiPtr; }
+void set_il2cpp_api_ptr(IL2CPP_API* p) { g_apiPtr = p; }
 
 int g_idx_blueprint = -1;
 int g_idx_position = -1;
@@ -99,6 +104,7 @@ std::atomic<bool> g_running{true};
 
 WorldVector g_playerPos = {};
 void* g_userNameKlass = nullptr;
+int   g_userNameFieldOffset = -1;
 std::atomic<int> g_entityCount{0};
 
 std::string g_nameFilter;
@@ -625,7 +631,10 @@ bool discover_component_indices(void* gameContextModule) {
     ringlog::push("[player-diag] discovered g_idx_user_name=%d g_idx_account_id=%d out of %d components",
                   g_idx_user_name, g_idx_account_id, count);
 
-    ringlog::push("[component-dump] ALL %d component names follow", count);
+    ringlog::push("[component-dump] ALL %d component names follow (also in ComponentDump.txt)", count);
+    FILE* cdf = nullptr;
+    fopen_s(&cdf, "C:\\Users\\ysg\\projects\\sand_cheat\\ComponentDump.txt", "w");
+    if (cdf) fprintf(cdf, "# All %d component classes registered on GameContextModule\n\n", count);
     for (int i = 0; i < count; i++) {
         void* str = elements[i];
         if (!is_readable(str, 0x14)) continue;
@@ -636,8 +645,10 @@ bool discover_component_indices(void* gameContextModule) {
         for (int c = 0; c < len && c < 255; c++) narrow[c] = (char)wchars[c];
         narrow[(len < 255) ? len : 255] = 0;
         ringlog::push("[component-dump] [%d] %s", i, narrow);
+        if (cdf) fprintf(cdf, "[%4d] %s\n", i, narrow);
     }
-    ringlog::push("[component-dump] END");
+    if (cdf) fclose(cdf);
+    ringlog::push("[component-dump] END — ComponentDump.txt written");
 
     return true;
 }
@@ -977,7 +988,27 @@ static std::string get_display_name(const std::string& raw) {
 }
 
 
-// Extracted from loop for per-entity SEH (C++ objects cannot cross __try).
+static void* seh_get_component_raw(void* entity, int i) {
+    __try { return get_component(entity, i); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static bool seh_probe_username_at(void* comp, int off, char* out, int outCap) {
+    __try {
+        if (!is_readable(comp, (size_t)off + 8)) return false;
+        void* p = *(void**)((uintptr_t)comp + off);
+        if (!p || !is_readable(p, 0x14)) return false;
+        int len = *(int*)((uintptr_t)p + 0x10);
+        if (len < 3 || len > 64) return false;
+        if (!is_readable((void*)((uintptr_t)p + 0x14), (size_t)len * 2)) return false;
+        wchar_t* wchars = (wchar_t*)((uintptr_t)p + 0x14);
+        int n = (len < outCap - 1) ? len : outCap - 1;
+        for (int i = 0; i < n; ++i) out[i] = (char)wchars[i];
+        out[n] = 0;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 static void process_one_entity(
     void* entity,
     int playerEntityId,
@@ -1007,6 +1038,21 @@ static void process_one_entity(
     if (name.empty()) return;
     (*pDbgNameOK)++;
 
+    // First-time dump of every unique entity blueprint name to a dedicated
+    // file — greppable, doesn't drown in the debug log scroll.
+    {
+        static std::unordered_set<std::string> s_seenNames;
+        if (s_seenNames.insert(name).second) {
+            FILE* nf = nullptr;
+            if (fopen_s(&nf, "C:\\Users\\ysg\\projects\\sand_cheat\\entity_names.txt",
+                        s_seenNames.size() == 1 ? "w" : "a") == 0 && nf) {
+                fprintf(nf, "%-56s eid=%d\n", name.c_str(),
+                        *(int*)((uintptr_t)entity + 0x48));
+                fclose(nf);
+            }
+        }
+    }
+
     int eid = *(int*)((uintptr_t)entity + 0x48);
     if (eid == playerEntityId) return;
 
@@ -1032,6 +1078,12 @@ static void process_one_entity(
     info.entityPtr = entity;
     info.distance = -1.0f;
     info.hasTransformPos = false;
+    // Live Unity world pos via entity.viewBehaviour.transform.position — kills
+    // the ESP-label rubber-band on static entities and slashes it on movers.
+    // Falls back to the drifty refPos+chunk-delta path if this returns false.
+    if (seh_resolve_transform_pos(entity, &info.transformWorldPos)) {
+        info.hasTransformPos = true;
+    }
     info.hasBones = false;
     info.isCreature = false;
     info.lootTier = 0;
@@ -1108,6 +1160,14 @@ static void process_one_entity(
     if (name.rfind("PlayerAvatar", 0) == 0) {
         info.displayName = "";
 
+        // Shape-guessing name discovery was pulled — matched too many
+        // component fields (inventory item names, interact targets, etc.)
+        // and labeled players with random strings like "InventorySlotMedium".
+        // Next session: proper il2cpp metadata lookup — find UserEntity by
+        // blueprint name, resolve UserNameComponent klass via
+        // il2cpp_class_from_name, get field offset from il2cpp FieldInfo,
+        // read that specific field. Zero hardcoded offsets, zero shape guessing.
+#if 0
         // Runtime auto-discovery + cache. Once we find a (componentIndex,
         // byteOffset) whose pointer field yields a username-shaped string,
         // every subsequent PlayerAvatar hits the cached pair directly.
@@ -1116,19 +1176,46 @@ static void process_one_entity(
         static int s_nameCompIdx = -1;
         static int s_nameByteOff = -1;
         static bool s_discoveryLogged = false;
+        static int s_discoveryAttempts = 0;
+        constexpr int MAX_DISCOVERY_ATTEMPTS = 3;
+        static bool s_discoveryGaveUp = false;
 
         auto looks_like_username = [](const std::string& s) -> bool {
             int len = (int)s.size();
             if (len < 3 || len > 32) return false;
-            int letters = 0, alnum = 0, other = 0;
+            int letters = 0, alnum = 0, other = 0, underscores = 0;
             for (unsigned char c : s) {
                 if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) { letters++; alnum++; }
                 else if (c >= '0' && c <= '9') alnum++;
-                else if (c == '_' || c == '-' || c == '.' || c == ' ') other++;
+                else if (c == '_') { underscores++; other++; }
+                else if (c == '-' || c == '.' || c == ' ') other++;
                 else return false;
             }
             if (letters < 1) return false;
             if (alnum + other != len) return false;
+            // Reject asset-name patterns (env_/prop_/bp_/tex_/sfx_/vfx_/anim_/mat_/msh_/dyn_/gfx_).
+            static const char* assetPrefixes[] = {
+                "env_", "prop_", "bp_", "tex_", "sfx_", "vfx_", "anim_",
+                "mat_", "msh_", "dyn_", "gfx_", "ui_", "fx_"
+            };
+            for (auto* p : assetPrefixes) {
+                size_t plen = strlen(p);
+                if (s.size() >= plen) {
+                    bool match = true;
+                    for (size_t i = 0; i < plen; ++i) {
+                        char a = s[i], b = p[i];
+                        if (a >= 'A' && a <= 'Z') a += 32;
+                        if (a != b) { match = false; break; }
+                    }
+                    if (match) return false;
+                }
+            }
+            // Reject asset-naming shape: >=2 underscores AND ends in digits (Asset_Name_01).
+            if (underscores >= 2) {
+                int trailingDigits = 0;
+                for (int i = (int)s.size() - 1; i >= 0 && s[i] >= '0' && s[i] <= '9'; --i) trailingDigits++;
+                if (trailingDigits >= 2) return false;
+            }
             static const char* junk[] = {
                 "PlayerAvatar", "UserName", "AccountId", "Blueprint",
                 "Position", "Component", "Empty", "empty", "None", "null",
@@ -1138,24 +1225,25 @@ static void process_one_entity(
             return true;
         };
 
-        auto try_read_username = [&](void* comp, int off) -> std::string {
-            if (!is_readable(comp, off + 8)) return {};
-            void* p = *(void**)((uintptr_t)comp + off);
-            if (!p || !is_readable(p, 0x14)) return {};
-            int len = *(int*)((uintptr_t)p + 0x10);
-            if (len < 3 || len > 64) return {};
-            return read_il2cpp_string(p);
-        };
+        char nameBuf[128];
+
+        // Yield worker's outer VEH-hijack protection so inner __try/__except
+        // in seh_* helpers actually gets to see AVs. With g_workerVehActive
+        // set, the crash_handler rewinds the whole scan tick before SEH runs.
+        bool savedWorkerVeh = g_workerVehActive;
+        g_workerVehActive = false;
 
         if (s_nameCompIdx >= 0 && s_nameByteOff >= 0) {
-            void* comp = get_component(entity, s_nameCompIdx);
-            if (comp) {
-                std::string pn = try_read_username(comp, s_nameByteOff);
+            void* comp = seh_get_component_raw(entity, s_nameCompIdx);
+            if (comp && seh_probe_username_at(comp, s_nameByteOff, nameBuf, sizeof(nameBuf))) {
+                std::string pn(nameBuf);
                 if (looks_like_username(pn)) info.displayName = pn;
             }
         }
 
-        if (info.displayName.empty()) {
+        if (info.displayName.empty() && !s_discoveryGaveUp) {
+            s_discoveryAttempts++;
+
             void* gcm = (void*)g_gameContextModule;
             int totalComponents = 0;
             if (gcm && is_readable((void*)((uintptr_t)gcm + 0x20), 8)) {
@@ -1165,34 +1253,54 @@ static void process_one_entity(
             if (totalComponents <= 0 || totalComponents > 4096) totalComponents = 512;
 
             if (!s_discoveryLogged) {
-                ringlog::push("[player-discover] eid=%d entity=%p scanning %d component slots",
-                              eid, entity, totalComponents);
+                ringlog::push("[player-discover] attempt=%d eid=%d entity=%p scanning %d component slots",
+                              s_discoveryAttempts, eid, entity, totalComponents);
             }
 
+            int hitIdx = -1, hitOff = -1;
+            int candidatesLogged = 0;
             for (int i = 0; i < totalComponents; ++i) {
-                void* comp = get_component(entity, i);
+                void* comp = seh_get_component_raw(entity, i);
                 if (!comp || !is_readable(comp, 0x40)) continue;
-
                 for (int off = 0x08; off <= 0x38; off += 0x08) {
-                    std::string s = try_read_username(comp, off);
+                    if (!seh_probe_username_at(comp, off, nameBuf, sizeof(nameBuf))) continue;
+                    std::string s(nameBuf);
                     if (!looks_like_username(s)) continue;
-                    s_nameCompIdx = i;
-                    s_nameByteOff = off;
-                    info.displayName = s;
-                    if (!s_discoveryLogged) {
-                        ringlog::push("[player-discover] HIT componentIdx=%d byteOff=0x%02X name='%s'",
+                    if (!s_discoveryLogged && candidatesLogged < 20) {
+                        ringlog::push("[player-discover] candidate compIdx=%d byteOff=0x%02X value='%s'",
                                       i, off, s.c_str());
+                        candidatesLogged++;
                     }
-                    break;
+                    if (hitIdx < 0) {
+                        hitIdx = i;
+                        hitOff = off;
+                        info.displayName = s;
+                    }
                 }
-                if (!info.displayName.empty()) break;
             }
 
-            if (!s_discoveryLogged && info.displayName.empty()) {
-                ringlog::push("[player-discover] no username-shaped string found on entity=%p", entity);
+            if (hitIdx >= 0) {
+                s_nameCompIdx = hitIdx;
+                s_nameByteOff = hitOff;
+                if (!s_discoveryLogged) {
+                    ringlog::push("[player-discover] HIT componentIdx=%d byteOff=0x%02X name='%s'",
+                                  hitIdx, hitOff, info.displayName.c_str());
+                }
+            } else {
+                if (!s_discoveryLogged) {
+                    ringlog::push("[player-discover] attempt=%d no hit on entity=%p",
+                                  s_discoveryAttempts, entity);
+                }
+                if (s_discoveryAttempts >= MAX_DISCOVERY_ATTEMPTS) {
+                    s_discoveryGaveUp = true;
+                    ringlog::push("[player-discover] GAVE UP after %d attempts — will show 'PLAYER'", s_discoveryAttempts);
+                }
             }
             s_discoveryLogged = true;
         }
+
+        g_workerVehActive = savedWorkerVeh;
+#endif
     } else if (name.rfind("EXPEDITION_WALKER", 0) == 0 || name.rfind("walker_", 0) == 0) {
         void* ownerAvatar = nullptr;
         int ownerEid = 0;
@@ -1283,6 +1391,139 @@ static void seh_process_one_entity(
             pHeldCount, pResolvedParentCount, pEntitiesPushed);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+// ---------------------------------------------------------------------------
+// dump_all_entities_full — one-shot fat dump of every unique blueprint's
+// component structure. Writes to entity_dump.txt.
+// ---------------------------------------------------------------------------
+// SEH-safe: read `len` (int) at str+0x10, wchar_t[] at str+0x14, copy up to
+// outCap-1 chars into narrow-ascii `out`. Returns true iff a string was
+// successfully read (and out is null-terminated).
+static bool seh_read_string_at(void* str, char* out, int outCap) {
+    __try {
+        if (!is_readable(str, 0x14)) return false;
+        int len = *(int*)((uintptr_t)str + 0x10);
+        if (len < 1 || len > 200) return false;
+        if (!is_readable((void*)((uintptr_t)str + 0x14), (size_t)len * 2)) return false;
+        wchar_t* wchars = (wchar_t*)((uintptr_t)str + 0x14);
+        int n = (len < outCap - 1) ? len : outCap - 1;
+        for (int i = 0; i < n; ++i) out[i] = (char)wchars[i];
+        out[n] = 0;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool seh_read_component_klass_name(void* comp, char* out, int outCap) {
+    __try {
+        if (!is_readable(comp, 8)) return false;
+        void* klass = *(void**)comp;
+        if (!is_readable(klass, 0x40)) return false;
+        IL2CPP_API* api = get_il2cpp_api();
+        if (!api || !api->il2cpp_class_get_name) return false;
+        const char* n = api->il2cpp_class_get_name(klass);
+        if (!n) return false;
+        strncpy_s(out, outCap, n, _TRUNCATE);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool seh_component_hex(void* comp, unsigned char* out, int outLen) {
+    __try {
+        if (!is_readable(comp, (size_t)outLen)) return false;
+        memcpy(out, comp, outLen);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static void* seh_get_component_ptr(void* entity, int idx) {
+    __try { return get_component(entity, idx); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static bool seh_read_bp_name_raw(void* entity, char* nameOut, int nameCap, int* eidOut) {
+    __try {
+        if (!is_readable(entity, 0x68)) return false;
+        void* bp = get_component(entity, g_idx_blueprint);
+        if (!is_readable(bp, 0x18)) return false;
+        void* ns = *(void**)((uintptr_t)bp + 0x10);
+        *eidOut = *(int*)((uintptr_t)entity + 0x48);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    void* bp = get_component(entity, g_idx_blueprint);
+    void* ns = *(void**)((uintptr_t)bp + 0x10);
+    return seh_read_string_at(ns, nameOut, nameCap);
+}
+
+static void dump_one_component(FILE* f, void* ent, int idx) {
+    void* c = seh_get_component_ptr(ent, idx);
+    if (!c) return;
+
+    char klassName[128] = "?";
+    seh_read_component_klass_name(c, klassName, sizeof(klassName));
+
+    unsigned char raw[0x40];
+    bool haveHex = seh_component_hex(c, raw, sizeof(raw));
+
+    fprintf(f, "  [%3d] %p  class=%s\n", idx, c, klassName);
+    if (haveHex) {
+        char hex[3 * 0x40 + 8]; int off = 0;
+        for (int i = 0; i < (int)sizeof(raw); ++i)
+            off += snprintf(hex + off, sizeof(hex) - off, "%02X ", raw[i]);
+        fprintf(f, "        hex: %s\n", hex);
+    }
+
+    for (int probe = 0x08; probe <= 0x38; probe += 0x08) {
+        void* p = nullptr;
+        __try {
+            if (!is_readable((void*)((uintptr_t)c + probe), 8)) continue;
+            p = *(void**)((uintptr_t)c + probe);
+        } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
+        if (!p) continue;
+        char sbuf[256];
+        if (seh_read_string_at(p, sbuf, sizeof(sbuf))) {
+            fprintf(f, "        str[+0x%02X]='%s'\n", probe, sbuf);
+        }
+    }
+}
+
+static void dump_all_entities_full(void** entityPtrs, int entityCount) {
+    if (!entityPtrs || entityCount <= 0) return;
+
+    void* gcm = (void*)g_gameContextModule;
+    int totalComponents = 0;
+    if (gcm && is_readable((void*)((uintptr_t)gcm + 0x20), 8)) {
+        void* cn = *(void**)((uintptr_t)gcm + 0x20);
+        if (is_readable(cn, 0x20)) totalComponents = *(int*)((uintptr_t)cn + 0x18);
+    }
+    if (totalComponents <= 0 || totalComponents > 4096) totalComponents = 512;
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, "C:\\Users\\ysg\\projects\\sand_cheat\\entity_dump.txt", "w") != 0 || !f) return;
+
+    fprintf(f, "# Fat entity dump — one representative entity per unique blueprint.\n");
+    fprintf(f, "# entityCount=%d componentSlotCount=%d\n\n", entityCount, totalComponents);
+
+    std::unordered_set<std::string> seen;
+    int dumped = 0;
+    for (int e = 0; e < entityCount; ++e) {
+        void* ent = entityPtrs[e];
+        char bpName[128];
+        int eid = 0;
+        if (!seh_read_bp_name_raw(ent, bpName, sizeof(bpName), &eid)) continue;
+        std::string key(bpName);
+        if (!seen.insert(key).second) continue;
+
+        fprintf(f, "=== BLUEPRINT: %s  (eid=%d, ent=%p) ===\n", bpName, eid, ent);
+        for (int i = 0; i < totalComponents; ++i) {
+            dump_one_component(f, ent, i);
+        }
+        fprintf(f, "\n");
+        ++dumped;
+        fflush(f);
+    }
+    fprintf(f, "# dumped %d unique blueprints out of %d entities.\n", dumped, entityCount);
+    fclose(f);
+    ringlog::push("[entity-dump] wrote entity_dump.txt for %d unique blueprints", dumped);
 }
 
 // ---------------------------------------------------------------------------
@@ -1624,6 +1865,18 @@ void scan_entities() {
         }
 #endif
 
+        // First-tick full dump: every unique blueprint gets a fat structural
+        // dump — all attached components with class names, first 0x40 bytes
+        // hex, and probed pointer-to-string fields. One file, greppable.
+        // Runs once per session; guarded so we never write it twice.
+        {
+            static bool s_dumpDone = false;
+            if (!s_dumpDone) {
+                s_dumpDone = true;
+                dump_all_entities_full(entityPtrs, entityCount);
+            }
+        }
+
         std::vector<ItemInfo> items;
         int vehEntityRecoveries = 0;
         int entitiesSkippedFilter = 0;
@@ -1788,6 +2041,12 @@ static bool seh_read_position(void* posComp, WorldVector* out) {
 }
 
 static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
+    // Latch off after N throws so we don't spam thousands of C++ exceptions
+    // per second. Toggled back on if any fresh scan later succeeds.
+    static int s_boneThrowStreak = 0;
+    static bool s_boneResolveDisabled = false;
+    if (s_boneResolveDisabled) return false;
+
     static int s_boneDiagCount = 0;
     bool dumpThis = (s_boneDiagCount < 10);
     if (dumpThis) s_boneDiagCount++;
@@ -1906,7 +2165,16 @@ static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
         g_vehInnerActive = false;
         if (dumpThis) ringlog::push("[bone-diag] done anyBone=%d totalValid=%d", anyBone?1:0, validCount);
         return anyBone;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_bones] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DWORD code = GetExceptionCode();
+        s_boneThrowStreak++;
+        if (s_boneThrowStreak <= 3) wlog("[seh_resolve_bones] SEH: 0x%08lX\n", code);
+        if (s_boneThrowStreak == 5) {
+            s_boneResolveDisabled = true;
+            ringlog::push("[bone-diag] LATCHED OFF after 5 throws — bones will show blank");
+        }
+        return false;
+    }
 }
 
 static bool seh_resolve_transform_pos(void* entity, Vec3* out) {
