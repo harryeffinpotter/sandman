@@ -143,7 +143,18 @@ bool load_embedded_blob(int resource_id, std::vector<uint8_t>& out) {
 #define IDR_KERNELDRIVER  102
 
 int main(int argc, char* argv[]) {
-    if (argc > 1) g_target_name = argv[1];
+    // --no-inject: driver-install-only mode. Used to bootstrap
+    // sand_external.exe without ever writing sand_cheat.dll into the
+    // game process. Keeps the game footprint at ZERO.
+    bool no_inject = false;
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--no-inject") == 0) {
+            no_inject = true;
+        } else if (argv[i][0] != '-') {
+            g_target_name = argv[i];
+        }
+    }
+    (void)no_inject;   // referenced below inside the injection gate
 
     SetConsoleOutputCP(CP_UTF8);
     banner();
@@ -818,6 +829,17 @@ int main(int argc, char* argv[]) {
     std::printf("[*] unloading BYOVD — cheat driver persists in kernel memory\n");
     byovd::unload(byovd_ctx);
     }  // end else (driver_already_up == false) — BYOVD + install block
+
+    // --no-inject: skip the entire injection pipeline. Driver is already
+    // resident (mapped above), cmdchannel is hijacked, external overlay
+    // can attach whenever sand.exe is launched. Perfect for the KWARE
+    // architecture — nothing is ever written into the game process.
+    if (no_inject) {
+        std::printf("\n[*] --no-inject mode: driver installed, DLL skipped.\n");
+        std::printf("[*] run sand_external.exe to attach as external overlay.\n");
+        llog("--no-inject: skipping DLL injection\n");
+        return 0;
+    }
 
     // Phase 16.b: operator-gated RTSS injection.
     //
