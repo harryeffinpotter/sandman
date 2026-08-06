@@ -368,8 +368,16 @@ void draw_writeops() {
         if (best_id > 0) writeops::g_cfg.locked_target_id = best_id;
     }
     ImGui::Separator();
-    ImGui::TextDisabled("More features next phase (turret rapid fire, no recoil,");
-    ImGui::TextDisabled("weapon velocity, invincibility).");
+    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Turret / weapon writes (any owned turret)");
+    ImGui::Checkbox("Turret rapid fire",  &writeops::g_cfg.turret_rapid_fire);
+    ImGui::TextDisabled("StationaryAutoWeapon +0x24 = 0.01f");
+    ImGui::Checkbox("Turret no recoil",   &writeops::g_cfg.turret_no_recoil);
+    ImGui::TextDisabled("RecoilLookOffset +0x10 = 48 zeros");
+    ImGui::Separator();
+    ImGui::Text("indices  interact=%d recoil=%d stationary=%d overheat=%d walker_fly=%d",
+                scan::g_indices.interact_target, scan::g_indices.recoil_look,
+                scan::g_indices.stationary_auto, scan::g_indices.weapon_overheat,
+                scan::g_indices.cheat_walker_fly);
     ImGui::End();
 }
 

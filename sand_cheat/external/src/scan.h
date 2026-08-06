@@ -64,6 +64,11 @@ struct ComponentIndices {
     int interact_target  = -1;   // write target here to force interact
     int interactible     = -1;   // marks entities the player can interact with
     int invincible       = -1;   // add this component to make invincible
+    int recoil_look      = -1;   // memset+0x10 for no-recoil
+    int stationary_auto  = -1;   // +0x24 float = fire cooldown
+    int weapon_overheat  = -1;
+    int cheat_walker_fly = -1;
+    int cheat_walker_spd = -1;
 };
 extern ComponentIndices g_indices;
 

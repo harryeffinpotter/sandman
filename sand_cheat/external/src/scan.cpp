@@ -129,6 +129,11 @@ bool discover_indices_internal(uint64_t gcm) {
         { "InteractTarget",    &ComponentIndices::interact_target },
         { "InteractibleActive",&ComponentIndices::interactible },
         { "Invincible",        &ComponentIndices::invincible },
+        { "RecoilLookOffset",  &ComponentIndices::recoil_look },
+        { "StationaryAutoWeapon", &ComponentIndices::stationary_auto },
+        { "WeaponOverheat",    &ComponentIndices::weapon_overheat },
+        { "CheatWalkerFly",    &ComponentIndices::cheat_walker_fly },
+        { "CheatWalkerSpeedMultiplier", &ComponentIndices::cheat_walker_spd },
     };
 
     for (int i = 0; i < size; i++) {
