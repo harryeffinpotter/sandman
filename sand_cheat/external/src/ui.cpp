@@ -5,6 +5,7 @@
 #include "overlay.h"
 #include "cmdchannel.h"
 #include "scan.h"
+#include "finder.h"
 
 #include "imgui.h"
 #include <windows.h>
@@ -136,6 +137,16 @@ void draw_entity_list() {
     if (ImGui::Button("Apply GCM")) {
         g.game_context_module = parse_hex_addr(g.gcm_input);
         g.scan_enabled = (g.game_context_module != 0);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Auto-discover")) {
+        uint64_t discovered = finder::auto_discover_gcm();
+        if (discovered) {
+            g.game_context_module = discovered;
+            snprintf(g.gcm_input, sizeof(g.gcm_input), "%llX",
+                     (unsigned long long)discovered);
+            g.scan_enabled = true;
+        }
     }
     ImGui::SameLine();
     ImGui::Checkbox("scan enabled", &g.scan_enabled);

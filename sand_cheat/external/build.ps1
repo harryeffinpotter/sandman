@@ -18,6 +18,7 @@ $sources = @(
     "src\state.cpp"
     "src\ui.cpp"
     "src\scan.cpp"
+    "src\finder.cpp"
     "$launcherSrc\cmdchannel.cpp"
     "$imguiDir\imgui.cpp"
     "$imguiDir\imgui_draw.cpp"
