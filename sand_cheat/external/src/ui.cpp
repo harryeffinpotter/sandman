@@ -144,16 +144,38 @@ void draw_entity_list() {
     ImGui::Text("entity count:   %llu",   (unsigned long long)g.entity_count);
     ImGui::Separator();
 
+    ImGui::Text("indices: pos=%d bp=%d view=%d parent=%d",
+                scan::g_indices.position, scan::g_indices.blueprint,
+                scan::g_indices.view, scan::g_indices.parent);
+    ImGui::Separator();
+
+    // Filter
+    static char filter[64] = "";
+    ImGui::InputText("filter (name contains)", filter, sizeof(filter));
+    ImGui::Separator();
+
     // Snapshot
     static std::vector<scan::Entity> snap;
     scan::copy_snapshot(snap);
     ImGui::BeginChild("entlist", ImVec2(0, 200), true);
-    for (size_t i = 0; i < snap.size() && i < 200; i++) {
+    int shown = 0;
+    for (size_t i = 0; i < snap.size(); i++) {
         const auto& e = snap[i];
-        ImGui::Text("[%3zu] id=%d en=%d ptr=%llX", i, e.id, e.enabled ? 1 : 0,
-                    (unsigned long long)e.ptr);
+        if (filter[0]) {
+            if (e.name.find(filter) == std::string::npos) continue;
+        }
+        if (shown >= 200) break;
+        if (e.has_pos) {
+            ImGui::Text("[%4d] id=%5d %-32s  pos=(%.1f, %.1f, %.1f) chunk=(%d,%d)",
+                        e.id, e.id, e.name.empty() ? "(no name)" : e.name.c_str(),
+                        e.x, e.y, e.z, e.cx, e.cy);
+        } else {
+            ImGui::Text("[%4d] id=%5d %-32s  (no pos)",
+                        e.id, e.id, e.name.empty() ? "(no name)" : e.name.c_str());
+        }
+        shown++;
     }
-    if (snap.size() > 200) ImGui::TextDisabled("... %zu more ...", snap.size() - 200);
+    if (shown == 0) ImGui::TextDisabled("(no entities match filter)");
     ImGui::EndChild();
     ImGui::End();
 }
