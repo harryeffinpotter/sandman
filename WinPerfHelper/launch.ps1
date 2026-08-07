@@ -2,11 +2,34 @@
 # launch.ps1 — click-through launcher UI. Double-click this from Explorer;
 # picks between DLL mode and external mode with a proper Windows dialog.
 
-Add-Type -AssemblyName System.Windows.Forms
+$ErrorActionPreference = "Stop"
+trap {
+    Write-Host "[launch.ps1] FATAL: $_" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkYellow
+    Read-Host "press ENTER to close"
+    exit 1
+}
+
+try { Add-Type -AssemblyName System.Windows.Forms } catch {
+    Write-Host "[launch.ps1] System.Windows.Forms unavailable — need .NET Framework 4.x installed." -ForegroundColor Red
+    Read-Host "press ENTER to close"
+    exit 2
+}
 Add-Type -AssemblyName System.Drawing
 
 $root = $PSScriptRoot
+if (-not $root) {
+    Write-Host "[launch.ps1] Can't determine script root (probably launched via cmd pipe). Passing explicit path." -ForegroundColor Red
+    Read-Host "press ENTER to close"
+    exit 3
+}
 $runScript = Join-Path $root "run.ps1"
+if (-not (Test-Path $runScript)) {
+    Write-Host "[launch.ps1] run.ps1 not found at: $runScript" -ForegroundColor Red
+    Write-Host "You need the full project directory — LAUNCH.bat can't run standalone." -ForegroundColor Yellow
+    Read-Host "press ENTER to close"
+    exit 4
+}
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "sand launcher"
