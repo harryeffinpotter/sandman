@@ -245,6 +245,55 @@ static void release_render_target() {
 static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain*, UINT, UINT);
 static HRESULT STDMETHODCALLTYPE hooked_resize_buffers(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 
+// SetFullscreenState vtable hook — when g_forceWindowed is on, we return
+// S_OK without actually going fullscreen. Game thinks its call succeeded
+// and stops re-trying, we stay windowed. Vtable slot 10 on IDXGISwapChain.
+typedef HRESULT (STDMETHODCALLTYPE* fn_SetFullscreenState)(
+    IDXGISwapChain* pSwapChain, BOOL Fullscreen, IDXGIOutput* pTarget);
+static fn_SetFullscreenState g_originalSetFullscreenState = nullptr;
+static void** g_swapChainVtable = nullptr;
+static uintptr_t g_setFullscreenSlot_oldProt = 0;
+
+static HRESULT STDMETHODCALLTYPE hooked_set_fullscreen_state(
+    IDXGISwapChain* pSwapChain, BOOL Fullscreen, IDXGIOutput* pTarget)
+{
+    if (g_forceWindowed.load() && Fullscreen == TRUE) {
+        // Silently pretend it worked. Game moves on, stays windowed.
+        return S_OK;
+    }
+    if (g_originalSetFullscreenState) {
+        return g_originalSetFullscreenState(pSwapChain, Fullscreen, pTarget);
+    }
+    return E_FAIL;
+}
+
+static void install_fullscreen_hook(IDXGISwapChain* pSwapChain) {
+    if (!pSwapChain || g_originalSetFullscreenState) return;  // already hooked
+    void** vtbl = *(void***)pSwapChain;
+    if (!vtbl) return;
+    // IDXGISwapChain vtable layout:
+    //   [0-2]  IUnknown  (QueryInterface, AddRef, Release)
+    //   [3-6]  IDXGIObject (SetPrivateData, ...)
+    //   [7]    GetDevice
+    //   [8]    Present
+    //   [9]    GetBuffer
+    //   [10]   SetFullscreenState  <-- HERE
+    //   [11]   GetFullscreenState
+    g_swapChainVtable = vtbl;
+    g_originalSetFullscreenState = (fn_SetFullscreenState)vtbl[10];
+    DWORD oldProt;
+    if (VirtualProtect(&vtbl[10], sizeof(void*), PAGE_READWRITE, &oldProt)) {
+        vtbl[10] = (void*)&hooked_set_fullscreen_state;
+        DWORD tmp;
+        VirtualProtect(&vtbl[10], sizeof(void*), oldProt, &tmp);
+        g_setFullscreenSlot_oldProt = oldProt;
+        dbglog("[fullscreen-hook] installed — original=%p\n", g_originalSetFullscreenState);
+    } else {
+        g_originalSetFullscreenState = nullptr;
+        dbglog("[fullscreen-hook] VirtualProtect FAILED\n");
+    }
+}
+
 static LRESULT WINAPI hooked_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_KEYDOWN && wParam == VK_INSERT)
         g_menuVisible = !g_menuVisible;
@@ -1177,13 +1226,15 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             // stuck on screen.
             if (g_overlayImguiInit) {
                 ImGui_ImplDX11_Shutdown();
+                ImGui_ImplWin32_Shutdown();
+                if (g_gameHwnd) ImGui_ImplWin32_Init(g_gameHwnd);
                 if (g_pd3dDevice && g_pd3dDeviceContext) {
                     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
                 }
                 g_overlayImguiInit = false;
                 destroy_stream_proof_overlay();
                 g_streamProof.store(false);
-                g_streamProofSwapRequest.store(0);   // cancel any pending req
+                g_streamProofSwapRequest.store(0);
                 dbglog("[F1] stream-proof torn down synchronously\n");
             }
             if (g_gameHwnd) {
@@ -1230,37 +1281,44 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         int req = g_streamProofSwapRequest.exchange(0);
         if (req == 1 && !g_overlayImguiInit) {
             create_stream_proof_overlay();
-            // Full readiness gate — every pointer we'll deref later must be
-            // valid. If create_stream_proof_overlay tore itself down on any
-            // failure, at least one of these will be null and we stay on
-            // the game device (menu stays visible in-game, just not stream-
-            // proof).
             if (g_overlayHwnd && g_overlayDevice && g_overlayContext
                 && g_overlaySwapChain && g_overlayRTV) {
+                // Both backends need to be reset together — DX11 to point at
+                // the new device, Win32 to point at the new overlay hwnd. If
+                // we only reset DX11, ImGui_ImplWin32_NewFrame asserts on
+                // its stale/null hWnd (bd->hWnd != 0 at line 318).
                 ImGui_ImplDX11_Shutdown();
-                if (!ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext)) {
-                    dbglog("[stream-proof] ImGui_ImplDX11_Init on overlay device FAILED — reverting to game device\n");
-                    // Re-init on the game device so we don't have zero backends
+                ImGui_ImplWin32_Shutdown();
+                bool win32ok = ImGui_ImplWin32_Init(g_overlayHwnd);
+                bool dx11ok  = ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
+                if (!win32ok || !dx11ok) {
+                    dbglog("[stream-proof] backend init FAILED (win32=%d dx11=%d) -- reverting to game\n", win32ok, dx11ok);
+                    ImGui_ImplDX11_Shutdown();
+                    ImGui_ImplWin32_Shutdown();
+                    ImGui_ImplWin32_Init(g_gameHwnd);
                     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
                     destroy_stream_proof_overlay();
                     g_streamProof.store(false);
                 } else {
                     g_overlayImguiInit = true;
                     g_streamProof.store(true);
-                    dbglog("[stream-proof] enabled (deferred) rtv=%p\n", g_overlayRTV);
+                    dbglog("[stream-proof] enabled -- overlay hwnd=%p rtv=%p\n", g_overlayHwnd, g_overlayRTV);
                 }
             } else {
-                dbglog("[stream-proof] enable failed (hwnd=%p dev=%p ctx=%p sc=%p rtv=%p) — staying on game device\n",
+                dbglog("[stream-proof] enable failed (hwnd=%p dev=%p ctx=%p sc=%p rtv=%p) -- staying on game device\n",
                        g_overlayHwnd, g_overlayDevice, g_overlayContext, g_overlaySwapChain, g_overlayRTV);
                 g_streamProof.store(false);
             }
         } else if (req == 2 && g_overlayImguiInit) {
+            // Symmetric teardown -- reset BOTH backends back to game hwnd/device
             ImGui_ImplDX11_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui_ImplWin32_Init(g_gameHwnd);
             ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
             g_overlayImguiInit = false;
             destroy_stream_proof_overlay();
             g_streamProof.store(false);
-            dbglog("[stream-proof] disabled (deferred)\n");
+            dbglog("[stream-proof] disabled\n");
         }
     }
 
