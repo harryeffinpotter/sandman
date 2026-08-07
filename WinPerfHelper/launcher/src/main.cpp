@@ -910,14 +910,23 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        std::printf("\n[*] opening inject picker (default: %s) ...\n",
-                    default_dll_path.c_str());
-        if (!ui::prompt_for_dll(default_dll_path, picked_path)) {
-            std::printf("[*] inject cancelled by operator\n");
-            return 0;
+        // Auto-inject the default DLL if it exists next to the launcher.
+        // Avoids the "click Inject" gate friend + LO both hate. Falls back
+        // to the picker only if the default file is missing.
+        if (GetFileAttributesA(default_dll_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            picked_path = default_dll_path;
+            std::printf("[+] auto-injecting default DLL: %s\n", picked_path.c_str());
+            llog("auto-injecting DLL: %s\n", picked_path.c_str());
+        } else {
+            std::printf("\n[*] default DLL not found at %s -- opening picker\n",
+                        default_dll_path.c_str());
+            if (!ui::prompt_for_dll(default_dll_path, picked_path)) {
+                std::printf("[*] inject cancelled by operator\n");
+                return 0;
+            }
+            std::printf("[+] selected Stage 2: %s\n", picked_path.c_str());
+            llog("selected DLL: %s\n", picked_path.c_str());
         }
-        std::printf("[+] selected Stage 2: %s\n", picked_path.c_str());
-        llog("selected DLL: %s\n", picked_path.c_str());
     }
     const char* stage2_path = picked_path.c_str();
     llog("stage2_path=%s\n", stage2_path);
