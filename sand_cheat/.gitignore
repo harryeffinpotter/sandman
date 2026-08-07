@@ -1,0 +1,45 @@
+# Build artifacts
+*.obj
+*.pdb
+*.exp
+*.lib
+*.res
+*.ilk
+
+# DLL runtime dumps (all now written to %APPDATA%\Microsoft\PerfCache\)
+# but pre-relocation runs left copies in the project dir
+BoneTransformHunt.txt
+ManagerDump.txt
+ModuleInstances.txt
+SkeletonSearch.txt
+UserContextModule_methods.txt
+UserEntity_methods.txt
+UserNameComponent_fields.txt
+UserName_candidates.txt
+UserRecords.txt
+UsersGroup.txt
+ComponentDump.txt
+entity_names.txt
+entity_dump.txt
+dll_ringlog.txt
+launcher_trace.txt
+injection_trace.txt
+crash_info.txt
+worker_debug.txt
+external_trace.txt
+scan_diag.txt
+overlay_debug.txt
+player_probe.txt
+shop_probe.txt
+tech_tree_dump.txt
+tech_tree_cache.bin
+bone_probe.txt
+component_names.txt
+ring_snapshot.txt
+sand_crash.dmp
+crashdumps/
+
+# Legacy dev dumps
+update_summary.md
+updateinstructions.md
+_MUST_READ_PROGRESS.md
