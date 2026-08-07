@@ -2348,9 +2348,12 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         ImVec2(e.bones[to].x, e.bones[to].y),
                         boneColor, 1.5f);
                 }
-                for (int ub = 0; ub < 20; ub++) {
-                    static const int UB[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,54};
-                    int bi = UB[ub];
+                // Draw a filled circle at EVERY valid bone slot 0-54.
+                // For named-mode entries this hits the ~20 skeletal joints.
+                // For raw-fallback mode (name matching found nothing) this
+                // paints a point cloud of every transform on the character
+                // — ugly but visible skeleton confirmation.
+                for (int bi = 0; bi < 55; bi++) {
                     if (!e.bones[bi].valid) continue;
                     ImU32 jointColor = (bi == 10) ? IM_COL32(255, 50, 50, 255) : IM_COL32(255, 255, 255, 180);
                     float jointRadius = (bi == 10) ? 3.0f : 2.0f;

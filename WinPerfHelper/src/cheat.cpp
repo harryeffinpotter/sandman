@@ -1523,8 +1523,25 @@ static void process_one_entity(
             }
         }
 
-        // Last-resort fallback so labels aren't blank in the overlay.
-        if (info.displayName.empty()) info.displayName = "Player";
+        // Last-resort fallback: if all name-resolution paths failed, show
+        // the truncated AccountId so distinct players are at least
+        // distinguishable (better than every remote player showing as
+        // identical "Player"). Steam name resolution via steam_api64.dll
+        // is the real fix (task 24).
+        if (info.displayName.empty()) {
+            if (g_idx_account_id >= 0) {
+                void* aidComp = get_component(entity, g_idx_account_id);
+                if (is_readable(aidComp, 0x18)) {
+                    unsigned long long aid = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
+                    if (aid != 0) {
+                        char aidBuf[48];
+                        snprintf(aidBuf, sizeof(aidBuf), "Player[%llu]", aid);
+                        info.displayName = aidBuf;
+                    }
+                }
+            }
+            if (info.displayName.empty()) info.displayName = "Player";
+        }
 
         // Old shape-guessing block preserved below (#if 0) for reference.
         // Kept because if both paths above start failing after a game
@@ -2719,8 +2736,9 @@ static int bone_name_to_index(const char* name) {
 // Recursive walker — reads transform name, matches against bone map,
 // writes position into bones[] slot. Bounded depth + child count. All
 // SEH-safe via caller's __try (this fn assumes it's inside one).
+// Depth 15 to cover deep rigs (bones often nest 8-12 deep under Armature).
 static void seh_walk_bones(void* tf, int depth, BoneWorldPos* bones, int* validCount) {
-    if (depth > 8) return;
+    if (depth > 15) return;
     if (!is_readable(tf, 0x10)) return;
     if (!g_getName || !g_getChildCount || !g_getChild || !g_getPosition) return;
 
@@ -2745,6 +2763,33 @@ static void seh_walk_bones(void* tf, int depth, BoneWorldPos* bones, int* validC
     for (int i = 0; i < cc; i++) {
         void* child = g_getChild(tf, i, nullptr);
         if (child) seh_walk_bones(child, depth + 1, bones, validCount);
+    }
+}
+
+// Fallback walker — captures EVERY transform's position into sequential
+// bones[] slots, regardless of name. Used when the named walker finds 0
+// matches (bones might be named oddly — bone_XXX, DEF-XXX, hashes, etc).
+// Gives us a "point cloud skeleton" that at least SHOWS on the character
+// even if we can't identify individual bones.
+static void seh_walk_bones_raw(void* tf, int depth, BoneWorldPos* bones, int* nextSlot) {
+    if (depth > 15) return;
+    if (*nextSlot >= 55) return;
+    if (!is_readable(tf, 0x10)) return;
+    if (!g_getChildCount || !g_getChild || !g_getPosition) return;
+
+    Vec3 p = {0,0,0};
+    g_getPosition(&p, tf, nullptr);
+    if (!std::isnan(p.x) && !std::isnan(p.y) && !std::isnan(p.z)) {
+        bones[*nextSlot].pos = p;
+        bones[*nextSlot].valid = true;
+        (*nextSlot)++;
+    }
+    int cc = g_getChildCount(tf, nullptr);
+    if (cc <= 0 || cc > 256) return;
+    for (int i = 0; i < cc; i++) {
+        if (*nextSlot >= 55) return;
+        void* child = g_getChild(tf, i, nullptr);
+        if (child) seh_walk_bones_raw(child, depth + 1, bones, nextSlot);
     }
 }
 
@@ -2778,6 +2823,14 @@ static bool seh_resolve_bones_by_walk(void* entity, BoneWorldPos* bones) {
 
         int validCount = 0;
         seh_walk_bones(rootTf, 0, bones, &validCount);
+        // Fallback: if named-matching found nothing, capture every
+        // transform in the hierarchy as a raw point cloud. Won't identify
+        // individual bones but WILL draw something on the character.
+        if (validCount == 0) {
+            int nextSlot = 0;
+            seh_walk_bones_raw(rootTf, 0, bones, &nextSlot);
+            return nextSlot > 0;
+        }
         return validCount > 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
