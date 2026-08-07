@@ -381,6 +381,7 @@ extern std::atomic<float> g_dayTime;
 extern volatile uintptr_t g_todInstance;
 extern std::atomic<float> g_speedMult;
 extern std::atomic<bool>  g_walkerFly;
+extern std::atomic<float> g_recoilMult;
 extern int g_idx_fall_damage;
 extern int g_idx_jump_delay;
 extern int g_idx_ammo;

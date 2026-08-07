@@ -97,7 +97,14 @@ std::atomic<bool> g_weaponFilter{false};
 std::atomic<bool> g_heavyBypass{false};
 std::atomic<bool> g_turretNoOverheat{false};
 std::atomic<bool> g_turretRapidFire{false};
-std::atomic<bool> g_turretNoRecoil{false};
+std::atomic<bool>  g_turretNoRecoil{false};
+// Recoil strength multiplier — 0.0 = zero (same as no-recoil-checkbox),
+// 1.0 = normal, values between = reduced but visible. Only applied when
+// != 1.0. When ==1.0, we skip writes entirely so the game accumulates
+// normally on next shot (fixes the "recoil never comes back after
+// toggling no-recoil off" issue: previously we memset 48 zero bytes
+// per tick which permanently pinned the vector at zero).
+std::atomic<float> g_recoilMult{1.0f};
 std::atomic<bool> g_weaponModsEnabled{false};
 std::atomic<bool> g_weaponNoDrop{false};
 std::atomic<bool> g_weaponNoBloom{false};
@@ -752,14 +759,27 @@ static void seh_apply_turret_single(void* entity, int* found, int* applied,
             }
         }
 
-        if (g_turretNoRecoil.load()) {
-            if (g_idx_recoil_look >= 0) {
-                void* rl = get_component(entity, g_idx_recoil_look);
-                if (rl) {
+        // Recoil scaling: checkbox = force-zero, slider = mult (0..1).
+        // When slider is 1.0 AND checkbox is off, skip entirely so the
+        // game's own recoil accumulation runs unmodified — this is what
+        // fixes recoil not restoring after toggling no-recoil off.
+        bool  norec = g_turretNoRecoil.load();
+        float mult  = g_recoilMult.load();
+        if ((norec || mult < 0.999f) && g_idx_recoil_look >= 0) {
+            void* rl = get_component(entity, g_idx_recoil_look);
+            if (rl) {
+                if (norec || mult <= 0.001f) {
+                    // Full kill — zero the 12-float vector.
                     memset((void*)((uintptr_t)rl + 0x10), 0, 48);
-                    g_cachedRecoilEntity.store((uintptr_t)entity);
-                    (*applied)++;
+                } else {
+                    // Partial: scale each float. 12 floats = pitch/yaw/roll
+                    // triplets over time. Doing this every tick keeps the
+                    // scaled magnitude bounded even if the game re-accumulates.
+                    float* v = (float*)((uintptr_t)rl + 0x10);
+                    for (int i = 0; i < 12; i++) v[i] *= mult;
                 }
+                g_cachedRecoilEntity.store((uintptr_t)entity);
+                (*applied)++;
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_apply_turret_single] SEH: 0x%08lX\n", GetExceptionCode()); }

@@ -1456,8 +1456,15 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 }
                 {
                     bool noRecoil = g_turretNoRecoil.load();
-                    if (ImGui::Checkbox("No Recoil", &noRecoil))
+                    if (ImGui::Checkbox("No Recoil (full kill)", &noRecoil))
                         g_turretNoRecoil.store(noRecoil);
+                }
+                {
+                    float m = g_recoilMult.load();
+                    if (ImGui::SliderFloat("Recoil strength", &m, 0.0f, 1.0f, "%.2fx")) {
+                        g_recoilMult.store(m);
+                    }
+                    ImGui::TextDisabled("1.0 = normal (no writes), 0.0 = zero. Slider < 1.0 scales the recoil vector every tick.");
                 }
 
                 ImGui::Separator();
