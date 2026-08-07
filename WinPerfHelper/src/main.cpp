@@ -1955,6 +1955,13 @@ static DWORD WINAPI worker_thread(LPVOID) {
 
 
             scanCounter++;
+            // Hard-kill hotkey — F12 = instant TerminateProcess. Bypasses
+            // the game's 7-step shutdown hell (Alt+F4 → End Task → Not
+            // Responding → Force Close). One key, dead in 10ms.
+            if ((GetAsyncKeyState(VK_F12) & 0x8000) || g_hardKillRequested.load()) {
+                wlog("[worker] HARD KILL requested — TerminateProcess\n");
+                TerminateProcess(GetCurrentProcess(), 0);
+            }
             // Jittered scan cadence — [80, 160)ms per iteration so the
             // syscall rhythm never lines up as a clean sine wave for AC
             // pattern matchers watching over minutes.

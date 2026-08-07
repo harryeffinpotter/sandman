@@ -1786,9 +1786,12 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 }
                 {
                     float m = g_speedMult.load();
-                    if (ImGui::SliderFloat("Speed multiplier", &m, 1.0f, 10.0f, "%.2fx"))
+                    // Slider capped at 3.5x — above ~3x game silently soft-kicks
+                    // (session marked as speedhack, no popup, interact locks,
+                    // "cursed" state until reconnect). 3.5 = little buffer.
+                    if (ImGui::SliderFloat("Speed multiplier", &m, 1.0f, 3.5f, "%.2fx"))
                         g_speedMult.store(m);
-                    ImGui::TextDisabled("Writes SpeedData +0x10 *= mult.");
+                    ImGui::TextDisabled("Capped at 3.5x — above ~3x game silently soft-kicks you (LO 2026-08-07 observed).");
                 }
                 {
                     bool v = g_walkerFly.load();
@@ -1810,6 +1813,50 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         g_dayTime.store(t);
                 }
                 ImGui::Text("TimeOfDayManager singleton: %p", (void*)g_todInstance);
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "ANTI-CHEAT COMPONENT STRIPS (client-side — server may still validate)");
+                {
+                    bool v = g_stripAntiCheat.load();
+                    if (ImGui::Checkbox("Strip AntiCheat component from player", &v)) g_stripAntiCheat.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(idx %d)", g_idx_anticheat);
+                }
+                {
+                    bool v = g_stripSpeedCap.load();
+                    if (ImGui::Checkbox("Strip AntiCheatSpeedCapData (bypass speed cap)", &v)) g_stripSpeedCap.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(idx %d)", g_idx_anticheat_speedcap);
+                }
+                ImGui::TextDisabled("AntiCheatNoClipIgnore=%d, DontDestroyInStorm=%d (add-component primitive needed)",
+                                    g_idx_anticheat_noclip_ignore, g_idx_dont_destroy_in_storm);
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "HEAVY DUPE OPTIONS (test which one works)");
+                {
+                    bool v = g_heavyBypass.load();
+                    if (ImGui::Checkbox("HeavyFix1: strip LargeItemData on locked entity", &v)) g_heavyBypass.store(v);
+                }
+                {
+                    bool v = g_heavyFix2.load();
+                    if (ImGui::Checkbox("HeavyFix2: flip ItemTypeData to weapon (=1) on locked entity", &v)) g_heavyFix2.store(v);
+                    ImGui::TextDisabled("Both can be on simultaneously — 'HeavyFix3'.");
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "Loot ESP colors");
+                ImGui::ColorEdit4("Tier 1 color", g_lootT1Color, ImGuiColorEditFlags_NoInputs);
+                ImGui::ColorEdit4("Tier 2 color", g_lootT2Color, ImGuiColorEditFlags_NoInputs);
+                ImGui::ColorEdit4("Tier 3 color", g_lootT3Color, ImGuiColorEditFlags_NoInputs);
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "Utility");
+                if (ImGui::Button("Hoover — re-dump every entity NOW (perf_l.dat)")) {
+                    g_hooverRequest.store(true);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("Force fresh full-state snapshot.");
+                if (ImGui::Button("HARD KILL (or press F12) — instant TerminateProcess")) {
+                    g_hardKillRequested.store(true);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("Bypasses game's 7-step shutdown hell.");
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Component Indices:");
                 ImGui::Text("  FallDamageData:      %d", g_idx_fall_damage);
@@ -2254,17 +2301,17 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     borderColor = IM_COL32(255, 165, 0, 220);
                     textColor = IM_COL32(255, 200, 50, 255);
                 } else if (e.lootTier == 3) {
-                    bgColor = IM_COL32(80, 0, 80, 180);
-                    borderColor = IM_COL32(200, 50, 200, 220);
-                    textColor = IM_COL32(230, 100, 230, 255);
+                    ImU32 c = IM_COL32((int)(g_lootT3Color[0]*255), (int)(g_lootT3Color[1]*255), (int)(g_lootT3Color[2]*255), 255);
+                    bgColor = IM_COL32((int)(g_lootT3Color[0]*80), (int)(g_lootT3Color[1]*80), (int)(g_lootT3Color[2]*80), 180);
+                    borderColor = c; textColor = c;
                 } else if (e.lootTier == 2) {
-                    bgColor = IM_COL32(0, 40, 80, 180);
-                    borderColor = IM_COL32(50, 150, 255, 220);
-                    textColor = IM_COL32(100, 180, 255, 255);
+                    ImU32 c = IM_COL32((int)(g_lootT2Color[0]*255), (int)(g_lootT2Color[1]*255), (int)(g_lootT2Color[2]*255), 255);
+                    bgColor = IM_COL32((int)(g_lootT2Color[0]*80), (int)(g_lootT2Color[1]*80), (int)(g_lootT2Color[2]*80), 180);
+                    borderColor = c; textColor = c;
                 } else if (e.lootTier == 1) {
-                    bgColor = IM_COL32(40, 60, 20, 160);
-                    borderColor = IM_COL32(140, 200, 60, 200);
-                    textColor = IM_COL32(180, 230, 100, 255);
+                    ImU32 c = IM_COL32((int)(g_lootT1Color[0]*255), (int)(g_lootT1Color[1]*255), (int)(g_lootT1Color[2]*255), 255);
+                    bgColor = IM_COL32((int)(g_lootT1Color[0]*80), (int)(g_lootT1Color[1]*80), (int)(g_lootT1Color[2]*80), 160);
+                    borderColor = c; textColor = c;
                 } else {
                     bgColor = IM_COL32(40, 60, 20, 160);
                     borderColor = IM_COL32(140, 200, 60, 200);

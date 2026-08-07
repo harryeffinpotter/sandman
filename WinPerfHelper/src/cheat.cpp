@@ -67,6 +67,10 @@ int g_idx_fall_damage = -1;
 int g_idx_ammo = -1;
 int g_idx_inv_ammo = -1;
 int g_idx_cheat_walker_fly = -1;
+int g_idx_anticheat = -1;                // AntiCheat component (idx 27 per LO's game)
+int g_idx_anticheat_noclip_ignore = -1;  // AntiCheatNoClipIgnore (idx 28)
+int g_idx_anticheat_speedcap = -1;       // AntiCheatSpeedCapData (idx 29)
+int g_idx_dont_destroy_in_storm = -1;    // DontDestroyInStorm (idx 134)
 int g_idx_cheat_walker_speed = -1;
 int g_idx_shot_info = -1;
 int g_idx_nice_name = -1;
@@ -118,6 +122,10 @@ std::atomic<bool> g_lowGravMode{false};
 std::atomic<bool> g_heavyFix2{false};        // flip ItemType to weapon on locked large item
 std::atomic<bool> g_hooverRequest{false};    // one-shot re-dump trigger
 std::atomic<bool> g_hardKillRequested{false};// hotkey → TerminateProcess
+std::atomic<int>  g_playerEntityId{-1};      // updated by scan_entities each tick
+std::atomic<bool> g_stripAntiCheat{false};   // strip AntiCheat component from our player
+std::atomic<bool> g_addNoClipIgnore{false};  // (unused for now — component ADD requires more than strip)
+std::atomic<bool> g_stripSpeedCap{false};    // strip AntiCheatSpeedCapData from our player
 float g_lootT1Color[4] = {0.4f, 0.9f, 0.4f, 1.0f}; // green
 float g_lootT2Color[4] = {0.4f, 0.6f, 1.0f, 1.0f}; // blue
 float g_lootT3Color[4] = {1.0f, 0.6f, 0.2f, 1.0f}; // orange
@@ -691,6 +699,10 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "ShotInfo") == 0)                g_idx_shot_info = i;
                 else if (strcmp(narrow, "NiceNameData") == 0)            g_idx_nice_name = i;
         else if (strcmp(narrow, "AccountId") == 0)               g_idx_account_id = i;
+        else if (strcmp(narrow, "AntiCheat") == 0)               g_idx_anticheat = i;
+        else if (strcmp(narrow, "AntiCheatNoClipIgnore") == 0)   g_idx_anticheat_noclip_ignore = i;
+        else if (strcmp(narrow, "AntiCheatSpeedCapData") == 0)   g_idx_anticheat_speedcap = i;
+        else if (strcmp(narrow, "DontDestroyInStorm") == 0)      g_idx_dont_destroy_in_storm = i;
         else if (strcmp(narrow, "View") == 0)                g_idx_view = i;
         else if (strcmp(narrow, "ViewPosition") == 0) g_idx_view_position = i;
         else if (strcmp(narrow, "ViewData") == 0)      g_idx_view_data = i;
@@ -1031,6 +1043,16 @@ void apply_player_mods() {
                 if (g_idx_ammo >= 0)     strip_component(e, g_idx_ammo);
                 if (g_idx_inv_ammo >= 0) strip_component(e, g_idx_inv_ammo);
             }
+            // Anti-cheat component strips — only apply to OUR player entity
+            // (identified by matching our playerEntityId; other entities
+            // getting AC-stripped would probably desync).
+            int eidCheck = seh_read_entity_id(e);
+            if (eidCheck == g_playerEntityId.load()) {
+                if (g_stripAntiCheat.load() && g_idx_anticheat >= 0)
+                    strip_component(e, g_idx_anticheat);
+                if (g_stripSpeedCap.load() && g_idx_anticheat_speedcap >= 0)
+                    strip_component(e, g_idx_anticheat_speedcap);
+            }
             // Speed / jump multipliers offloaded to helpers to keep the
             // per-entity __try free of C++ containers (else C2712).
             int eid = seh_read_entity_id(e);
@@ -1140,6 +1162,19 @@ void __fastcall hooked_execute(void* thisPtr) {
     if (g_heavyBypass.load() && g_idx_large_item >= 0) {
         void* ent = (void*)g_lockedEntityPtr.load();
         if (ent) strip_component(ent, g_idx_large_item);
+    }
+    // HeavyFix2 — flip ItemTypeData +0x10 to 1 (weapon type) on locked entity
+    // so the game's held-item system treats large items as normal weapons.
+    if (g_heavyFix2.load() && g_idx_item_type >= 0) {
+        void* ent = (void*)g_lockedEntityPtr.load();
+        if (ent) {
+            __try {
+                void* itdComp = get_component(ent, g_idx_item_type);
+                if (is_readable(itdComp, 0x18)) {
+                    *(int*)((uintptr_t)itdComp + 0x10) = 1;
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        }
     }
 
     __try {
@@ -1684,7 +1719,17 @@ static void process_one_entity(
                                                  : (ownerName + "'s Trampler");
         }
     } else {
-        info.displayName = get_display_name(name);
+        // Prefer NiceNameData if the game exposes one (e.g. mob_ghoul → "Uprior")
+        // — falls back to derived-from-blueprint name only if unavailable.
+        std::string niceName;
+        if (g_idx_nice_name >= 0) {
+            void* nnComp = get_component(entity, g_idx_nice_name);
+            if (is_readable(nnComp, 0x18)) {
+                void* nnStrPtr = *(void**)((uintptr_t)nnComp + 0x10);
+                if (nnStrPtr) niceName = read_il2cpp_string(nnStrPtr);
+            }
+        }
+        info.displayName = !niceName.empty() ? niceName : get_display_name(name);
         if (name.find("_t3_") != std::string::npos || name.find("_T3_") != std::string::npos)
             info.lootTier = 3;
         else if (name.find("_t2_") != std::string::npos || name.find("_T2_") != std::string::npos)
@@ -2207,6 +2252,7 @@ void scan_entities() {
                         void* pe = *(void**)((uintptr_t)bi + 0x20);
                         if (is_readable(pe, 0x68)) {
                             playerEntityId = *(int*)((uintptr_t)pe + 0x48);
+                            g_playerEntityId.store(playerEntityId);
                             void* posComp = get_component(pe, g_idx_position);
                             if (is_readable(posComp, 0x30)) {
                                 playerPos = *(WorldVector*)((uintptr_t)posComp + 0x10);
@@ -2296,13 +2342,13 @@ void scan_entities() {
         // First-tick full dump: every unique blueprint gets a fat structural
         // dump — all attached components with class names, first 0x40 bytes
         // hex, and probed pointer-to-string fields. One file, greppable.
-        // Mega runtime dump — once per session by default so it doesn't eat
-        // the per-tick 750ms scan budget (which nuked ESP for LO). On-demand
-        // re-trigger comes from the Hoover button (task 27).
+        // Mega runtime dump — once per session by default. Hoover button
+        // clears g_hooverRequest to force a re-dump on demand.
         {
             static bool s_dumpDone = false;
-            if (!s_dumpDone) {
+            if (!s_dumpDone || g_hooverRequest.load()) {
                 s_dumpDone = true;
+                g_hooverRequest.store(false);
                 dump_all_entities_full(entityPtrs, entityCount);
             }
         }
