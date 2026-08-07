@@ -1,169 +1,132 @@
 #requires -Version 5.0
-# run.ps1 — one-shot launcher for the KWARE-style external overlay.
+# run.ps1 — one-shot launcher. Order-corrected:
+#   1. Elevate self
+#   2. (opt) rebuild
+#   3. Launch Sand_BE.exe if not running
+#   4. Wait for sand.exe (the real game process, spawned by BE splash)
+#   5. Small grace period
+#   6. THEN run RTSSDriverSvc.exe — driver install + (optional) DLL inject
+#   7. If -External, also launch PerfMonSvc.exe
 #
-# Does the full sequence:
-#   1. Elevate self if not admin (launcher needs it, external doesn't)
-#   2. Run RTSSDriverSvc.exe --no-inject to install the kernel driver
-#      (skipped if we can already reach the driver's heartbeat — rerunning
-#      the launcher when driver is already up is safe but wastes seconds)
-#   3. Wait for sand.exe to be running (with timeout)
-#   4. Launch PerfMonSvc.exe (external overlay) as normal user
-#
-# Usage:
-#   .\run.ps1                    # full DLL mode — installs driver + injects RTSSHelper64.dll
-#   .\run.ps1 -External          # KWARE mode — driver install only + external overlay
-#   .\run.ps1 -SkipLauncher      # driver already up, skip the install pass
-#   .\run.ps1 -SkipGame          # game already running / launch it yourself
-#   .\run.ps1 -NoWait            # don't wait for sand.exe
-#   .\run.ps1 -Rebuild           # build_all.ps1 first, then run
+# The previous version ran the launcher BEFORE the wait, which meant the
+# injection picker opened before sand.exe existed and injection silently
+# failed to find its target.
 
 param(
     [switch]$SkipLauncher,
-    [switch]$NoWait,
     [switch]$Rebuild,
-    [switch]$External,        # external-only mode (--no-inject + PerfMonSvc)
-    [switch]$SkipGame,        # don't auto-launch game
-    [int]$WaitSeconds = 90
+    [switch]$External,
+    [switch]$SkipGame,
+    [int]$WaitSeconds = 180
 )
 
 $ErrorActionPreference = "Stop"
 
 $root         = $PSScriptRoot
 $launcherExe  = Join-Path $root "launcher\RTSSDriverSvc.exe"
-if (-not (Test-Path $launcherExe)) {
-    # legacy fallback for old checkouts
-    $launcherExe = Join-Path $root "launcher\RTSSDriverSvc.exe"
-}
-$externalExe  = Join-Path $root "external\PerfMonSvc.exe"
-$externalDev  = Join-Path $root "external\PerfMonSvc.exe"
+$overlayPath  = Join-Path $root "external\PerfMonSvc.exe"
+$gameExe      = "C:\Program Files (x86)\Steam\steamapps\common\Sand\Sand_BE.exe"
 
-# BattlEye launcher — this is the exe Steam runs; it spawns sand.exe.
-$gameExe = "C:\Program Files (x86)\Steam\steamapps\common\Sand\Sand_BE.exe"
+function Say($msg, $color = "Cyan") { Write-Host "[run] $msg" -ForegroundColor $color }
+function Fail($msg) { Write-Host "[run] FATAL: $msg" -ForegroundColor Red; Read-Host "press enter"; exit 1 }
 
-function Say($msg, $color = "Cyan") {
-    Write-Host "[run] $msg" -ForegroundColor $color
-}
-
-function Fail($msg) {
-    Write-Host "[run] FATAL: $msg" -ForegroundColor Red
-    exit 1
-}
-
-# --- Rebuild ---
+# --- rebuild ---
 if ($Rebuild) {
-    Say "Rebuilding all targets..."
-    $buildScript = Join-Path $root "build_all.ps1"
-    if (-not (Test-Path $buildScript)) { Fail "build_all.ps1 not found at $buildScript" }
-    & $buildScript
-    if ($LASTEXITCODE -ne 0) { Fail "build_all.ps1 exited with $LASTEXITCODE" }
+    Say "rebuild..."
+    & (Join-Path $root "build_all.ps1")
+    if ($LASTEXITCODE -ne 0) { Fail "rebuild failed" }
 }
 
-# --- Sanity ---
-if (-not (Test-Path $launcherExe)) { Fail "RTSSDriverSvc.exe not found. Run with -Rebuild first." }
-if (-not (Test-Path $externalExe) -and -not (Test-Path $externalDev)) {
-    Fail "PerfMonSvc.exe (and PerfMonSvc.exe) not found in external\. Run with -Rebuild first."
-}
-$overlayPath = if (Test-Path $externalExe) { $externalExe } else { $externalDev }
+if (-not (Test-Path $launcherExe)) { Fail "launcher exe not found: $launcherExe" }
+if (-not (Test-Path $overlayPath) -and $External) { Fail "overlay not found: $overlayPath" }
 
-# --- Admin elevation for launcher stage ---
+# --- elevation ---
 function Test-IsAdmin {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($current)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    (New-Object Security.Principal.WindowsPrincipal($current)).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+if (-not (Test-IsAdmin)) {
+    Say "elevating..." "Yellow"
+    $argsForChild = @()
+    if ($Rebuild)      { $argsForChild += "-Rebuild" }
+    if ($SkipLauncher) { $argsForChild += "-SkipLauncher" }
+    if ($External)     { $argsForChild += "-External" }
+    if ($SkipGame)     { $argsForChild += "-SkipGame" }
+    $argsForChild += @("-WaitSeconds", $WaitSeconds.ToString())
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "powershell.exe"
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" " + ($argsForChild -join " ")
+    $psi.Verb = "runas"
+    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    exit 0
 }
 
-# --- Driver install stage ---
-if (-not $SkipLauncher) {
-    if (-not (Test-IsAdmin)) {
-        Say "Not elevated — relaunching this script as admin..." "Yellow"
-        # Rebuild the argument list so the elevated child gets the same flags
-        # minus this admin bounce.
-        $argsForChild = @()
-        if ($NoWait)      { $argsForChild += "-NoWait" }
-        if ($Rebuild)     { $argsForChild += "-Rebuild" }
-        if ($SkipLauncher){ $argsForChild += "-SkipLauncher" }
-        if ($External)    { $argsForChild += "-External" }
-        if ($SkipGame)    { $argsForChild += "-SkipGame" }
-        $argsForChild += @("-WaitSeconds", $WaitSeconds.ToString())
-        $scriptPath = $MyInvocation.MyCommand.Path
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "powershell.exe"
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" " + ($argsForChild -join " ")
-        $psi.Verb = "runas"
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
-        exit 0
-    }
+# --- game auto-launch ---
+function Get-SandProc { Get-Process -Name "sand" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+function Get-BeProc   { Get-Process -Name "Sand_BE" -ErrorAction SilentlyContinue | Select-Object -First 1 }
 
+if (-not $SkipGame -and -not (Get-SandProc) -and -not (Get-BeProc)) {
+    if (Test-Path $gameExe) {
+        Say "starting Sand_BE.exe..."
+        Start-Process -FilePath $gameExe
+    } else {
+        Say "game not found at $gameExe — start it yourself." "Yellow"
+    }
+}
+
+# --- WAIT for sand.exe (must exist BEFORE launcher runs, so injection has a target) ---
+Say "waiting up to $WaitSeconds s for sand.exe to appear (past BE splash)..."
+$deadline = (Get-Date).AddSeconds($WaitSeconds)
+$lastReport = 0
+$found = $false
+while ((Get-Date) -lt $deadline) {
+    if (Get-SandProc) { $found = $true; break }
+    $secsLeft = [int]($deadline - (Get-Date)).TotalSeconds
+    if (($WaitSeconds - $secsLeft) - $lastReport -ge 10) {
+        $lastReport = $WaitSeconds - $secsLeft
+        $be = Get-BeProc
+        $beStatus = if ($be) { "Sand_BE.exe still up (BE splash)" } else { "no game process yet" }
+        Say ("waiting... {0}s elapsed, {1}s left, {2}" -f $lastReport, $secsLeft, $beStatus)
+    }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $found) {
+    Fail "sand.exe never appeared. Get past BE's splash screen first, then re-run with -SkipGame."
+}
+Say "sand.exe is up." "Green"
+
+# Grace period so BE's initial-scan window passes before we touch the process.
+Say "5s grace before attaching..."
+Start-Sleep -Seconds 5
+
+# --- NOW run the launcher ---
+if (-not $SkipLauncher) {
     if ($External) {
-        Say "Running launcher (external mode: driver install only, no DLL injection)..."
+        Say "launcher (external mode — driver install only)..." "Cyan"
         $lp = Start-Process -FilePath $launcherExe -ArgumentList "--no-inject" -Wait -PassThru -NoNewWindow
     } else {
-        Say "Running launcher (full DLL mode)..."
+        Say "launcher (FULL DLL — will pop injection picker; click Inject)..." "Cyan"
         $lp = Start-Process -FilePath $launcherExe -Wait -PassThru -NoNewWindow
     }
     if ($lp.ExitCode -ne 0) {
-        Say "launcher returned exit $($lp.ExitCode) — driver may already be loaded, continuing." "Yellow"
+        Say "launcher exit $($lp.ExitCode) — driver may already be loaded, continuing." "Yellow"
     } else {
         Say "launcher OK." "Green"
     }
 } else {
-    Say "Skipping launcher (assuming driver already loaded)."
+    Say "skipping launcher."
 }
 
-# --- Auto-launch game if not running ---
-function Get-GameProc {
-    Get-Process -Name "sand","Sand_BE" -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-}
-
-if (-not $SkipGame -and -not (Get-GameProc)) {
-    if (Test-Path $gameExe) {
-        Say "Launching game: $gameExe"
-        # Start-Process is fine here — Sand_BE.exe respawns sand.exe under BE.
-        Start-Process -FilePath $gameExe
-    } else {
-        Say "Game exe not found at $gameExe — start it manually." "Yellow"
-    }
-}
-
-# --- Wait for sand.exe (or Sand_BE.exe as intermediate) ---
-if (-not $NoWait) {
-    Say "Waiting up to $WaitSeconds s for sand.exe..."
-    $deadline = (Get-Date).AddSeconds($WaitSeconds)
-    $found = $false
-    while ((Get-Date) -lt $deadline) {
-        # Prefer the un-BE-wrapped sand.exe once BE has spawned it. If
-        # only Sand_BE.exe is present, keep waiting — sand.exe is what
-        # we actually attach to.
-        if (Get-Process -Name "sand" -ErrorAction SilentlyContinue) {
-            $found = $true
-            break
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    if (-not $found) {
-        Say "sand.exe never appeared. Get past BE's launch screen, then re-run with -SkipLauncher -SkipGame." "Yellow"
-        exit 2
-    }
-    Say "sand.exe is running." "Green"
-
-    # Small grace period so BE's initial-scan window can pass before we attach.
-    Say "Giving 5 s grace before attaching..."
-    Start-Sleep -Seconds 5
-}
-
-# --- Launch overlay (external mode only) ---
+# --- external overlay if requested ---
 if ($External) {
-    Say "Launching external overlay: $overlayPath"
-    if (Test-IsAdmin) {
-        # We were elevated for launcher — spawn overlay via explorer so it
-        # drops back to the normal user token.
-        Start-Process -FilePath "explorer.exe" -ArgumentList "`"$overlayPath`""
-    } else {
-        Start-Process -FilePath $overlayPath
-    }
-    Say "Done. External hotkeys: INSERT = click-through toggle, HOME = menu toggle." "Green"
+    Say "launching overlay: $overlayPath"
+    Start-Process -FilePath "explorer.exe" -ArgumentList "`"$overlayPath`""
+    Say "done. External hotkeys: INSERT = click-through, HOME = menu toggle." "Green"
 } else {
-    Say "Done. DLL is injected (or was already). In-game menu should be visible." "Green"
-    Say "Full-DLL hotkeys: INSERT = menu toggle."
+    Say "done. If injection landed, in-game DLL menu should appear. INSERT toggles it." "Green"
+    Say "if nothing shows: check %APPDATA%\Microsoft\PerfCache\perf_events.dat for the ringlog"
 }
+
+Say "keeping window open — close manually when done."
+Read-Host "press enter to exit"
