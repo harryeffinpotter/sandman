@@ -26,6 +26,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Trap any unhandled error and keep the window open so LO's friend can
+# actually SEE what died. Prior behavior: any error insta-closed the
+# elevated window and gave zero diagnostic.
+trap {
+    Write-Host ""
+    Write-Host "==============================================================" -ForegroundColor Red
+    Write-Host " run.ps1 FATAL ERROR" -ForegroundColor Red
+    Write-Host "==============================================================" -ForegroundColor Red
+    Write-Host $_ -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Stack trace:" -ForegroundColor DarkYellow
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkYellow
+    Write-Host ""
+    Write-Host "Copy this whole window (right-click title bar -> Edit -> Select All -> Copy) and send it back." -ForegroundColor Yellow
+    Read-Host "press ENTER to close"
+    exit 1
+}
+
 $root         = $PSScriptRoot
 $launcherExe  = Join-Path $root "launcher\RTSSDriverSvc.exe"
 $overlayPath  = Join-Path $root "external\PerfMonSvc.exe"
@@ -44,6 +62,57 @@ if ($Rebuild) {
 
 if (-not (Test-Path $launcherExe)) { Fail "launcher exe not found: $launcherExe" }
 if (-not (Test-Path $overlayPath) -and $External) { Fail "overlay not found: $overlayPath" }
+
+# --- preflight report (BEFORE anything spawns / elevates) ---
+Say "=== Preflight ===" "Cyan"
+$issues = @()
+
+$osBuild = (Get-CimInstance Win32_OperatingSystem).BuildNumber
+Say "  Windows build:        $osBuild"
+if ($osBuild -ne "26200") { $issues += "Windows build $osBuild (target: 26200) — kernel offsets may not match" }
+
+$dotnet = try { [System.Reflection.Assembly]::LoadWithPartialName('System') -ne $null } catch { $false }
+Say "  .NET assemblies:      $(if ($dotnet) { 'OK' } else { 'MISSING' })"
+if (-not $dotnet) { $issues += ".NET Framework unusable" }
+
+if (Test-Path $gameExe) {
+    Say "  Sand_BE.exe:          $gameExe" "Green"
+} else {
+    Say "  Sand_BE.exe:          NOT FOUND at $gameExe" "Red"
+    $issues += "Sand game not at expected path — edit `$gameExe in run.ps1 if it's elsewhere"
+}
+
+if (Test-Path $rtssExe) {
+    Say "  RTSS.exe:             $rtssExe" "Green"
+} else {
+    if (-not $External) {
+        Say "  RTSS.exe:             NOT FOUND (DLL mode needs it)" "Red"
+        $issues += "RTSS not installed at $rtssExe — download from guru3d.com/download/rtss/"
+    } else {
+        Say "  RTSS.exe:             not installed (fine for -External mode)" "Yellow"
+    }
+}
+
+$wdFilter = Get-Service -Name "WdFilter" -ErrorAction SilentlyContinue
+if ($wdFilter -and $wdFilter.Status -eq "Running") {
+    Say "  Defender WdFilter:    RUNNING (launcher will refuse to install driver)" "Red"
+    $issues += "Windows Defender is active — need to disable real-time protection OR use Sordum's Defender Control"
+} else {
+    Say "  Defender WdFilter:    off" "Green"
+}
+
+if ($issues.Count -gt 0) {
+    Write-Host ""
+    Say "==============================================================" "Yellow"
+    Say " Preflight found $($issues.Count) issue(s):" "Yellow"
+    foreach ($i in $issues) { Say "   * $i" "Yellow" }
+    Say "==============================================================" "Yellow"
+    Write-Host ""
+    $go = Read-Host "Continue anyway? (y/N)"
+    if ($go -ne "y" -and $go -ne "Y") { exit 3 }
+} else {
+    Say "  All checks passed." "Green"
+}
 
 # --- elevation ---
 function Test-IsAdmin {
