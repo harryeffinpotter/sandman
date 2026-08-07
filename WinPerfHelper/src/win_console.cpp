@@ -1,4 +1,4 @@
-// cl /EHsc /O2 /LD cheat.cpp /Fe:cheat.dll /link user32.lib
+// cl /EHsc /O2 /LD win.cpp /Fe:win.dll /link user32.lib
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "pe_resolve.h"

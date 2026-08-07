@@ -12,7 +12,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\cheat.cpp">
+    <ClCompile Include="src\win.cpp">
       <Filter>Source Files\Cheat</Filter>
     </ClCompile>
     <ClCompile Include="src\overlay.cpp">
@@ -41,7 +41,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\cheat.h">
+    <ClInclude Include="src\win.h">
       <Filter>Source Files\Cheat</Filter>
     </ClInclude>
     <ClInclude Include="src\overlay.h">

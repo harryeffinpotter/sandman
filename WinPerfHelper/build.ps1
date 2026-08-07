@@ -7,7 +7,7 @@ $env:INCLUDE = "$vsPath\include;$sdkInc\ucrt;$sdkInc\um;$sdkInc\shared;$PWD\src;
 $env:LIB = "$vsPath\lib\x64;$sdkLib\ucrt\x64;$sdkLib\um\x64"
 
 $sources = @(
-    "src\cheat.cpp"
+    "src\win.cpp"
     "src\overlay.cpp"
     "src\main.cpp"
     "src\pe_resolve.cpp"

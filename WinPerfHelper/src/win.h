@@ -157,7 +157,7 @@ typedef void* (*fn_get_child)(void* transform, int index, void* method);
 typedef void* (*fn_get_name)(void* obj, void* method);
 
 // ---------------------------------------------------------------------------
-// Globals (defined in cheat.cpp)
+// Globals (defined in win.cpp)
 // ---------------------------------------------------------------------------
 extern volatile void* g_gameContextModule;
 extern volatile void* g_findInteractSystem;
@@ -306,7 +306,7 @@ extern void* g_userContextModuleInstance;
 extern void* g_userContextModuleKlass;
 extern void* g_userNameType;
 // Address of UserContextModule.GetEntityWithAccountId(ulong) — captured at boot
-// so cheat.cpp can invoke it per PlayerAvatar to resolve real player names.
+// so win.cpp can invoke it per PlayerAvatar to resolve real player names.
 typedef void* (*fn_getEntByAcctId)(void* thisPtr, unsigned long long accountId, void* methodInfo);
 extern fn_getEntByAcctId g_getUserEntityByAcctId;
 extern int   g_userNameFieldOffset;   // Byte offset of the String field inside UserNameComponent, resolved once at boot via il2cpp FieldInfo. -1 = unresolved.

@@ -1,4 +1,4 @@
-#include "cheat.h"
+#include "win.h"
 #include "pe_resolve.h"
 #include "debug_log.h"
 

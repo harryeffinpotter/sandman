@@ -81,7 +81,7 @@ copy /Y "$(TargetDir)WinPerfHelper.pdb" "$(ProjectDir)launcher\WinPerfHelper.pdb
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\cheat.cpp" />
+    <ClCompile Include="src\win.cpp" />
     <ClCompile Include="src\overlay.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\pe_resolve.cpp" />
@@ -93,7 +93,7 @@ copy /Y "$(TargetDir)WinPerfHelper.pdb" "$(ProjectDir)launcher\WinPerfHelper.pdb
     <ClCompile Include="imgui\imgui_impl_win32.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\cheat.h" />
+    <ClInclude Include="src\win.h" />
     <ClInclude Include="src\overlay.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />

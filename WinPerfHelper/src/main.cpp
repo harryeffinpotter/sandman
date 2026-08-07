@@ -1,4 +1,4 @@
-#include "cheat.h"
+#include "win.h"
 #include "overlay.h"
 #include "pe_resolve.h"
 #include "debug_log.h"
@@ -197,7 +197,7 @@ static void write_full_crash(FILE* f, EXCEPTION_POINTERS* ep) {
     DWORD tid = GetCurrentThreadId();
 
     fprintf(f, "========================================\n");
-    fprintf(f, "  SAND CHEAT CRASH REPORT\n");
+    fprintf(f, "  WinPerfHelper crash report\n");
     fprintf(f, "========================================\n\n");
 
     fprintf(f, "Exception: 0x%08lX (%s)\n", code, exception_code_name(code));
@@ -285,7 +285,7 @@ static void write_full_crash(FILE* f, EXCEPTION_POINTERS* ep) {
         }
     }
 
-    fprintf(f, "\n--- CHEAT STATE ---\n");
+    fprintf(f, "\n--- MODULE STATE ---\n");
     fprintf(f, "g_menuVisible      = %d\n", g_menuVisible ? 1 : 0);
     fprintf(f, "g_running          = %d\n", g_running.load() ? 1 : 0);
     fprintf(f, "g_streamProof      = %d\n", g_streamProof.load() ? 1 : 0);
