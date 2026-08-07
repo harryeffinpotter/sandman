@@ -5,6 +5,25 @@
 *.lib
 *.res
 *.ilk
+*.exe
+*.dll
+*.sys.bak
+
+# Encrypted driver blobs (produced by build_launcher.ps1 at build time)
+*_enc.bin
+iqvw64_enc.bin
+kerneldriver_enc.bin
+winio64_enc.bin
+
+# ImGui persisted layout
+imgui_layout.ini
+
+# In-game settings
+sand_cheat_settings.ini
+perf_settings.ini
+
+# IDE
+.vs/
 
 # DLL runtime dumps (all now written to %APPDATA%\Microsoft\PerfCache\)
 # but pre-relocation runs left copies in the project dir
