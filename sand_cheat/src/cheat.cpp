@@ -121,6 +121,8 @@ std::atomic<bool> g_running{true};
 
 WorldVector g_playerPos = {};
 void* g_userNameKlass = nullptr;
+void* g_userNameHUDKlass = nullptr;
+void* g_userNameHUDType  = nullptr;
 void* g_userContextModuleInstance = nullptr;
 void* g_userContextModuleKlass = nullptr;
 int   g_userNameFieldOffset = -1;
@@ -2585,7 +2587,10 @@ static bool seh_resolve_transform_pos(void* entity, Vec3* out) {
 }
 
 static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
-    if (!g_userNameType || !g_getComponentInChildren || g_idx_view < 0) return false;
+    if (!g_getComponentInChildren || g_idx_view < 0) return false;
+    // Try HUD type first (real MonoBehaviour findable via GCiC), then ECS
+    // type as fallback.
+    void* tryTypes[2] = { g_userNameHUDType, g_userNameType };
     __try {
         void* viewComp = get_component(entity, g_idx_view);
         if (is_readable(viewComp, 0x18)) {
@@ -2599,7 +2604,12 @@ static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
                     g_workerVehActive = true;
                     return false;
                 }
-                void* userNameComp = g_getComponentInChildren(viewBehaviour, g_userNameType, nullptr);
+                void* userNameComp = nullptr;
+                for (int t = 0; t < 2; t++) {
+                    if (!tryTypes[t]) continue;
+                    userNameComp = g_getComponentInChildren(viewBehaviour, tryTypes[t], nullptr);
+                    if (userNameComp) break;
+                }
                 g_vehInnerActive = false;
                 if (is_readable(userNameComp, 0x20)) {
                     for (int off = 0x10; off <= 0x20; off += 0x8) {

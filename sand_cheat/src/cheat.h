@@ -292,6 +292,8 @@ extern float g_espLootT3Dist;
 extern uintptr_t g_gaBase;
 extern uintptr_t g_gaSize;
 extern void* g_userNameKlass;
+extern void* g_userNameHUDKlass;   // HUD-side MonoBehaviour type for GCiC
+extern void* g_userNameHUDType;    // il2cpp_type_get_object of ^
 extern void* g_userContextModuleInstance;
 extern void* g_userContextModuleKlass;
 extern void* g_userNameType;

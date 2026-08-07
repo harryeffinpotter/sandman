@@ -912,6 +912,42 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 }
             }
             g_userNameKlass = bestKlass;
+
+            // Second pass: also grab the HUD-side class (UserNamesHUDUpdateSystem
+            // etc. — anything with UserName in name, most-fields-wins). This
+            // becomes the type we hand to Component.GetComponentInChildren in
+            // seh_resolve_username since the ECS class isn't a MonoBehaviour
+            // and GCiC returns null for it.
+            int bestHudFields = -1;
+            void* bestHudKlass = nullptr;
+            for (size_t i = 0; i < asmCount3; i++) {
+                void* img = api.il2cpp_assembly_get_image(assemblies3[i]);
+                if (!img) continue;
+                size_t classCount = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < classCount; j++) {
+                    void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
+                    const char* cn = api.il2cpp_class_get_name(klass);
+                    if (!cn || !strstr(cn, "UserName")) continue;
+                    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                    // Exclude the ECS component we already picked
+                    if (ns && strstr(ns, "HoloNet") && strstr(ns, "Users") && strstr(ns, "Components")) continue;
+                    int fc = 0;
+                    if (api.il2cpp_class_get_fields) {
+                        void* iter = nullptr;
+                        while (api.il2cpp_class_get_fields(klass, &iter)) fc++;
+                    }
+                    if (fc > bestHudFields) {
+                        bestHudFields = fc;
+                        bestHudKlass = klass;
+                    }
+                }
+            }
+            g_userNameHUDKlass = bestHudKlass;
+            if (bestHudKlass) {
+                wlog("[worker] UserName HUD klass = %p (fields=%d)\n",
+                     bestHudKlass, bestHudFields);
+            }
             if (uf) {
                 fprintf(uf, "\n# CHOSEN: klass=%p %s\n", bestKlass, bestSummary);
                 // Walk the parent chain and dump inherited fields — a 0-field
@@ -1379,6 +1415,13 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 g_userNameType = api.il2cpp_type_get_object(userNameIl2cppType);
             }
             wlog("[worker] UserNameComponent Type object=%p\n", g_userNameType);
+        }
+        if (g_userNameHUDKlass && api.il2cpp_class_get_type && api.il2cpp_type_get_object) {
+            void* hudIl2cppType = api.il2cpp_class_get_type(g_userNameHUDKlass);
+            if (hudIl2cppType) {
+                g_userNameHUDType = api.il2cpp_type_get_object(hudIl2cppType);
+            }
+            wlog("[worker] UserName HUD Type object=%p\n", g_userNameHUDType);
         }
         if (g_userNameKlass && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
             FILE* ff = nullptr;
