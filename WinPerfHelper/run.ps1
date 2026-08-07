@@ -17,7 +17,9 @@ param(
     [switch]$Rebuild,
     [switch]$External,
     [switch]$SkipGame,
-    [int]$WaitSeconds = 180
+    [switch]$Auto,          # skip the "press ENTER when ready" gate — inject as soon as sand.exe appears
+    [int]$WaitSeconds = 300,
+    [int]$AutoGraceSec = 45 # only used with -Auto: extra sleep after sand.exe appears
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +55,9 @@ if (-not (Test-IsAdmin)) {
     if ($SkipLauncher) { $argsForChild += "-SkipLauncher" }
     if ($External)     { $argsForChild += "-External" }
     if ($SkipGame)     { $argsForChild += "-SkipGame" }
+    if ($Auto)         { $argsForChild += "-Auto" }
     $argsForChild += @("-WaitSeconds", $WaitSeconds.ToString())
+    $argsForChild += @("-AutoGraceSec", $AutoGraceSec.ToString())
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
     $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" " + ($argsForChild -join " ")
@@ -94,11 +98,30 @@ while ((Get-Date) -lt $deadline) {
 if (-not $found) {
     Fail "sand.exe never appeared. Get past BE's splash screen first, then re-run with -SkipGame."
 }
-Say "sand.exe is up." "Green"
+Say "sand.exe process is up (BUT the game itself may still be loading)." "Green"
 
-# Grace period so BE's initial-scan window passes before we touch the process.
-Say "5s grace before attaching..."
-Start-Sleep -Seconds 5
+if ($Auto) {
+    # Automated grace: blindly wait a longish period so login screen / main
+    # menu is fully done. Tune -AutoGraceSec if this is too long or short.
+    Say "auto mode: sleeping ${AutoGraceSec}s so login screen / main menu finishes..." "Yellow"
+    for ($i = $AutoGraceSec; $i -gt 0; $i--) {
+        Write-Host -NoNewline "`r  T-minus $i s   "
+        Start-Sleep -Seconds 1
+    }
+    Write-Host ""
+} else {
+    # Manual gate — LO confirms game is at a stable point (main menu / spawned in)
+    Write-Host ""
+    Say "==============================================================" "Yellow"
+    Say " GAME IS LOADING — do NOT inject too early." "Yellow"
+    Say " Wait until you are actually IN-GAME (main menu is fine,"     "Yellow"
+    Say " character select is fine, or in a match)."                    "Yellow"
+    Say ""                                                              "Yellow"
+    Say " Then come back here and press ENTER to inject."               "Yellow"
+    Say " (Or Ctrl+C to abort. Use -Auto flag to skip this gate.)"     "Yellow"
+    Say "==============================================================" "Yellow"
+    Read-Host "press ENTER when the game is fully loaded and ready"
+}
 
 # --- NOW run the launcher ---
 if (-not $SkipLauncher) {
