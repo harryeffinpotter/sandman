@@ -51,7 +51,14 @@ $gameExe      = "C:\Program Files (x86)\Steam\steamapps\common\Sand\Sand_BE.exe"
 $rtssExe      = "C:\Program Files (x86)\RivaTuner Statistics Server\RTSS.exe"
 
 function Say($msg, $color = "Cyan") { Write-Host "[run] $msg" -ForegroundColor $color }
-function Fail($msg) { Write-Host "[run] FATAL: $msg" -ForegroundColor Red; Read-Host "press enter"; exit 1 }
+function Fail($msg) {
+    Write-Host ""
+    Write-Host "==============================================================" -ForegroundColor Red
+    Write-Host " [run] FATAL: $msg" -ForegroundColor Red
+    Write-Host "==============================================================" -ForegroundColor Red
+    Read-Host "press ENTER to close (screenshot this window first)"
+    exit 1
+}
 
 # --- rebuild ---
 if ($Rebuild) {
@@ -108,8 +115,12 @@ if ($issues.Count -gt 0) {
     foreach ($i in $issues) { Say "   * $i" "Yellow" }
     Say "==============================================================" "Yellow"
     Write-Host ""
-    $go = Read-Host "Continue anyway? (y/N)"
-    if ($go -ne "y" -and $go -ne "Y") { exit 3 }
+    $go = Read-Host "Continue anyway? (y = try, anything else = quit)"
+    if ($go -ne "y" -and $go -ne "Y") {
+        Say "aborted at preflight." "Yellow"
+        Read-Host "press ENTER to close"
+        exit 3
+    }
 } else {
     Say "  All checks passed." "Green"
 }
