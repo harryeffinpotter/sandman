@@ -1159,9 +1159,28 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         bool s_f1_now = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
         if (s_f1_now && !s_f1_prev) {
             g_menuVisible = true;
-            if (g_overlayImguiInit) g_streamProofSwapRequest.store(2);
-            g_forceWindowed.store(false);   // panic-off if it went rogue
-            if (g_gameHwnd) SetForegroundWindow(g_gameHwnd);
+            g_forceWindowed.store(false);
+            // SYNCHRONOUS stream-proof teardown — we're already on the render
+            // thread inside Present. Deferring via g_streamProofSwapRequest
+            // caused a race where the swap chain state was inconsistent for
+            // 1+ frames and the overlay window kept its last-drawn frame
+            // stuck on screen.
+            if (g_overlayImguiInit) {
+                ImGui_ImplDX11_Shutdown();
+                if (g_pd3dDevice && g_pd3dDeviceContext) {
+                    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+                }
+                g_overlayImguiInit = false;
+                destroy_stream_proof_overlay();
+                g_streamProof.store(false);
+                g_streamProofSwapRequest.store(0);   // cancel any pending req
+                dbglog("[F1] stream-proof torn down synchronously\n");
+            }
+            if (g_gameHwnd) {
+                // Bring game to front so its window pumps messages again
+                ShowWindow(g_gameHwnd, SW_SHOW);
+                SetForegroundWindow(g_gameHwnd);
+            }
             dbglog("[F1] emergency reset — menu on, stream-proof off, force-windowed off\n");
         }
         s_f1_prev = s_f1_now;
