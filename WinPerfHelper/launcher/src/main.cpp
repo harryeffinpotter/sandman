@@ -896,7 +896,7 @@ int main(int argc, char* argv[]) {
             DWORD tlen = GetTempPathA(MAX_PATH, temp_dir);
             if (tlen > 0 && tlen < MAX_PATH) {
                 char cfg_path[MAX_PATH];
-                int wn = std::snprintf(cfg_path, MAX_PATH, "%ssand_perf_dir.txt", temp_dir);
+                int wn = std::snprintf(cfg_path, MAX_PATH, "%sperfmon_dir.txt", temp_dir);
                 if (wn > 0 && wn < MAX_PATH) {
                     HANDLE f = CreateFileA(cfg_path, GENERIC_WRITE, 0, nullptr,
                                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

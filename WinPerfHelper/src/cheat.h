@@ -198,8 +198,8 @@ extern int g_idx_mob_vb;
 extern int g_idx_simple_anim_vb;
 extern int g_idx_mob_state;
 extern int g_idx_mob_ghoul;
-extern int g_idx_mob_living_sand;
-extern int g_idx_mob_living_sand_jr;
+extern int g_idx_mob_ls;
+extern int g_idx_mob_ls_jr;
 extern int g_idx_ai_agent;
 
 extern std::vector<ItemInfo> g_items;

@@ -80,8 +80,8 @@ int g_idx_mob_vb = -1;
 int g_idx_simple_anim_vb = -1;
 int g_idx_mob_state = -1;
 int g_idx_mob_ghoul = -1;
-int g_idx_mob_living_sand = -1;
-int g_idx_mob_living_sand_jr = -1;
+int g_idx_mob_ls = -1;
+int g_idx_mob_ls_jr = -1;
 int g_idx_ai_agent = -1;
 int g_idx_user_name = -1;
 
@@ -691,8 +691,8 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "SimpleAnimatorViewBehaviour") == 0) g_idx_simple_anim_vb = i;
         else if (strcmp(narrow, "MobState") == 0)             g_idx_mob_state = i;
         else if (strcmp(narrow, "MobGhoulData") == 0)         g_idx_mob_ghoul = i;
-        else if (strcmp(narrow, "MobLivingSandData") == 0)    g_idx_mob_living_sand = i;
-        else if (strcmp(narrow, "MobLivingSandJrData") == 0)  g_idx_mob_living_sand_jr = i;
+        else if (strcmp(narrow, "MobLivingSandData") == 0)    g_idx_mob_ls = i;
+        else if (strcmp(narrow, "MobLivingSandJrData") == 0)  g_idx_mob_ls_jr = i;
         else if (strcmp(narrow, "UserNameComponent") == 0)    g_idx_user_name = i;
         else if (strcmp(narrow, "AiAgentData") == 0)          g_idx_ai_agent = i;
     }

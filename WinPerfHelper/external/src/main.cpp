@@ -159,9 +159,9 @@ static bool ext_bootstrap(state::GameCtx& ctx) {
     ext_log("[boot] GameAssembly.dll base=%llx size=0x%x\n",
             (unsigned long long)ctx.game_assembly_base, ctx.game_assembly_size);
 
-    cmdchannel::find_module(ctx.pid, L"sand.exe", &ctx.sand_exe_base, &ctx.sand_exe_size);
+    cmdchannel::find_module(ctx.pid, L"sand.exe", &ctx.game_exe_base, &ctx.game_exe_size);
     ext_log("[boot] sand.exe base=%llx size=0x%x\n",
-            (unsigned long long)ctx.sand_exe_base, ctx.sand_exe_size);
+            (unsigned long long)ctx.game_exe_base, ctx.game_exe_size);
 
     return true;
 }

@@ -12,8 +12,8 @@ struct GameCtx {
     uint32_t pid                 = 0;
     uint64_t game_assembly_base  = 0;
     uint32_t game_assembly_size  = 0;
-    uint64_t sand_exe_base       = 0;
-    uint32_t sand_exe_size       = 0;
+    uint64_t game_exe_base       = 0;
+    uint32_t game_exe_size       = 0;
 
     // Bootstrap-time known singletons. Populated by discovery, or by
     // reading from a shared file the DLL emits (transition phase).

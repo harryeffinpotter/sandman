@@ -59,7 +59,7 @@ void draw_overview() {
     ImGui::Text("GameAssembly.dll base: 0x%llX  size 0x%X",
                 (unsigned long long)g.game_assembly_base, g.game_assembly_size);
     ImGui::Text("sand.exe base:         0x%llX  size 0x%X",
-                (unsigned long long)g.sand_exe_base, g.sand_exe_size);
+                (unsigned long long)g.game_exe_base, g.game_exe_size);
     if (g.game_context_module) {
         ImGui::Text("GameContextModule:     0x%llX", (unsigned long long)g.game_context_module);
     } else {
