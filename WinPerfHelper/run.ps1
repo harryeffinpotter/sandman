@@ -28,6 +28,7 @@ $root         = $PSScriptRoot
 $launcherExe  = Join-Path $root "launcher\RTSSDriverSvc.exe"
 $overlayPath  = Join-Path $root "external\PerfMonSvc.exe"
 $gameExe      = "C:\Program Files (x86)\Steam\steamapps\common\Sand\Sand_BE.exe"
+$rtssExe      = "C:\Program Files (x86)\RivaTuner Statistics Server\RTSS.exe"
 
 function Say($msg, $color = "Cyan") { Write-Host "[run] $msg" -ForegroundColor $color }
 function Fail($msg) { Write-Host "[run] FATAL: $msg" -ForegroundColor Red; Read-Host "press enter"; exit 1 }
@@ -64,6 +65,34 @@ if (-not (Test-IsAdmin)) {
     $psi.Verb = "runas"
     [System.Diagnostics.Process]::Start($psi) | Out-Null
     exit 0
+}
+
+# --- RTSS check (injection vector — MUST be running before game starts) ---
+function Get-RtssProc { Get-Process -Name "RTSS" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+
+if (-not $External) {
+    # RTSS only needed for DLL-mode injection. External mode bypasses it.
+    if (-not (Get-RtssProc)) {
+        if (Test-Path $rtssExe) {
+            Say "RTSS not running — starting it..." "Yellow"
+            Start-Process -FilePath $rtssExe
+            Start-Sleep -Seconds 3
+            if (-not (Get-RtssProc)) {
+                Fail "Started RTSS.exe but it didn't stay running. Launch it manually first."
+            }
+        } else {
+            Fail @"
+RTSS is NOT installed at $rtssExe.
+DLL injection requires RTSS (Rivatuner Statistics Server) as the vector.
+Install it from: https://www.guru3d.com/download/rtss-rivatuner-statistics-server-download/
+After install: run RTSS, add sand.exe to Application Detection with Level = HIGH.
+Then re-run this script.
+Alternatively: use -External mode which doesn't need RTSS.
+"@
+        }
+    }
+    Say "RTSS is running." "Green"
+    Say "Reminder: sand.exe must be in RTSS's App Detection with Level=HIGH." "Yellow"
 }
 
 # --- game auto-launch ---
