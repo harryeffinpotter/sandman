@@ -98,7 +98,9 @@ while ((Get-Date) -lt $deadline) {
 if (-not $found) {
     Fail "sand.exe never appeared. Get past BE's splash screen first, then re-run with -SkipGame."
 }
-Say "sand.exe process is up (BUT the game itself may still be loading)." "Green"
+$sandProc = Get-SandProc
+Say "sand.exe process detected. PID=$($sandProc.Id) StartTime=$($sandProc.StartTime)" "Green"
+Say "(BUT the game itself may still be loading — WAIT.)" "Yellow"
 
 if ($Auto) {
     # Automated grace: blindly wait a longish period so login screen / main
@@ -122,6 +124,31 @@ if ($Auto) {
     Say "==============================================================" "Yellow"
     Read-Host "press ENTER when the game is fully loaded and ready"
 }
+
+# Re-verify sand.exe survived — BE sometimes kills the splash sand.exe
+# and respawns a NEW one for actual gameplay. If we injected against
+# the dead PID, it silently failed. Poll for a healthy sand.exe.
+Say "verifying sand.exe is still alive..."
+$verifyDeadline = (Get-Date).AddSeconds(60)
+$goodSand = $null
+while ((Get-Date) -lt $verifyDeadline) {
+    $sp = Get-SandProc
+    if ($sp -and -not $sp.HasExited) {
+        # Extra sanity: main thread should exist + process should have a HWND
+        try {
+            if ($sp.MainWindowHandle -ne [IntPtr]::Zero) {
+                $goodSand = $sp
+                break
+            }
+        } catch {}
+        # No HWND yet — game still on splash. Keep waiting.
+    }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $goodSand) {
+    Fail "sand.exe is not in a good state (no main window). Get INTO the game (past BE splash + past login) then re-run with -SkipGame -SkipLauncher."
+}
+Say "OK — sand.exe PID=$($goodSand.Id) has main window (hwnd=$($goodSand.MainWindowHandle)). Proceeding." "Green"
 
 # --- NOW run the launcher ---
 if (-not $SkipLauncher) {
