@@ -19,7 +19,7 @@ param(
     [switch]$SkipGame,
     [switch]$Manual,        # opt IN to the "press ENTER when ready" gate — default now auto-waits
     [int]$WaitSeconds = 300,
-    [int]$AutoGraceSec = 30, # sleep after sand.exe appears (game should be rendering by then)
+    [int]$AutoGraceSec = 40, # sleep after sand.exe appears (game should be rendering by then)
     [int]$RetryCount = 4,    # retry launcher this many times if injection fails
     [int]$RetryDelaySec = 15
 )
