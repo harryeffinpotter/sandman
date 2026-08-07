@@ -874,17 +874,35 @@ static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, flo
 // World-level mods that write to singleton game modules (not per-entity).
 // Currently just always-day — writes to TimeOfDayManager.currentTime + progress.
 void apply_world_mods() {
-    if (g_alwaysDay.load() && g_todInstance) {
-        __try {
-            float t = g_dayTime.load();
-            // clamp to [0, 1]
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            // Write currentTime + progress simultaneously; game reads both.
-            *(float*)((uintptr_t)g_todInstance + TOD_CURRENTTIME_OFFSET) = t;
-            *(float*)((uintptr_t)g_todInstance + TOD_PROGRESS_OFFSET)    = t;
-        } __except(EXCEPTION_EXECUTE_HANDLER) { /* stale singleton */ }
+    if (!g_alwaysDay.load() || !g_todInstance) return;
+    // Verify singleton pointer is still readable — Il2Cpp GC may have moved
+    // it since resolve at boot, in which case we'd AV writing garbage.
+    if (!is_readable((void*)g_todInstance, TOD_CURRENTTIME_OFFSET + 8)) {
+        // Silently invalidate so we stop trying every tick.
+        g_todInstance = 0;
+        return;
     }
+    // Route via SEH-inner-ctx so VEH restores here on AV instead of jumping
+    // out of the whole scan tick.
+    g_vehInnerActive = true;
+    RtlCaptureContext(&g_vehInnerCtx);
+    if (g_vehCrashRecovered) {
+        g_vehCrashRecovered = false;
+        g_vehInnerActive = false;
+        g_todInstance = 0; // stale — never touch again
+        g_workerVehActive = true;
+        return;
+    }
+    __try {
+        float t = g_dayTime.load();
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        *(float*)((uintptr_t)g_todInstance + TOD_CURRENTTIME_OFFSET) = t;
+        *(float*)((uintptr_t)g_todInstance + TOD_PROGRESS_OFFSET)    = t;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_todInstance = 0;
+    }
+    g_vehInnerActive = false;
 }
 
 // Iterate every entity in the current context and strip target
