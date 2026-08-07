@@ -210,6 +210,7 @@ static IDCompositionVisual* g_dcompVisual = nullptr;
 static IDXGISwapChain* g_initSwapChain = nullptr;
 
 bool g_menuVisible = true;
+std::atomic<bool> g_forceWindowed{false};
 
 
 typedef HRESULT(STDMETHODCALLTYPE* fn_Present)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -1165,6 +1166,36 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         s_f1_prev = s_f1_now;
     }
 
+    // Persistent force-windowed. Kick the swap chain out of exclusive
+    // fullscreen every frame if the flag is set. Also blocks Alt+Enter.
+    if (g_forceWindowed.load() && g_initSwapChain) {
+        BOOL fs = FALSE;
+        IDXGIOutput* out = nullptr;
+        g_initSwapChain->GetFullscreenState(&fs, &out);
+        if (out) out->Release();
+        if (fs) {
+            g_initSwapChain->SetFullscreenState(FALSE, nullptr);
+        }
+        // MWA_NO_ALT_ENTER blocks Alt+Enter fullscreen toggling.
+        static bool s_mwa_set = false;
+        if (!s_mwa_set) {
+            IDXGIDevice* dev = nullptr;
+            IDXGIAdapter* adp = nullptr;
+            IDXGIFactory* fac = nullptr;
+            if (g_pd3dDevice && SUCCEEDED(g_pd3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&dev)) && dev) {
+                if (SUCCEEDED(dev->GetAdapter(&adp)) && adp) {
+                    if (SUCCEEDED(adp->GetParent(__uuidof(IDXGIFactory), (void**)&fac)) && fac) {
+                        fac->MakeWindowAssociation(g_gameHwnd, DXGI_MWA_NO_ALT_ENTER);
+                        fac->Release();
+                        s_mwa_set = true;
+                    }
+                    adp->Release();
+                }
+                dev->Release();
+            }
+        }
+    }
+
     {
         int req = g_streamProofSwapRequest.exchange(0);
         if (req == 1 && !g_overlayImguiInit) {
@@ -1767,7 +1798,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), g_overlayImguiInit ? "(overlay hidden from capture)" : "(visible in recordings)");
 
-                    // Diagnostic — is the game actually windowed or is it lying?
+                    // Diagnostic — is the game actually windowed or lying?
                     BOOL fs = FALSE;
                     IDXGIOutput* out = nullptr;
                     if (g_initSwapChain) g_initSwapChain->GetFullscreenState(&fs, &out);
@@ -1784,7 +1815,17 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                             "SWAP CHAIN: windowed / borderless -- stream-proof should show menu.");
                     }
+                    // Persistent auto-force. When on, every Present frame checks
+                    // fullscreen state + kicks it back to windowed. Also blocks
+                    // Alt+Enter fullscreen toggle via DXGI_MWA_NO_ALT_ENTER.
+                    {
+                        bool afw = g_forceWindowed.load();
+                        if (ImGui::Checkbox("Force windowed EVERY FRAME (kills any fullscreen switch)", &afw))
+                            g_forceWindowed.store(afw);
+                    }
                     ImGui::TextDisabled("F1 anywhere = emergency reset (menu on, stream-proof off, focus overlay)");
+                    ImGui::TextDisabled("If game keeps snapping to fullscreen: right-click sand.exe -> Properties");
+                    ImGui::TextDisabled("-> Compatibility -> check 'Disable fullscreen optimizations'.");
                 }
 
                 if (g_cameraGetMain && g_cameraW2S) {
