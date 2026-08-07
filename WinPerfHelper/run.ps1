@@ -17,9 +17,11 @@ param(
     [switch]$Rebuild,
     [switch]$External,
     [switch]$SkipGame,
-    [switch]$Auto,          # skip the "press ENTER when ready" gate — inject as soon as sand.exe appears
+    [switch]$Manual,        # opt IN to the "press ENTER when ready" gate — default now auto-waits
     [int]$WaitSeconds = 300,
-    [int]$AutoGraceSec = 45 # only used with -Auto: extra sleep after sand.exe appears
+    [int]$AutoGraceSec = 30, # sleep after sand.exe appears (game should be rendering by then)
+    [int]$RetryCount = 4,    # retry launcher this many times if injection fails
+    [int]$RetryDelaySec = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,9 +58,11 @@ if (-not (Test-IsAdmin)) {
     if ($SkipLauncher) { $argsForChild += "-SkipLauncher" }
     if ($External)     { $argsForChild += "-External" }
     if ($SkipGame)     { $argsForChild += "-SkipGame" }
-    if ($Auto)         { $argsForChild += "-Auto" }
+    if ($Manual)       { $argsForChild += "-Manual" }
     $argsForChild += @("-WaitSeconds", $WaitSeconds.ToString())
     $argsForChild += @("-AutoGraceSec", $AutoGraceSec.ToString())
+    $argsForChild += @("-RetryCount", $RetryCount.ToString())
+    $argsForChild += @("-RetryDelaySec", $RetryDelaySec.ToString())
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
     $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" " + ($argsForChild -join " ")
@@ -131,42 +135,18 @@ $sandProc = Get-SandProc
 Say "sand.exe process detected. PID=$($sandProc.Id) StartTime=$($sandProc.StartTime)" "Green"
 Say "(BUT the game itself may still be loading — WAIT.)" "Yellow"
 
-if ($Auto) {
-    # Automated grace: blindly wait a longish period so login screen / main
-    # menu is fully done. Tune -AutoGraceSec if this is too long or short.
-    Say "auto mode: sleeping ${AutoGraceSec}s so login screen / main menu finishes..." "Yellow"
+if ($Manual) {
+    Write-Host ""
+    Say "manual mode: waiting for you to press ENTER once the game is rendering" "Yellow"
+    Read-Host "press ENTER when the game is VISIBLY RENDERING (title/menu/in-match)"
+} else {
+    # Default: automagic. Sleep AutoGraceSec then start retry loop.
+    Say "auto mode: sleeping ${AutoGraceSec}s while game finishes loading..." "Cyan"
     for ($i = $AutoGraceSec; $i -gt 0; $i--) {
-        Write-Host -NoNewline "`r  T-minus $i s   "
+        Write-Host -NoNewline "`r  T-minus $i s (get past BE splash / login)   "
         Start-Sleep -Seconds 1
     }
     Write-Host ""
-} else {
-    # Manual gate — LO confirms game is at a stable point (main menu / spawned in)
-    Write-Host ""
-    Say "==============================================================" "Red"
-    Say " STOP. WAIT. READ." "Red"
-    Say "==============================================================" "Red"
-    Say ""                                                              "Yellow"
-    Say " The game process exists but may not be RENDERING yet."       "Yellow"
-    Say " Injection needs RTSS to have hooked frames — that means the"  "Yellow"
-    Say " game must be ACTIVELY DRAWING to the screen."                 "Yellow"
-    Say ""                                                              "Yellow"
-    Say " GOOD moments to press ENTER:"                                  "Green"
-    Say "   * You see the game's title/menu screen"                      "Green"
-    Say "   * You're at character select"                                "Green"
-    Say "   * You're in a lobby / in a match / spawned in"               "Green"
-    Say ""                                                              "Red"
-    Say " BAD moments to press ENTER (WILL FAIL):"                       "Red"
-    Say "   * Black loading screen"                                      "Red"
-    Say "   * BE splash still showing"                                   "Red"
-    Say "   * Steam overlay only visible / game not focused"             "Red"
-    Say "   * Any 'Loading...' banner"                                   "Red"
-    Say ""                                                              "Yellow"
-    Say " If you press ENTER too early: script will fail, close the"   "Yellow"
-    Say " launcher window, GET INTO THE GAME, then re-run LAUNCH.bat"   "Yellow"
-    Say " with the game already up (it'll skip the launch step)."       "Yellow"
-    Say "==============================================================" "Red"
-    Read-Host "press ENTER when the game is VISIBLY RENDERING"
 }
 
 # Re-verify sand.exe survived — BE sometimes kills the splash sand.exe
@@ -194,19 +174,48 @@ if (-not $goodSand) {
 }
 Say "OK — sand.exe PID=$($goodSand.Id) has main window (hwnd=$($goodSand.MainWindowHandle)). Proceeding." "Green"
 
-# --- NOW run the launcher ---
+# --- NOW run the launcher (with retry if it fails) ---
 if (-not $SkipLauncher) {
-    if ($External) {
-        Say "launcher (external mode — driver install only)..." "Cyan"
-        $lp = Start-Process -FilePath $launcherExe -ArgumentList "--no-inject" -Wait -PassThru -NoNewWindow
-    } else {
-        Say "launcher (FULL DLL — will pop injection picker; click Inject)..." "Cyan"
-        $lp = Start-Process -FilePath $launcherExe -Wait -PassThru -NoNewWindow
+    $attempt = 0
+    $success = $false
+    while ($attempt -lt $RetryCount) {
+        $attempt++
+        if ($External) {
+            Say "launcher attempt $attempt/$RetryCount (external mode — driver install only)..." "Cyan"
+            $lp = Start-Process -FilePath $launcherExe -ArgumentList "--no-inject" -Wait -PassThru -NoNewWindow
+        } else {
+            Say "launcher attempt $attempt/$RetryCount (FULL DLL — auto-clicking Inject on picker if it pops)..." "Cyan"
+            $lp = Start-Process -FilePath $launcherExe -Wait -PassThru -NoNewWindow
+        }
+        # Exit 0 = clean, 11 = 16.b.gamma FAIL (RTSS frame counter still 0),
+        # 9 = target not found, others = various driver issues.
+        # Retry on 9 and 11 — game may just need more time to render.
+        if ($lp.ExitCode -eq 0) {
+            Say "launcher OK on attempt $attempt." "Green"
+            $success = $true
+            break
+        }
+        if ($lp.ExitCode -in 9,11) {
+            if ($attempt -lt $RetryCount) {
+                Say "launcher exit $($lp.ExitCode) — game not ready yet. Retrying in ${RetryDelaySec}s..." "Yellow"
+                for ($i = $RetryDelaySec; $i -gt 0; $i--) {
+                    Write-Host -NoNewline "`r  next attempt in $i s   "
+                    Start-Sleep -Seconds 1
+                }
+                Write-Host ""
+            } else {
+                Say "launcher exit $($lp.ExitCode) — max retries reached." "Red"
+            }
+        } else {
+            Say "launcher exit $($lp.ExitCode) — driver-side error, not retryable. Check %APPDATA%\Microsoft\PerfCache\perf_install.dat" "Yellow"
+            break
+        }
     }
-    if ($lp.ExitCode -ne 0) {
-        Say "launcher exit $($lp.ExitCode) — driver may already be loaded, continuing." "Yellow"
-    } else {
-        Say "launcher OK." "Green"
+    if (-not $success) {
+        Say "injection did NOT land after $attempt attempts." "Red"
+        Say "Most likely cause: RTSS not hooking sand.exe. Verify in RTSS UI:" "Yellow"
+        Say "  - RTSS running (tray icon)" "Yellow"
+        Say "  - sand.exe listed in Applications with Detection Level = HIGH" "Yellow"
     }
 } else {
     Say "skipping launcher."
