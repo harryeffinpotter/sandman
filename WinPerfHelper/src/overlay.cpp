@@ -959,6 +959,16 @@ static void create_stream_proof_overlay() {
         return;
     }
 
+    // Pre-clear the swap chain to fully-transparent + Present ONCE before
+    // showing the window. Without this the backbuffer contains undefined
+    // pixels (usually white on Nvidia/AMD default alloc) and DirectComposition
+    // shows a solid white film over the game until the first real render tick.
+    {
+        float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };  // premultiplied alpha 0 = fully transparent
+        g_overlayContext->ClearRenderTargetView(g_overlayRTV, clear);
+        g_overlaySwapChain->Present(0, 0);
+    }
+
     ShowWindow(g_overlayHwnd, SW_SHOWNOACTIVATE);
 
     factory2->Release();
