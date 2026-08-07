@@ -18,8 +18,8 @@ winio64_enc.bin
 # ImGui persisted layout
 imgui_layout.ini
 
-# In-game settings
-# (removed)
+# In-game settings (either name)
+sand_cheat_settings.ini
 perf_settings.ini
 
 # IDE
