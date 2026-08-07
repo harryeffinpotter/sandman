@@ -375,6 +375,9 @@ struct ESP3DEntry {
     float dist;
     bool hasHead;
     bool hasSkeleton;
+    bool isExtraction;
+    bool isReactor;
+    bool isFinalExtract;
     BoneScreenPos bones[55];
 };
 
@@ -397,6 +400,9 @@ struct ESPSnapshot {
     bool hasTransformPos;
     bool hasBones;
     bool isCreature;
+    bool isExtraction;
+    bool isReactor;
+    bool isFinalExtract;
     int type;
     int lootTier;
 };
@@ -470,6 +476,13 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         snap.velY = item.velY;
         snap.velZ = item.velZ;
         snap.isCreature = item.isCreature;
+        snap.isExtraction = item.isExtraction;
+        snap.isReactor = item.isReactor;
+        snap.isFinalExtract = item.isFinalExtract;
+        // Extraction / Reactor filters — hide if their toggle is off, but
+        // let them always render if the toggle is on regardless of category.
+        if (item.isExtraction && !g_espShowExtraction.load() && !isPlayer && !isMob) continue;
+        if (item.isReactor && !g_espShowReactors.load() && !isPlayer && !isMob && !isWalker) continue;
         snap.lootTier = item.lootTier;
         snap.type = isWalker ? 2 : (isPlayer ? 0 : (isMob ? 1 : 3));
 
@@ -544,7 +557,14 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         e.type = snap.type;
         e.lootTier = snap.lootTier;
         e.dist = snap.distance >= 0 ? snap.distance : 0.0f;
-        snprintf(e.label, sizeof(e.label), "%s [%.0fm]", snap.displayName, e.dist);
+        e.isExtraction = snap.isExtraction;
+        e.isReactor = snap.isReactor;
+        e.isFinalExtract = snap.isFinalExtract;
+        const char* prefix = "";
+        if (snap.isFinalExtract) prefix = "[FINAL EXTRACT] ";
+        else if (snap.isExtraction) prefix = "[EXTRACT] ";
+        else if (snap.isReactor) prefix = "[SHIP] ";
+        snprintf(e.label, sizeof(e.label), "%s%s [%.0fm]", prefix, snap.displayName, e.dist);
 
         e.hasSkeleton = false;
         if (snap.type != 2 && snap.type != 3 && showSkeleton && snap.hasBones) {
@@ -1814,6 +1834,34 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 }
                 ImGui::Text("TimeOfDayManager singleton: %p", (void*)g_todInstance);
                 ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 1.0f, 1.0f, 1.0f), "SHIP / STORM / WALKER MODS");
+                {
+                    bool v = g_stormImmunity.load();
+                    if (ImGui::Checkbox("Storm immunity (strip InEyeOfStorm from us)", &v)) g_stormImmunity.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(idx %d)", g_idx_in_eye_of_storm);
+                }
+                {
+                    bool v = g_shipResilience.load();
+                    if (ImGui::Checkbox("Ship resilience (force max HP on our reactor)", &v)) g_shipResilience.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(reactor idx %d)", g_idx_reactor_data);
+                }
+                {
+                    float m = g_walkerSpeedMult.load();
+                    if (ImGui::SliderFloat("Walker speed multiplier", &m, 1.0f, 5.0f, "%.2fx"))
+                        g_walkerSpeedMult.store(m);
+                    ImGui::TextDisabled("Writes WalkerEngineData +0x10 *= mult (offset guess). Trampler nitrous.");
+                }
+                {
+                    bool ev = g_espShowExtraction.load();
+                    if (ImGui::Checkbox("ESP: Extraction points (yellow marker)", &ev)) g_espShowExtraction.store(ev);
+                }
+                {
+                    bool rv = g_espShowReactors.load();
+                    if (ImGui::Checkbox("ESP: Ships / reactors (cyan marker)", &rv)) g_espShowReactors.store(rv);
+                }
+                ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "ANTI-CHEAT COMPONENT STRIPS (client-side — server may still validate)");
                 {
                     bool v = g_stripAntiCheat.load();
@@ -2288,7 +2336,22 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 float boxH = textSize.y + 6;
 
                 ImU32 bgColor, borderColor, textColor;
-                if (e.type == 2) {
+                if (e.isFinalExtract) {
+                    // Bright magenta — final extraction is the most valuable location
+                    bgColor = IM_COL32(80, 0, 60, 200);
+                    borderColor = IM_COL32(255, 50, 200, 240);
+                    textColor = IM_COL32(255, 100, 220, 255);
+                } else if (e.isExtraction) {
+                    // Bright yellow — regular extraction / landing / ship
+                    bgColor = IM_COL32(60, 60, 0, 200);
+                    borderColor = IM_COL32(255, 230, 40, 240);
+                    textColor = IM_COL32(255, 240, 100, 255);
+                } else if (e.isReactor && e.type != 0 && e.type != 1) {
+                    // Cyan — enemy ship (has ReactorData but not a player or mob)
+                    bgColor = IM_COL32(0, 60, 60, 200);
+                    borderColor = IM_COL32(40, 230, 230, 240);
+                    textColor = IM_COL32(100, 240, 240, 255);
+                } else if (e.type == 2) {
                     bgColor = IM_COL32(0, 40, 80, 180);
                     borderColor = IM_COL32(0, 200, 255, 220);
                     textColor = IM_COL32(100, 220, 255, 255);

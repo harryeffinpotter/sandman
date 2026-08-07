@@ -71,6 +71,19 @@ int g_idx_anticheat = -1;                // AntiCheat component (idx 27 per LO's
 int g_idx_anticheat_noclip_ignore = -1;  // AntiCheatNoClipIgnore (idx 28)
 int g_idx_anticheat_speedcap = -1;       // AntiCheatSpeedCapData (idx 29)
 int g_idx_dont_destroy_in_storm = -1;    // DontDestroyInStorm (idx 134)
+int g_idx_extraction_point = -1;         // ExtractionPointData (166)
+int g_idx_final_extraction = -1;         // FinalExtractionPointData (172)
+int g_idx_extraction_box = -1;           // ExtractionBox (163)
+int g_idx_extraction_ship = -1;          // ExtractionShipData (167)
+int g_idx_extraction_progress = -1;      // ExtractionInProgress (164)
+int g_idx_extraction_landing = -1;       // ExtractionLandingPoint (165)
+int g_idx_contract_info = -1;            // ContractInfoData (81)
+int g_idx_walker_engine = -1;            // WalkerEngineData (447)
+int g_idx_reactor_data = -1;             // ReactorData (337)
+int g_idx_reactor_state = -1;            // ReactorState (342)
+int g_idx_reactor_turbo = -1;            // ReactorTurboState (343)
+int g_idx_health_normalized = -1;        // HealthNormalizedComponent
+int g_idx_in_eye_of_storm = -1;          // InEyeOfStorm
 int g_idx_cheat_walker_speed = -1;
 int g_idx_shot_info = -1;
 int g_idx_nice_name = -1;
@@ -124,6 +137,11 @@ std::atomic<bool> g_hooverRequest{false};    // one-shot re-dump trigger
 std::atomic<bool> g_hardKillRequested{false};// hotkey → TerminateProcess
 std::atomic<int>  g_playerEntityId{-1};      // updated by scan_entities each tick
 std::atomic<bool> g_stripAntiCheat{false};   // strip AntiCheat component from our player
+std::atomic<bool> g_espShowExtraction{true}; // highlight extraction points in ESP
+std::atomic<bool> g_espShowReactors{false};  // highlight ships (entities with ReactorData)
+std::atomic<bool> g_stormImmunity{false};    // strip InEyeOfStorm from us so we take no storm dps
+std::atomic<bool> g_shipResilience{false};   // force max HP on our ship's ReactorData
+std::atomic<float> g_walkerSpeedMult{1.0f};  // WalkerEngineData speed multiplier
 std::atomic<bool> g_addNoClipIgnore{false};  // (unused for now — component ADD requires more than strip)
 std::atomic<bool> g_stripSpeedCap{false};    // strip AntiCheatSpeedCapData from our player
 float g_lootT1Color[4] = {0.4f, 0.9f, 0.4f, 1.0f}; // green
@@ -703,6 +721,19 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "AntiCheatNoClipIgnore") == 0)   g_idx_anticheat_noclip_ignore = i;
         else if (strcmp(narrow, "AntiCheatSpeedCapData") == 0)   g_idx_anticheat_speedcap = i;
         else if (strcmp(narrow, "DontDestroyInStorm") == 0)      g_idx_dont_destroy_in_storm = i;
+        else if (strcmp(narrow, "ExtractionPointData") == 0)     g_idx_extraction_point = i;
+        else if (strcmp(narrow, "FinalExtractionPointData") == 0)g_idx_final_extraction = i;
+        else if (strcmp(narrow, "ExtractionBox") == 0)           g_idx_extraction_box = i;
+        else if (strcmp(narrow, "ExtractionShipData") == 0)      g_idx_extraction_ship = i;
+        else if (strcmp(narrow, "ExtractionInProgress") == 0)    g_idx_extraction_progress = i;
+        else if (strcmp(narrow, "ExtractionLandingPoint") == 0)  g_idx_extraction_landing = i;
+        else if (strcmp(narrow, "ContractInfoData") == 0)        g_idx_contract_info = i;
+        else if (strcmp(narrow, "WalkerEngineData") == 0)        g_idx_walker_engine = i;
+        else if (strcmp(narrow, "ReactorData") == 0)             g_idx_reactor_data = i;
+        else if (strcmp(narrow, "ReactorState") == 0)            g_idx_reactor_state = i;
+        else if (strcmp(narrow, "ReactorTurboState") == 0)       g_idx_reactor_turbo = i;
+        else if (strcmp(narrow, "HealthNormalizedComponent") == 0) g_idx_health_normalized = i;
+        else if (strcmp(narrow, "InEyeOfStorm") == 0)            g_idx_in_eye_of_storm = i;
         else if (strcmp(narrow, "View") == 0)                g_idx_view = i;
         else if (strcmp(narrow, "ViewPosition") == 0) g_idx_view_position = i;
         else if (strcmp(narrow, "ViewData") == 0)      g_idx_view_data = i;
@@ -1043,15 +1074,45 @@ void apply_player_mods() {
                 if (g_idx_ammo >= 0)     strip_component(e, g_idx_ammo);
                 if (g_idx_inv_ammo >= 0) strip_component(e, g_idx_inv_ammo);
             }
-            // Anti-cheat component strips — only apply to OUR player entity
-            // (identified by matching our playerEntityId; other entities
-            // getting AC-stripped would probably desync).
+            // Anti-cheat + storm-immunity + player-specific strips — only
+            // apply to OUR player entity so we don't desync others.
             int eidCheck = seh_read_entity_id(e);
             if (eidCheck == g_playerEntityId.load()) {
                 if (g_stripAntiCheat.load() && g_idx_anticheat >= 0)
                     strip_component(e, g_idx_anticheat);
                 if (g_stripSpeedCap.load() && g_idx_anticheat_speedcap >= 0)
                     strip_component(e, g_idx_anticheat_speedcap);
+                if (g_stormImmunity.load() && g_idx_in_eye_of_storm >= 0)
+                    strip_component(e, g_idx_in_eye_of_storm);
+            }
+
+            // Walker speed multiplier — write to WalkerEngineData +0x10
+            // (guess based on SpeedData layout; adjust once we dump the
+            // component's actual field offsets).
+            float wsm = g_walkerSpeedMult.load();
+            if (wsm > 1.001f && g_idx_walker_engine >= 0) {
+                void* wec = get_component(e, g_idx_walker_engine);
+                if (is_readable(wec, 0x18)) {
+                    __try {
+                        float* wf = (float*)((uintptr_t)wec + 0x10);
+                        if (*wf > 0.01f && *wf < 500.0f) *wf = *wf * wsm;
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
+            }
+
+            // Ship resilience — if we own this reactor entity, force max HP.
+            if (g_shipResilience.load() && g_idx_reactor_data >= 0 && g_idx_health_data >= 0) {
+                void* rc = get_component(e, g_idx_reactor_data);
+                if (rc) {
+                    void* hc = get_component(e, g_idx_health_data);
+                    if (is_readable(hc, 0x18)) {
+                        __try {
+                            // Write current HP = max HP (offsets guess: current
+                            // at +0x10, max at +0x14 or +0x18)
+                            *(float*)((uintptr_t)hc + 0x10) = *(float*)((uintptr_t)hc + 0x14);
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    }
+                }
             }
             // Speed / jump multipliers offloaded to helpers to keep the
             // per-entity __try free of C++ containers (else C2712).
@@ -1759,6 +1820,25 @@ static void process_one_entity(
             info.isCreature = true;
         }
     }
+
+    // Extraction / reactor entity classification for ESP highlighting.
+    info.isExtraction = false;
+    info.isReactor = false;
+    info.isFinalExtract = false;
+    if (g_idx_extraction_point >= 0 && get_component(entity, g_idx_extraction_point))
+        info.isExtraction = true;
+    if (g_idx_extraction_box >= 0 && get_component(entity, g_idx_extraction_box))
+        info.isExtraction = true;
+    if (g_idx_extraction_ship >= 0 && get_component(entity, g_idx_extraction_ship))
+        info.isExtraction = true;
+    if (g_idx_extraction_landing >= 0 && get_component(entity, g_idx_extraction_landing))
+        info.isExtraction = true;
+    if (g_idx_final_extraction >= 0 && get_component(entity, g_idx_final_extraction)) {
+        info.isExtraction = true;
+        info.isFinalExtract = true;
+    }
+    if (g_idx_reactor_data >= 0 && get_component(entity, g_idx_reactor_data))
+        info.isReactor = true;
 
     bool isPlayer = (name.rfind("PlayerAvatar", 0) == 0);
     if ((isPlayer || info.isCreature) && g_espShowSkeleton.load()) {

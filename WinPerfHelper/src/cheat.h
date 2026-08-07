@@ -112,6 +112,9 @@ struct ItemInfo {
     std::string displayName;
     float velX, velY, velZ;
     DWORD lastPosTime;
+    bool isExtraction;   // has ExtractionPointData / ExtractionBox / etc
+    bool isReactor;      // has ReactorData (= ship)
+    bool isFinalExtract; // has FinalExtractionPointData
 };
 
 struct Hook {
@@ -395,6 +398,24 @@ extern int g_idx_anticheat;
 extern int g_idx_anticheat_noclip_ignore;
 extern int g_idx_anticheat_speedcap;
 extern int g_idx_dont_destroy_in_storm;
+extern int g_idx_extraction_point;
+extern int g_idx_final_extraction;
+extern int g_idx_extraction_box;
+extern int g_idx_extraction_ship;
+extern int g_idx_extraction_progress;
+extern int g_idx_extraction_landing;
+extern int g_idx_contract_info;
+extern int g_idx_walker_engine;
+extern int g_idx_reactor_data;
+extern int g_idx_reactor_state;
+extern int g_idx_reactor_turbo;
+extern int g_idx_health_normalized;
+extern int g_idx_in_eye_of_storm;
+extern std::atomic<bool> g_espShowExtraction;
+extern std::atomic<bool> g_espShowReactors;
+extern std::atomic<bool> g_stormImmunity;
+extern std::atomic<bool> g_shipResilience;
+extern std::atomic<float> g_walkerSpeedMult;
 extern float g_lootT1Color[4];
 extern float g_lootT2Color[4];
 extern float g_lootT3Color[4];
