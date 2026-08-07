@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 Write-Host "`n==============================================" -ForegroundColor Cyan
-Write-Host "  Sand Cheat — full build (DLL + launcher + external)" -ForegroundColor Cyan
+Write-Host "  WinPerfHelper — full build (DLL + launcher + external)" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
 $root = $PSScriptRoot
@@ -28,7 +28,7 @@ try {
 Write-Host "`n==============================================" -ForegroundColor Green
 Write-Host "  ALL BUILDS PASSED" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green
-Write-Host "  DLL:       RTSSHelper64.dll         (renamed from sand_cheat.dll)"
+Write-Host "  DLL:       RTSSHelper64.dll"
 Write-Host "  Launcher:  launcher\RTSSDriverSvc.exe (renamed from sand_launcher.exe)"
 Write-Host "  External:  external\PerfMonSvc.exe   (renamed from sand_external.exe)"
 Write-Host "`nDeploy workflow (KWARE-style):"
