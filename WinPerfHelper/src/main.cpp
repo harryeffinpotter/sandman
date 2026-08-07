@@ -439,20 +439,55 @@ static void safe_scan_tick(int scanCounter) {
     if (now < s_cooldownUntil) return;
 
 
+    // scan_entities runs under the outer VEH umbrella (g_workerVehActive
+    // is true) so it can recover from any AV mid-walk. If it AVs, we set
+    // 3s cooldown but each of the apply_* mods below still runs
+    // independently on the NEXT tick they're due.
     __try {
         scan_entities();
-        if (scanCounter % 5 == 0) {
-            if (g_turretRapidFire.load() || g_turretNoRecoil.load()) apply_turret_mods();
-            if (g_weaponModsEnabled.load()) apply_weapon_mods();
-            apply_player_mods();  // cheap when all toggles off
-            apply_world_mods();   // always-day etc.
-        }
-        if (g_dumpEntities.load()) dump_entities_to_file();
-        if (g_probeContext.load()) probe_context_to_file();
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        wlog("[worker] SEH exception in scan tick %d: 0x%08lX — backing off 3s\n", scanCounter, GetExceptionCode());
+        wlog("[worker] SEH in scan_entities tick %d: 0x%08lX -- backing off 3s\n",
+             scanCounter, GetExceptionCode());
         g_entityCount.store(0);
         s_cooldownUntil = GetTickCount() + 3000;
+    }
+
+    // Each apply_* runs in its OWN __try. Disable VEH catching around each
+    // so local __try/__except handles any AV without jumping back to the
+    // outer safe_scan_tick captured context (which would kill the rest of
+    // the mods for this tick AND cost 3s cooldown).
+    if (scanCounter % 5 == 0) {
+        bool prev = g_workerVehActive;
+        g_workerVehActive = false;
+        if (g_turretRapidFire.load() || g_turretNoRecoil.load()) {
+            __try { apply_turret_mods(); }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                wlog("[worker] SEH in apply_turret_mods: 0x%08lX\n", GetExceptionCode());
+            }
+        }
+        if (g_weaponModsEnabled.load()) {
+            __try { apply_weapon_mods(); }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                wlog("[worker] SEH in apply_weapon_mods: 0x%08lX\n", GetExceptionCode());
+            }
+        }
+        __try { apply_player_mods(); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            wlog("[worker] SEH in apply_player_mods: 0x%08lX\n", GetExceptionCode());
+        }
+        __try { apply_world_mods(); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            wlog("[worker] SEH in apply_world_mods: 0x%08lX\n", GetExceptionCode());
+            g_todInstance = 0;  // dead — never try again this session
+        }
+        g_workerVehActive = prev;
+    }
+
+    if (g_dumpEntities.load()) {
+        __try { dump_entities_to_file(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    if (g_probeContext.load()) {
+        __try { probe_context_to_file(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 }
 
