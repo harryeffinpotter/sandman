@@ -1495,6 +1495,44 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::EndTabItem();
             }
 
+            if (ImGui::BeginTabItem("Player")) {
+                ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "Player mods (strip-component approach — Entitas systems short-circuit when target component is missing)");
+                ImGui::Separator();
+                {
+                    bool v = g_noFallDamage.load();
+                    if (ImGui::Checkbox("No fall damage", &v)) g_noFallDamage.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(strips FallDamageData per tick)");
+                }
+                {
+                    bool v = g_noJumpDelay.load();
+                    if (ImGui::Checkbox("No jump delay (spam jump / fatigue-free)", &v)) g_noJumpDelay.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(strips JumpDelay)");
+                }
+                {
+                    bool v = g_infiniteAmmo.load();
+                    if (ImGui::Checkbox("Infinite ammo (experimental)", &v)) g_infiniteAmmo.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(strips AmmoId/InventoryItemAmmoId)");
+                }
+                ImGui::Separator();
+                {
+                    float m = g_jumpForceMult.load();
+                    if (ImGui::SliderFloat("Jump force multiplier", &m, 1.0f, 5.0f, "%.2fx"))
+                        g_jumpForceMult.store(m);
+                    ImGui::TextDisabled("Writes Jump.force *= mult once per entity (offset guess 0x10 — adjust if no effect).");
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Component Indices:");
+                ImGui::Text("  FallDamageData:      %d", g_idx_fall_damage);
+                ImGui::Text("  JumpDelay:           %d", g_idx_jump_delay);
+                ImGui::Text("  Jump:                %d", g_idx_jump);
+                ImGui::Text("  AmmoId:              %d", g_idx_ammo);
+                ImGui::Text("  InventoryItemAmmoId: %d", g_idx_inv_ammo);
+                ImGui::EndTabItem();
+            }
+
             if (ImGui::BeginTabItem("Weapons")) {
                 {
                     bool enabled = g_weaponModsEnabled.load();

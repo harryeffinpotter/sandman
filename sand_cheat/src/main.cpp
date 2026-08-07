@@ -444,6 +444,7 @@ static void safe_scan_tick(int scanCounter) {
         if (scanCounter % 5 == 0) {
             if (g_turretRapidFire.load() || g_turretNoRecoil.load()) apply_turret_mods();
             if (g_weaponModsEnabled.load()) apply_weapon_mods();
+            apply_player_mods();  // cheap when all toggles off
         }
         if (g_dumpEntities.load()) dump_entities_to_file();
         if (g_probeContext.load()) probe_context_to_file();

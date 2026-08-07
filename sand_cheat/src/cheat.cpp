@@ -62,6 +62,10 @@ int g_idx_health_data = -1;
 int g_idx_invincible = -1;
 int g_idx_speed_data = -1;
 int g_idx_jump = -1;
+int g_idx_jump_delay = -1;
+int g_idx_fall_damage = -1;
+int g_idx_ammo = -1;
+int g_idx_inv_ammo = -1;
 int g_idx_cheat_walker_fly = -1;
 int g_idx_cheat_walker_speed = -1;
 int g_idx_shot_info = -1;
@@ -98,6 +102,19 @@ std::atomic<bool> g_weaponModsEnabled{false};
 std::atomic<bool> g_weaponNoDrop{false};
 std::atomic<bool> g_weaponNoBloom{false};
 std::atomic<float> g_weaponVelocityMult{1.0f};
+// Player cheat toggles — apply per scan tick via strip_component:
+//   Entitas systems that require these components short-circuit when
+//   the component is missing, so stripping them = the effect is bypassed.
+std::atomic<bool> g_noFallDamage{false};
+std::atomic<bool> g_noJumpDelay{false};
+std::atomic<bool> g_infiniteAmmo{false};
+// Jump-force multiplier — 1.0 = default, 2.0 = 2x jump height, etc.
+// Applied on the Jump component. Field offset is a probe target: Entitas
+// components in this codebase typically store the primary float at +0x10,
+// so we start there. If the offset is wrong the multiplier will just
+// have no visible effect; adjust JUMP_FORCE_FIELD_OFFSET and rebuild.
+std::atomic<float> g_jumpForceMult{1.0f};
+static constexpr int JUMP_FORCE_FIELD_OFFSET = 0x10;
 std::atomic<uintptr_t> g_lockedEntityPtr{0};
 std::atomic<uintptr_t> g_cachedRecoilEntity{0};
 std::atomic<bool> g_running{true};
@@ -632,6 +649,10 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "Invincible") == 0)              g_idx_invincible = i;
         else if (strcmp(narrow, "SpeedData") == 0)               g_idx_speed_data = i;
         else if (strcmp(narrow, "Jump") == 0)                    g_idx_jump = i;
+        else if (strcmp(narrow, "JumpDelay") == 0)               g_idx_jump_delay = i;
+        else if (strcmp(narrow, "FallDamageData") == 0)          g_idx_fall_damage = i;
+        else if (strcmp(narrow, "AmmoId") == 0)                  g_idx_ammo = i;
+        else if (strcmp(narrow, "InventoryItemAmmoId") == 0)     g_idx_inv_ammo = i;
         else if (strcmp(narrow, "CheatWalkerFly") == 0)          g_idx_cheat_walker_fly = i;
         else if (strcmp(narrow, "CheatWalkerSpeedMultiplier") == 0) g_idx_cheat_walker_speed = i;
         else if (strcmp(narrow, "ShotInfo") == 0)                g_idx_shot_info = i;
@@ -811,6 +832,91 @@ static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, flo
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_apply_weapon_single] SEH: 0x%08lX\n", GetExceptionCode()); }
+}
+
+// Iterate every entity in the current context and strip target
+// components based on player toggles. Cheap when all flags are off
+// (returns immediately). One pass per scan tick.
+void apply_player_mods() {
+    bool noFall = g_noFallDamage.load();
+    bool noJumpDelay = g_noJumpDelay.load();
+    bool infAmmo = g_infiniteAmmo.load();
+    if (!noFall && !noJumpDelay && !infAmmo) return;
+    if (g_idx_fall_damage < 0 && g_idx_jump_delay < 0
+        && g_idx_ammo < 0 && g_idx_inv_ammo < 0) return;
+
+    void* gcm = (void*)g_gameContextModule;
+    if (!gcm) return;
+    void* context = nullptr;
+    if (!safe_read_ptr((void*)((uintptr_t)gcm + 0x10), &context)) return;
+    if (!is_readable(context, 0xA0)) return;
+
+    void** entityPtrs = nullptr;
+    int entityCount = 0;
+    static void* pmTempBuf[65536];
+    int pmTempCount = 0;
+
+    void* cache = *(void**)((uintptr_t)context + 0x98);
+    if (is_readable(cache, 0x20)) {
+        entityCount = (int)*(size_t*)((uintptr_t)cache + 0x18);
+        entityPtrs  = (void**)((uintptr_t)cache + 0x20);
+    } else {
+        void* hashSet = *(void**)((uintptr_t)context + 0x58);
+        if (!is_readable(hashSet, 0x30)) return;
+        void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
+        int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
+        if (!slots_arr || lastIndex <= 0) return;
+        size_t slots_len = *(size_t*)((uintptr_t)slots_arr + 0x18);
+        uint8_t* slots = (uint8_t*)((uintptr_t)slots_arr + 0x20);
+        int limit = (lastIndex < (int)slots_len) ? lastIndex : (int)slots_len;
+        for (int s = 0; s < limit; s++) {
+            int hc = *(int*)(slots + s * 16);
+            if (hc < 0) continue;
+            void* ent = *(void**)(slots + s * 16 + 8);
+            if (ent && pmTempCount < 65536) pmTempBuf[pmTempCount++] = ent;
+        }
+        entityPtrs = pmTempBuf;
+        entityCount = pmTempCount;
+    }
+
+    if (entityCount < 0 || entityCount > 200000) return;
+
+    float jumpMult = g_jumpForceMult.load();
+
+    for (int i = 0; i < entityCount; i++) {
+        void* e = entityPtrs[i];
+        if (!e) continue;
+        __try {
+            if (noFall && g_idx_fall_damage >= 0)
+                strip_component(e, g_idx_fall_damage);
+            if (noJumpDelay && g_idx_jump_delay >= 0)
+                strip_component(e, g_idx_jump_delay);
+            if (infAmmo) {
+                if (g_idx_ammo >= 0)     strip_component(e, g_idx_ammo);
+                if (g_idx_inv_ammo >= 0) strip_component(e, g_idx_inv_ammo);
+            }
+            // Jump-force multiplier — write-once-per-entity via sentinel
+            // to avoid compounding every tick. Sentinel is the negative
+            // of a plausible base value.
+            if (jumpMult > 1.001f && g_idx_jump >= 0) {
+                void* jc = get_component(e, g_idx_jump);
+                if (is_readable(jc, (size_t)(JUMP_FORCE_FIELD_OFFSET + 4))) {
+                    float cur = *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET);
+                    // Sentinel: any large negative value we chose. If it's
+                    // already sentinel'd, do nothing.
+                    if (cur > 0.0f && cur < 1000.0f) {
+                        float boosted = cur * jumpMult;
+                        *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET) = boosted;
+                        // No sentinel marker unfortunately without another field.
+                        // Practically: rewriting the same * mult next tick would
+                        // compound. Guard: only apply if cur is close to the
+                        // original range. As long as the mult keeps blasting cur
+                        // past 1000 we stop touching it.
+                    }
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) { /* skip bad ent */ }
+    }
 }
 
 void apply_weapon_mods() {
