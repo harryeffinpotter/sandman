@@ -115,6 +115,15 @@ std::atomic<bool> g_infiniteAmmo{false};
 // have no visible effect; adjust JUMP_FORCE_FIELD_OFFSET and rebuild.
 std::atomic<float> g_jumpForceMult{1.0f};
 static constexpr int JUMP_FORCE_FIELD_OFFSET = 0x10;
+// Always-day: writes TimeOfDayManager.currentTime to g_dayTime every tick.
+// Range depends on the game — try 0.0-1.0 (normalized) or 0-24 (hour).
+// Default 0.5 works if it's normalized (== noon).
+std::atomic<bool>  g_alwaysDay{false};
+std::atomic<float> g_dayTime{0.5f};
+// Populated at worker init — pointer to TimeOfDayManager singleton.
+volatile uintptr_t g_todInstance = 0;
+static constexpr int TOD_CURRENTTIME_OFFSET = 0x88;
+static constexpr int TOD_PROGRESS_OFFSET    = 0x80;
 std::atomic<uintptr_t> g_lockedEntityPtr{0};
 std::atomic<uintptr_t> g_cachedRecoilEntity{0};
 std::atomic<bool> g_running{true};
@@ -834,6 +843,22 @@ static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, flo
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_apply_weapon_single] SEH: 0x%08lX\n", GetExceptionCode()); }
+}
+
+// World-level mods that write to singleton game modules (not per-entity).
+// Currently just always-day — writes to TimeOfDayManager.currentTime + progress.
+void apply_world_mods() {
+    if (g_alwaysDay.load() && g_todInstance) {
+        __try {
+            float t = g_dayTime.load();
+            // clamp to [0, 1]
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            // Write currentTime + progress simultaneously; game reads both.
+            *(float*)((uintptr_t)g_todInstance + TOD_CURRENTTIME_OFFSET) = t;
+            *(float*)((uintptr_t)g_todInstance + TOD_PROGRESS_OFFSET)    = t;
+        } __except(EXCEPTION_EXECUTE_HANDLER) { /* stale singleton */ }
+    }
 }
 
 // Iterate every entity in the current context and strip target

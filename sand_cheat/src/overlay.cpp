@@ -1524,6 +1524,20 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::TextDisabled("Writes Jump.force *= mult once per entity (offset guess 0x10 — adjust if no effect).");
                 }
                 ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "World mods");
+                {
+                    bool v = g_alwaysDay.load();
+                    if (ImGui::Checkbox("Always day", &v)) g_alwaysDay.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(writes TimeOfDayManager.currentTime)");
+                }
+                {
+                    float t = g_dayTime.load();
+                    if (ImGui::SliderFloat("Time of day", &t, 0.0f, 1.0f, "%.2f (0=night, 0.5=noon, 1=night)"))
+                        g_dayTime.store(t);
+                }
+                ImGui::Text("TimeOfDayManager singleton: %p", (void*)g_todInstance);
+                ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Component Indices:");
                 ImGui::Text("  FallDamageData:      %d", g_idx_fall_damage);
                 ImGui::Text("  JumpDelay:           %d", g_idx_jump_delay);

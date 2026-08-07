@@ -445,6 +445,7 @@ static void safe_scan_tick(int scanCounter) {
             if (g_turretRapidFire.load() || g_turretNoRecoil.load()) apply_turret_mods();
             if (g_weaponModsEnabled.load()) apply_weapon_mods();
             apply_player_mods();  // cheap when all toggles off
+            apply_world_mods();   // always-day etc.
         }
         if (g_dumpEntities.load()) dump_entities_to_file();
         if (g_probeContext.load()) probe_context_to_file();
@@ -1422,6 +1423,48 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 g_userNameHUDType = api.il2cpp_type_get_object(hudIl2cppType);
             }
             wlog("[worker] UserName HUD Type object=%p\n", g_userNameHUDType);
+        }
+
+        // TimeOfDayManager singleton pointer resolution — for always-day.
+        // Class has static field '_instance' at offset 0x0. il2cpp_field_static_get_value
+        // fetches the current singleton pointer.
+        if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class
+            && api.il2cpp_class_get_name && api.il2cpp_class_get_fields && api.il2cpp_field_get_name
+            && api.il2cpp_field_static_get_value) {
+            size_t asmCountT = 0;
+            void* domT = api.il2cpp_domain_get();
+            void** assembliesT = api.il2cpp_domain_get_assemblies(domT, &asmCountT);
+            void* todKlass = nullptr;
+            for (size_t i = 0; i < asmCountT && !todKlass; i++) {
+                void* img = api.il2cpp_assembly_get_image(assembliesT[i]);
+                if (!img) continue;
+                size_t cc = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < cc; j++) {
+                    void* k = api.il2cpp_image_get_class(img, j);
+                    if (!k) continue;
+                    const char* cn = api.il2cpp_class_get_name(k);
+                    if (cn && strcmp(cn, "TimeOfDayManager") == 0) {
+                        todKlass = k;
+                        break;
+                    }
+                }
+            }
+            if (todKlass) {
+                void* fi = nullptr;
+                void* instField = nullptr;
+                while (void* f = api.il2cpp_class_get_fields(todKlass, &fi)) {
+                    const char* fn = api.il2cpp_field_get_name(f);
+                    if (fn && strcmp(fn, "_instance") == 0) { instField = f; break; }
+                }
+                if (instField) {
+                    void* instPtr = nullptr;
+                    __try {
+                        api.il2cpp_field_static_get_value(instField, &instPtr);
+                        g_todInstance = (uintptr_t)instPtr;
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    wlog("[worker] TimeOfDayManager singleton = %p\n", (void*)g_todInstance);
+                }
+            }
         }
         if (g_userNameKlass && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
             FILE* ff = nullptr;
