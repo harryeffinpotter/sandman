@@ -2201,7 +2201,11 @@ void scan_entities() {
         if (doLog) wlog("[scan] g_items=%d havePlayerPos=%d playerEid=%d\n",
                         (int)itemCount, havePlayerPos ? 1 : 0, playerEntityId);
 
-        if (g_dupeMode.load() && !g_stickyLock.load()) {
+        // Sticky OR dupe both trigger the pick — sticky = one-shot (user
+        // disables sticky after pick to freeze), dupe = continuous re-pick
+        // nearest-match every scan. Prior guard "dupe && !sticky" meant
+        // sticky effectively disabled itself.
+        if ((g_dupeMode.load() || g_stickyLock.load())) {
             EnterCriticalSection(&g_itemsLock);
             bool wf = g_weaponFilter.load();
             std::string filter = g_nameFilter;
@@ -2294,7 +2298,121 @@ static bool seh_read_position(void* posComp, WorldVector* out) {
 
 static void hunt_bone_transforms_once(void* viewBehaviour);
 
+// Forward decl — real definition lives later in the file (in the
+// hunt_bone_transforms_once section).
+static const char* extract_il2cpp_string_ascii(void* strObj, char* buf, int bufSize);
+
+// Name→bone-index map for the Transform-walk resolver. Same layout the
+// overlay renderer expects (0=Head, 1=Neck, 2=Chest, 3/4=Spine2/Spine1,
+// 5=Hips, 6-9 left arm chain, 10-13 right arm chain, 14-17 left leg chain,
+// 18-21 right leg chain). Fuzzy: uses substring match ordered so more
+// specific names win.
+struct BoneNameMap { const char* substr; int idx; };
+static const BoneNameMap kBoneMap[] = {
+    // Order matters — more specific first so "LeftHand" doesn't hit before "LeftHandThumb"
+    { "Head",         0 }, { "Neck",         1 },
+    { "Chest",        2 }, { "UpperChest",   2 },
+    { "Spine2",       3 }, { "Spine1",       4 }, { "Spine",   3 },
+    { "Hips",         5 }, { "Pelvis",       5 },
+    { "LeftShoulder", 6 }, { "L_Shoulder",   6 }, { "LeftClavicle", 6 },
+    { "LeftUpperArm", 7 }, { "L_UpperArm",   7 }, { "LeftArm", 7 },
+    { "LeftLowerArm", 8 }, { "L_LowerArm",   8 }, { "LeftForeArm", 8 }, { "LeftElbow", 8 },
+    { "LeftHand",     9 }, { "L_Hand",       9 },
+    { "RightShoulder",10 },{ "R_Shoulder",  10 }, { "RightClavicle",10 },
+    { "RightUpperArm",11 },{ "R_UpperArm",  11 }, { "RightArm",   11 },
+    { "RightLowerArm",12 },{ "R_LowerArm",  12 }, { "RightForeArm",12 }, { "RightElbow", 12 },
+    { "RightHand",    13 },{ "R_Hand",      13 },
+    { "LeftUpperLeg", 14 },{ "L_UpperLeg",  14 }, { "LeftThigh",  14 }, { "L_Femur", 14 },
+    { "LeftLowerLeg", 15 },{ "L_LowerLeg",  15 }, { "LeftKnee",   15 }, { "LeftCalf", 15 },
+    { "LeftFoot",     16 },{ "L_Foot",      16 }, { "LeftAnkle",  16 },
+    { "LeftToe",      17 },{ "L_Toe",       17 },
+    { "RightUpperLeg",18 },{ "R_UpperLeg",  18 }, { "RightThigh", 18 }, { "R_Femur", 18 },
+    { "RightLowerLeg",19 },{ "R_LowerLeg",  19 }, { "RightKnee",  19 }, { "RightCalf",19 },
+    { "RightFoot",    20 },{ "R_Foot",      20 }, { "RightAnkle", 20 },
+    { "RightToe",     21 },{ "R_Toe",       21 },
+};
+
+static int bone_name_to_index(const char* name) {
+    if (!name || !*name) return -1;
+    for (const auto& m : kBoneMap) {
+        if (strstr(name, m.substr)) return m.idx;
+    }
+    return -1;
+}
+
+// Recursive walker — reads transform name, matches against bone map,
+// writes position into bones[] slot. Bounded depth + child count. All
+// SEH-safe via caller's __try (this fn assumes it's inside one).
+static void seh_walk_bones(void* tf, int depth, BoneWorldPos* bones, int* validCount) {
+    if (depth > 8) return;
+    if (!is_readable(tf, 0x10)) return;
+    if (!g_getName || !g_getChildCount || !g_getChild || !g_getPosition) return;
+
+    void* nameStr = g_getName(tf, nullptr);
+    if (nameStr) {
+        char nb[128];
+        if (extract_il2cpp_string_ascii(nameStr, nb, sizeof(nb))) {
+            int bi = bone_name_to_index(nb);
+            if (bi >= 0 && bi < 55 && !bones[bi].valid) {
+                Vec3 p = {0,0,0};
+                g_getPosition(&p, tf, nullptr);
+                if (!std::isnan(p.x) && !std::isnan(p.y) && !std::isnan(p.z)) {
+                    bones[bi].pos = p;
+                    bones[bi].valid = true;
+                    (*validCount)++;
+                }
+            }
+        }
+    }
+    int cc = g_getChildCount(tf, nullptr);
+    if (cc <= 0 || cc > 256) return;
+    for (int i = 0; i < cc; i++) {
+        void* child = g_getChild(tf, i, nullptr);
+        if (child) seh_walk_bones(child, depth + 1, bones, validCount);
+    }
+}
+
+// New primary bone resolver — walks the entity's Transform hierarchy by
+// name. Independent of Animator component's presence and stability.
+// Returns true if any bone slot was populated.
+static bool seh_resolve_bones_by_walk(void* entity, BoneWorldPos* bones) {
+    if (!g_getTransform || !g_getName || !g_getChildCount || !g_getChild || !g_getPosition)
+        return false;
+    __try {
+        // Get root Transform from entity's viewBehaviour
+        void* viewBehaviour = nullptr;
+        if (g_idx_view >= 0) {
+            void* vc = get_component(entity, g_idx_view);
+            if (is_readable(vc, 0x18)) {
+                void* vb = *(void**)((uintptr_t)vc + 0x10);
+                if (is_readable(vb, 0x10) && is_valid_obj(vb)) viewBehaviour = vb;
+            }
+        }
+        if (!viewBehaviour && g_idx_view_data >= 0) {
+            void* vc = get_component(entity, g_idx_view_data);
+            if (is_readable(vc, 0x18)) {
+                void* vb = *(void**)((uintptr_t)vc + 0x10);
+                if (is_readable(vb, 0x10) && is_valid_obj(vb)) viewBehaviour = vb;
+            }
+        }
+        if (!viewBehaviour) return false;
+
+        void* rootTf = g_getTransform(viewBehaviour, nullptr);
+        if (!is_readable(rootTf, 0x10)) return false;
+
+        int validCount = 0;
+        seh_walk_bones(rootTf, 0, bones, &validCount);
+        return validCount > 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static bool seh_resolve_bones(void* entity, BoneWorldPos* bones) {
+    // Prefer Transform-hierarchy walk — doesn't require Animator, doesn't
+    // SEH-storm the way Animator.GetBoneTransform did on despawning entities.
+    if (seh_resolve_bones_by_walk(entity, bones)) return true;
+
     // Latch off after N throws so we don't spam thousands of C++ exceptions
     // per second. Toggled back on if any fresh scan later succeeds.
     static int s_boneThrowStreak = 0;
