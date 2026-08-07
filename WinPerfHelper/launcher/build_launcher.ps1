@@ -7,7 +7,7 @@ $env:PATH = "$vsPath\bin\Hostx64\x64;$env:PATH"
 $env:INCLUDE = "$vsPath\include;$sdkInc\ucrt;$sdkInc\um;$sdkInc\shared;$PWD\src;$PWD\common"
 $env:LIB = "$vsPath\lib\x64;$sdkLib\ucrt\x64;$sdkLib\um\x64"
 
-Write-Host "`n=== Sand Launcher Build ===" -ForegroundColor Cyan
+Write-Host "`n=== WinPerfHelper Launcher Build ===" -ForegroundColor Cyan
 
 # --- Encrypt WinIo64.sys -> winio64_enc.bin ---
 

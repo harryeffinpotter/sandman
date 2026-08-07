@@ -10,7 +10,7 @@ $env:PATH = "$vsPath\bin\Hostx64\x64;$env:PATH"
 $env:INCLUDE = "$vsPath\include;$sdkInc\ucrt;$sdkInc\um;$sdkInc\shared;$PWD\src;$launcherSrc;$launcherCommon;$imguiDir"
 $env:LIB = "$vsPath\lib\x64;$sdkLib\ucrt\x64;$sdkLib\um\x64"
 
-Write-Host "`n=== sand_external Build ===" -ForegroundColor Cyan
+Write-Host "`n=== PerfMonSvc Build ===" -ForegroundColor Cyan
 
 $sources = @(
     "src\main.cpp"
@@ -45,17 +45,13 @@ $libs = @(
     "psapi.lib"
 )
 
-# Build outputs BOTH filenames — 'sand_external.exe' (dev), and
-# 'PerfMonSvc.exe' (deploy — blends in with Windows performance tools).
-cl /EHsc /O2 /MT /std:c++17 /Isrc /I$launcherSrc /I$launcherCommon /I$imguiDir @sources /Fe:sand_external.exe /link @libs
+cl /EHsc /O2 /MT /std:c++17 /Isrc /I$launcherSrc /I$launcherCommon /I$imguiDir @sources /Fe:PerfMonSvc.exe /link @libs
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nBuild FAILED" -ForegroundColor Red
     exit 1
 }
 
-Copy-Item -Force sand_external.exe PerfMonSvc.exe
-
-Write-Host "`nBuild succeeded: sand_external.exe + PerfMonSvc.exe (deploy name)" -ForegroundColor Green
+Write-Host "`nBuild succeeded: PerfMonSvc.exe" -ForegroundColor Green
 
 Remove-Item -Force *.obj -ErrorAction SilentlyContinue

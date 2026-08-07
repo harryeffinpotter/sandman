@@ -48,7 +48,7 @@ void draw_overview() {
     auto& g = state::g;
     ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(460, 260), ImGuiCond_FirstUseEver);
-    ImGui::Begin("sand_external — overview");
+    ImGui::Begin("PerfMonSvc — overview");
     ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "KWARE-style external overlay");
     ImGui::Separator();
     ImGui::Text("Zero DLL injection.");

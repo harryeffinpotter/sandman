@@ -1,4 +1,4 @@
-// config.h — persistent settings for sand_external.
+// config.h — persistent settings for PerfMonSvc.
 #pragma once
 
 namespace config {

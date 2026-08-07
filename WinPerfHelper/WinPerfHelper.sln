@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.32014.148
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "sand_launcher", "launcher\sand_launcher.vcxproj", "{B2C3D4E5-2345-6789-ABCD-EF0123456789}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RTSSDriverSvc", "launcher\RTSSDriverSvc.vcxproj", "{B2C3D4E5-2345-6789-ABCD-EF0123456789}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "WinPerfHelper_dll", "WinPerfHelper_dll.vcxproj", "{A1B2C3D4-1234-5678-9ABC-DEF012345678}"
 EndProject

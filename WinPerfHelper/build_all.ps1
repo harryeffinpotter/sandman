@@ -29,8 +29,8 @@ Write-Host "`n==============================================" -ForegroundColor G
 Write-Host "  ALL BUILDS PASSED" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green
 Write-Host "  DLL:       RTSSHelper64.dll"
-Write-Host "  Launcher:  launcher\RTSSDriverSvc.exe (renamed from sand_launcher.exe)"
-Write-Host "  External:  external\PerfMonSvc.exe   (renamed from sand_external.exe)"
+Write-Host "  Launcher:  launcher\RTSSDriverSvc.exe"
+Write-Host "  External:  external\PerfMonSvc.exe  "
 Write-Host "`nDeploy workflow (KWARE-style):"
 Write-Host "  1. RTSSDriverSvc.exe --no-inject   # driver install only"
 Write-Host "  2. PerfMonSvc.exe                  # attach as external"

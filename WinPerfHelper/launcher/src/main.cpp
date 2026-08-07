@@ -163,7 +163,7 @@ bool load_embedded_blob(int resource_id, std::vector<uint8_t>& out) {
 
 int main(int argc, char* argv[]) {
     // --no-inject: driver-install-only mode. Used to bootstrap
-    // sand_external.exe without ever writing WinPerfHelper.dll into the
+    // PerfMonSvc.exe without ever writing WinPerfHelper.dll into the
     // game process. Keeps the game footprint at ZERO.
     bool no_inject = false;
     for (int i = 1; i < argc; i++) {
@@ -855,7 +855,7 @@ int main(int argc, char* argv[]) {
     // architecture — nothing is ever written into the game process.
     if (no_inject) {
         std::printf("\n[*] --no-inject mode: driver installed, DLL skipped.\n");
-        std::printf("[*] run sand_external.exe to attach as external overlay.\n");
+        std::printf("[*] run PerfMonSvc.exe to attach as external overlay.\n");
         llog("--no-inject: skipping DLL injection\n");
         return 0;
     }

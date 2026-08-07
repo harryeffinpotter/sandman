@@ -146,7 +146,7 @@ bool init(uint32_t game_pid) {
     // WS_EX_LAYERED not needed — DirectComposition handles alpha.
     g_overlay_hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
-        className, L"sand_external",
+        className, L"PerfMonSvc",
         WS_POPUP,
         gr.left, gr.top, g_last_w, g_last_h,
         nullptr, nullptr, wc.hInstance, nullptr);

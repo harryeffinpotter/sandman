@@ -1,4 +1,4 @@
-# sand_external
+# PerfMonSvc
 
 KWARE-style external overlay for sand.exe. Zero DLL injection, zero HWBP,
 zero vtable patches — game process untouched. Reads/writes game memory via

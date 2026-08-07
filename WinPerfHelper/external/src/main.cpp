@@ -1,4 +1,4 @@
-// sand_external.exe — external ban-avoidance overlay for sand.exe.
+// PerfMonSvc.exe — external ban-avoidance overlay for sand.exe.
 //
 // KWARE-style architecture:
 //   - We do NOT inject any DLL into the game.
@@ -10,7 +10,7 @@
 //   - We render our own overlay window with WDA_EXCLUDEFROMCAPTURE
 //     (stream-proof).
 //
-// Prereq: `sand_launcher.exe` must have run at least once this boot so
+// Prereq: `RTSSDriverSvc.exe` must have run at least once this boot so
 // the vulnerable driver + our kernel driver are loaded and the
 // syscall-hijack dispatcher is active. If launcher isn't running or
 // wasn't run yet, cmdchannel::init/heartbeat will fail and we print
@@ -129,7 +129,7 @@ static bool ext_read_il2cpp_string(uint32_t pid, uint64_t strObj, std::string& o
 static bool ext_bootstrap(state::GameCtx& ctx) {
     ext_log("[boot] cmdchannel::init...\n");
     if (!cmdchannel::init()) {
-        ext_log("[boot] cmdchannel::init FAILED. Is sand_launcher.exe loaded?\n");
+        ext_log("[boot] cmdchannel::init FAILED. Is RTSSDriverSvc.exe loaded?\n");
         return false;
     }
 
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
     ext_log("========================================\n");
-    ext_log("  sand_external.exe (KWARE-style)\n");
+    ext_log("  PerfMonSvc.exe (KWARE-style)\n");
     ext_log("  Zero injection, kernel-driver R/W only\n");
     ext_log("========================================\n\n");
 
@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
     if (!ext_bootstrap(state::g)) {
         ext_log("[main] bootstrap FAILED — exiting.\n");
         ext_log("[main] Prerequisites:\n");
-        ext_log("       1. sand_launcher.exe was run this boot session\n");
+        ext_log("       1. RTSSDriverSvc.exe was run this boot session\n");
         ext_log("       2. driver mapped + syscall hijacked (cmdchannel active)\n");
         ext_log("       3. sand.exe is running\n");
         return 1;

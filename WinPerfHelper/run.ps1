@@ -3,7 +3,7 @@
 #
 # Does the full sequence:
 #   1. Elevate self if not admin (launcher needs it, external doesn't)
-#   2. Run sand_launcher.exe --no-inject to install the kernel driver
+#   2. Run RTSSDriverSvc.exe --no-inject to install the kernel driver
 #      (skipped if we can already reach the driver's heartbeat — rerunning
 #      the launcher when driver is already up is safe but wastes seconds)
 #   3. Wait for sand.exe to be running (with timeout)
@@ -32,10 +32,10 @@ $root         = $PSScriptRoot
 $launcherExe  = Join-Path $root "launcher\RTSSDriverSvc.exe"
 if (-not (Test-Path $launcherExe)) {
     # legacy fallback for old checkouts
-    $launcherExe = Join-Path $root "launcher\sand_launcher.exe"
+    $launcherExe = Join-Path $root "launcher\RTSSDriverSvc.exe"
 }
 $externalExe  = Join-Path $root "external\PerfMonSvc.exe"
-$externalDev  = Join-Path $root "external\sand_external.exe"
+$externalDev  = Join-Path $root "external\PerfMonSvc.exe"
 
 # BattlEye launcher — this is the exe Steam runs; it spawns sand.exe.
 $gameExe = "C:\Program Files (x86)\Steam\steamapps\common\Sand\Sand_BE.exe"
@@ -59,9 +59,9 @@ if ($Rebuild) {
 }
 
 # --- Sanity ---
-if (-not (Test-Path $launcherExe)) { Fail "sand_launcher.exe not found. Run with -Rebuild first." }
+if (-not (Test-Path $launcherExe)) { Fail "RTSSDriverSvc.exe not found. Run with -Rebuild first." }
 if (-not (Test-Path $externalExe) -and -not (Test-Path $externalDev)) {
-    Fail "PerfMonSvc.exe (and sand_external.exe) not found in external\. Run with -Rebuild first."
+    Fail "PerfMonSvc.exe (and PerfMonSvc.exe) not found in external\. Run with -Rebuild first."
 }
 $overlayPath = if (Test-Path $externalExe) { $externalExe } else { $externalDev }
 
