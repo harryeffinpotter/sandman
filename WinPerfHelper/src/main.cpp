@@ -21,8 +21,8 @@
 //
 // Everything the DLL writes goes into %APPDATA%\Microsoft\PerfCache\
 // so it blends in with legit Windows caches. Filenames are innocuous
-// too (perf_crash.dat, perf_events.dat, etc.) — no "sand" or "cheat"
-// in any path. Directory is created on first write.
+// too (perf_crash.dat, perf_events.dat, etc.). Directory is created
+// on first write.
 //
 // CRASH_DIR / CRASH_DIR_W keep the same interface so all the existing
 // fopen_s(CRASH_DIR "foo.txt", ...) calls still work — they just now
