@@ -1148,6 +1148,23 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
     static int s_frameCount = 0;
     if (s_frameCount < 5) { dbglog("[frame %d] start\n", s_frameCount); }
 
+    // Global emergency-reset hotkey (F1). GetAsyncKeyState is polled here
+    // instead of via WndProc because WndProc-based INSERT stops working if
+    // the game loses focus or our wndproc hook got clobbered by a freeze.
+    // Effect: force menu visible, kill stream-proof (menu-hiding fullscreen
+    // case), bring overlay window back to topmost.
+    {
+        static bool s_f1_prev = false;
+        bool s_f1_now = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+        if (s_f1_now && !s_f1_prev) {
+            g_menuVisible = true;
+            if (g_overlayImguiInit) g_streamProofSwapRequest.store(2);
+            if (g_gameHwnd) SetForegroundWindow(g_gameHwnd);
+            dbglog("[F1] emergency reset — menu on, stream-proof off\n");
+        }
+        s_f1_prev = s_f1_now;
+    }
+
     {
         int req = g_streamProofSwapRequest.exchange(0);
         if (req == 1 && !g_overlayImguiInit) {
@@ -1749,6 +1766,25 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     }
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), g_overlayImguiInit ? "(overlay hidden from capture)" : "(visible in recordings)");
+
+                    // Diagnostic — is the game actually windowed or is it lying?
+                    BOOL fs = FALSE;
+                    IDXGIOutput* out = nullptr;
+                    if (g_initSwapChain) g_initSwapChain->GetFullscreenState(&fs, &out);
+                    if (out) out->Release();
+                    if (fs) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                            "SWAP CHAIN: EXCLUSIVE FULLSCREEN -- stream-proof menu WILL be hidden.");
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Force windowed")) {
+                            if (g_initSwapChain)
+                                g_initSwapChain->SetFullscreenState(FALSE, nullptr);
+                        }
+                    } else {
+                        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                            "SWAP CHAIN: windowed / borderless -- stream-proof should show menu.");
+                    }
+                    ImGui::TextDisabled("F1 anywhere = emergency reset (menu on, stream-proof off, focus overlay)");
                 }
 
                 if (g_cameraGetMain && g_cameraW2S) {
