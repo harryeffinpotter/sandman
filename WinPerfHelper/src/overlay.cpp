@@ -930,10 +930,32 @@ static void create_stream_proof_overlay() {
     g_dcompDevice->Commit();
 
     ID3D11Texture2D* backBuf = nullptr;
-    g_overlaySwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuf);
-    if (backBuf) {
-        g_overlayDevice->CreateRenderTargetView(backBuf, nullptr, &g_overlayRTV);
-        backBuf->Release();
+    HRESULT gbHr = g_overlaySwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuf);
+    if (FAILED(gbHr) || !backBuf) {
+        dbglog("[stream-proof] GetBuffer FAILED hr=0x%lX — tearing down\n", gbHr);
+        g_dcompVisual->Release();  g_dcompVisual = nullptr;
+        g_dcompTarget->Release();  g_dcompTarget = nullptr;
+        g_dcompDevice->Release();  g_dcompDevice = nullptr;
+        g_overlaySwapChain->Release(); g_overlaySwapChain = nullptr;
+        factory2->Release(); adapter->Release(); dxgiDevice->Release();
+        g_overlayDevice->Release(); g_overlayDevice = nullptr;
+        g_overlayContext->Release(); g_overlayContext = nullptr;
+        DestroyWindow(g_overlayHwnd); g_overlayHwnd = nullptr;
+        return;
+    }
+    HRESULT rtvHr = g_overlayDevice->CreateRenderTargetView(backBuf, nullptr, &g_overlayRTV);
+    backBuf->Release();
+    if (FAILED(rtvHr) || !g_overlayRTV) {
+        dbglog("[stream-proof] CreateRenderTargetView FAILED hr=0x%lX — tearing down\n", rtvHr);
+        g_dcompVisual->Release();  g_dcompVisual = nullptr;
+        g_dcompTarget->Release();  g_dcompTarget = nullptr;
+        g_dcompDevice->Release();  g_dcompDevice = nullptr;
+        g_overlaySwapChain->Release(); g_overlaySwapChain = nullptr;
+        factory2->Release(); adapter->Release(); dxgiDevice->Release();
+        g_overlayDevice->Release(); g_overlayDevice = nullptr;
+        g_overlayContext->Release(); g_overlayContext = nullptr;
+        DestroyWindow(g_overlayHwnd); g_overlayHwnd = nullptr;
+        return;
     }
 
     ShowWindow(g_overlayHwnd, SW_SHOWNOACTIVATE);
@@ -942,7 +964,7 @@ static void create_stream_proof_overlay() {
     adapter->Release();
     dxgiDevice->Release();
 
-    dbglog("[stream-proof] overlay created at %p\n", g_overlayHwnd);
+    dbglog("[stream-proof] overlay created at %p rtv=%p\n", g_overlayHwnd, g_overlayRTV);
 }
 
 static void destroy_stream_proof_overlay() {
@@ -961,9 +983,18 @@ static void safe_imgui_render_and_present_overlay() {
     __try {
         ImGui::Render();
 
-        if (g_streamProof.load() && g_overlayImguiInit) {
-            RECT gr;
-            GetWindowRect(g_gameHwnd, &gr);
+        if (g_streamProof.load() && g_overlayImguiInit
+            && g_overlayContext && g_overlayRTV && g_overlaySwapChain
+            && g_overlayHwnd && g_gameHwnd) {
+            RECT gr = {};
+            if (!GetWindowRect(g_gameHwnd, &gr)) {
+                // Game window gone. Silently fall through to game-device path.
+                if (g_mainRenderTargetView) {
+                    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+                }
+                ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+                return;
+            }
             MoveWindow(g_overlayHwnd, gr.left, gr.top, gr.right - gr.left, gr.bottom - gr.top, FALSE);
 
             LONG_PTR exStyle = GetWindowLongPtrW(g_overlayHwnd, GWL_EXSTYLE);
@@ -1121,14 +1152,28 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         int req = g_streamProofSwapRequest.exchange(0);
         if (req == 1 && !g_overlayImguiInit) {
             create_stream_proof_overlay();
-            if (g_overlayHwnd && g_overlayDevice && g_overlayContext) {
+            // Full readiness gate — every pointer we'll deref later must be
+            // valid. If create_stream_proof_overlay tore itself down on any
+            // failure, at least one of these will be null and we stay on
+            // the game device (menu stays visible in-game, just not stream-
+            // proof).
+            if (g_overlayHwnd && g_overlayDevice && g_overlayContext
+                && g_overlaySwapChain && g_overlayRTV) {
                 ImGui_ImplDX11_Shutdown();
-                ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
-                g_overlayImguiInit = true;
-                g_streamProof.store(true);
-                dbglog("[stream-proof] enabled (deferred)\n");
+                if (!ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext)) {
+                    dbglog("[stream-proof] ImGui_ImplDX11_Init on overlay device FAILED — reverting to game device\n");
+                    // Re-init on the game device so we don't have zero backends
+                    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+                    destroy_stream_proof_overlay();
+                    g_streamProof.store(false);
+                } else {
+                    g_overlayImguiInit = true;
+                    g_streamProof.store(true);
+                    dbglog("[stream-proof] enabled (deferred) rtv=%p\n", g_overlayRTV);
+                }
             } else {
-                dbglog("[stream-proof] enable failed, staying on game device\n");
+                dbglog("[stream-proof] enable failed (hwnd=%p dev=%p ctx=%p sc=%p rtv=%p) — staying on game device\n",
+                       g_overlayHwnd, g_overlayDevice, g_overlayContext, g_overlaySwapChain, g_overlayRTV);
                 g_streamProof.store(false);
             }
         } else if (req == 2 && g_overlayImguiInit) {
