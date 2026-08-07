@@ -1523,6 +1523,18 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         g_jumpForceMult.store(m);
                     ImGui::TextDisabled("Writes Jump.force *= mult once per entity (offset guess 0x10 — adjust if no effect).");
                 }
+                {
+                    float m = g_speedMult.load();
+                    if (ImGui::SliderFloat("Speed multiplier", &m, 1.0f, 10.0f, "%.2fx"))
+                        g_speedMult.store(m);
+                    ImGui::TextDisabled("Writes SpeedData +0x10 *= mult.");
+                }
+                {
+                    bool v = g_walkerFly.load();
+                    if (ImGui::Checkbox("Walker fly (in-vehicle)", &v)) g_walkerFly.store(v);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(writes CheatWalkerFly+0x10 = true)");
+                }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "World mods");
                 {

@@ -120,6 +120,12 @@ static constexpr int JUMP_FORCE_FIELD_OFFSET = 0x10;
 // Default 0.5 works if it's normalized (== noon).
 std::atomic<bool>  g_alwaysDay{false};
 std::atomic<float> g_dayTime{0.5f};
+// Speed multiplier — writes to SpeedData component. Field offset guess 0x10.
+std::atomic<float> g_speedMult{1.0f};
+static constexpr int SPEED_MULT_FIELD_OFFSET = 0x10;
+// Walker fly (in-vehicle) — writes bool to CheatWalkerFly component.
+std::atomic<bool>  g_walkerFly{false};
+static constexpr int WALKER_FLY_FIELD_OFFSET = 0x10;
 // Populated at worker init — pointer to TimeOfDayManager singleton.
 volatile uintptr_t g_todInstance = 0;
 static constexpr int TOD_CURRENTTIME_OFFSET = 0x88;
@@ -868,9 +874,11 @@ void apply_player_mods() {
     bool noFall = g_noFallDamage.load();
     bool noJumpDelay = g_noJumpDelay.load();
     bool infAmmo = g_infiniteAmmo.load();
-    if (!noFall && !noJumpDelay && !infAmmo) return;
-    if (g_idx_fall_damage < 0 && g_idx_jump_delay < 0
-        && g_idx_ammo < 0 && g_idx_inv_ammo < 0) return;
+    bool anyToggle = noFall || noJumpDelay || infAmmo
+                     || g_jumpForceMult.load() > 1.001f
+                     || g_speedMult.load()    > 1.001f
+                     || g_walkerFly.load();
+    if (!anyToggle) return;
 
     void* gcm = (void*)g_gameContextModule;
     if (!gcm) return;
@@ -921,6 +929,25 @@ void apply_player_mods() {
             if (infAmmo) {
                 if (g_idx_ammo >= 0)     strip_component(e, g_idx_ammo);
                 if (g_idx_inv_ammo >= 0) strip_component(e, g_idx_inv_ammo);
+            }
+            // Speed multiplier — write-once-per-entity via range guard so
+            // we don't compound. Applied to SpeedData component.
+            float speedMult = g_speedMult.load();
+            if (speedMult > 1.001f && g_idx_speed_data >= 0) {
+                void* sc = get_component(e, g_idx_speed_data);
+                if (is_readable(sc, (size_t)(SPEED_MULT_FIELD_OFFSET + 4))) {
+                    float cur = *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET);
+                    if (cur > 0.0f && cur < 100.0f) {
+                        *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET) = cur * speedMult;
+                    }
+                }
+            }
+            // Walker fly — flip CheatWalkerFly to true.
+            if (g_walkerFly.load() && g_idx_cheat_walker_fly >= 0) {
+                void* wc = get_component(e, g_idx_cheat_walker_fly);
+                if (is_readable(wc, (size_t)(WALKER_FLY_FIELD_OFFSET + 1))) {
+                    *(uint8_t*)((uintptr_t)wc + WALKER_FLY_FIELD_OFFSET) = 1;
+                }
             }
             // Jump-force multiplier — write-once-per-entity via sentinel
             // to avoid compounding every tick. Sentinel is the negative
