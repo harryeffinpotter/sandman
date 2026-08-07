@@ -1,11 +1,11 @@
-#requires -Version 5.0
-# run.ps1 — one-shot launcher. Order-corrected:
+﻿#requires -Version 5.0
+# run.ps1 - one-shot launcher. Order-corrected:
 #   1. Elevate self
 #   2. (opt) rebuild
 #   3. Launch Sand_BE.exe if not running
 #   4. Wait for sand.exe (the real game process, spawned by BE splash)
 #   5. Small grace period
-#   6. THEN run RTSSDriverSvc.exe — driver install + (optional) DLL inject
+#   6. THEN run RTSSDriverSvc.exe - driver install + (optional) DLL inject
 #   7. If -External, also launch PerfMonSvc.exe
 #
 # The previous version ran the launcher BEFORE the wait, which meant the
@@ -17,7 +17,7 @@ param(
     [switch]$Rebuild,
     [switch]$External,
     [switch]$SkipGame,
-    [switch]$Manual,        # opt IN to the "press ENTER when ready" gate — default now auto-waits
+    [switch]$Manual,        # opt IN to the "press ENTER when ready" gate - default now auto-waits
     [int]$WaitSeconds = 300,
     [int]$AutoGraceSec = 40, # sleep after sand.exe appears (game should be rendering by then)
     [int]$RetryCount = 4,    # retry launcher this many times if injection fails
@@ -99,7 +99,7 @@ $issues = @()
 
 $osBuild = (Get-CimInstance Win32_OperatingSystem).BuildNumber
 Say "  Windows build:        $osBuild"
-if ($osBuild -ne "26200") { $issues += "Windows build $osBuild (target: 26200) — kernel offsets may not match" }
+if ($osBuild -ne "26200") { $issues += "Windows build $osBuild (target: 26200) - kernel offsets may not match" }
 
 $dotnet = try { [System.Reflection.Assembly]::LoadWithPartialName('System') -ne $null } catch { $false }
 Say "  .NET assemblies:      $(if ($dotnet) { 'OK' } else { 'MISSING' })"
@@ -109,7 +109,7 @@ if (Test-Path $gameExe) {
     Say "  Sand_BE.exe:          $gameExe" "Green"
 } else {
     Say "  Sand_BE.exe:          NOT FOUND at $gameExe" "Red"
-    $issues += "Sand game not at expected path — edit `$gameExe in run.ps1 if it's elsewhere"
+    $issues += "Sand game not at expected path - edit `$gameExe in run.ps1 if it's elsewhere"
 }
 
 if (Test-Path $rtssExe) {
@@ -117,7 +117,7 @@ if (Test-Path $rtssExe) {
 } else {
     if (-not $External) {
         Say "  RTSS.exe:             NOT FOUND (DLL mode needs it)" "Red"
-        $issues += "RTSS not installed at $rtssExe — download from guru3d.com/download/rtss/"
+        $issues += "RTSS not installed at $rtssExe - download from guru3d.com/download/rtss/"
     } else {
         Say "  RTSS.exe:             not installed (fine for -External mode)" "Yellow"
     }
@@ -126,7 +126,7 @@ if (Test-Path $rtssExe) {
 $wdFilter = Get-Service -Name "WdFilter" -ErrorAction SilentlyContinue
 if ($wdFilter -and $wdFilter.Status -eq "Running") {
     Say "  Defender WdFilter:    RUNNING (launcher will refuse to install driver)" "Red"
-    $issues += "Windows Defender is active — need to disable real-time protection OR use Sordum's Defender Control"
+    $issues += "Windows Defender is active - need to disable real-time protection OR use Sordum's Defender Control"
 } else {
     Say "  Defender WdFilter:    off" "Green"
 }
@@ -174,14 +174,14 @@ if (-not (Test-IsAdmin)) {
     exit 0
 }
 
-# --- RTSS check (injection vector — MUST be running before game starts) ---
+# --- RTSS check (injection vector - MUST be running before game starts) ---
 function Get-RtssProc { Get-Process -Name "RTSS" -ErrorAction SilentlyContinue | Select-Object -First 1 }
 
 if (-not $External) {
     # RTSS only needed for DLL-mode injection. External mode bypasses it.
     if (-not (Get-RtssProc)) {
         if (Test-Path $rtssExe) {
-            Say "RTSS not running — starting it..." "Yellow"
+            Say "RTSS not running - starting it..." "Yellow"
             Start-Process -FilePath $rtssExe
             Start-Sleep -Seconds 3
             if (-not (Get-RtssProc)) {
@@ -211,7 +211,7 @@ if (-not $SkipGame -and -not (Get-SandProc) -and -not (Get-BeProc)) {
         Say "starting Sand_BE.exe..."
         Start-Process -FilePath $gameExe
     } else {
-        Say "game not found at $gameExe — start it yourself." "Yellow"
+        Say "game not found at $gameExe - start it yourself." "Yellow"
     }
 }
 
@@ -236,7 +236,7 @@ if (-not $found) {
 }
 $sandProc = Get-SandProc
 Say "sand.exe process detected. PID=$($sandProc.Id) StartTime=$($sandProc.StartTime)" "Green"
-Say "(BUT the game itself may still be loading — WAIT.)" "Yellow"
+Say "(BUT the game itself may still be loading - WAIT.)" "Yellow"
 
 if ($Manual) {
     Write-Host ""
@@ -252,7 +252,7 @@ if ($Manual) {
     Write-Host ""
 }
 
-# Re-verify sand.exe survived — BE sometimes kills the splash sand.exe
+# Re-verify sand.exe survived - BE sometimes kills the splash sand.exe
 # and respawns a NEW one for actual gameplay. If we injected against
 # the dead PID, it silently failed. Poll for a healthy sand.exe.
 Say "verifying sand.exe is still alive..."
@@ -268,14 +268,14 @@ while ((Get-Date) -lt $verifyDeadline) {
                 break
             }
         } catch {}
-        # No HWND yet — game still on splash. Keep waiting.
+        # No HWND yet - game still on splash. Keep waiting.
     }
     Start-Sleep -Milliseconds 500
 }
 if (-not $goodSand) {
     Fail "sand.exe is not in a good state (no main window). Get INTO the game (past BE splash + past login) then re-run with -SkipGame -SkipLauncher."
 }
-Say "OK — sand.exe PID=$($goodSand.Id) has main window (hwnd=$($goodSand.MainWindowHandle)). Proceeding." "Green"
+Say "OK - sand.exe PID=$($goodSand.Id) has main window (hwnd=$($goodSand.MainWindowHandle)). Proceeding." "Green"
 
 # --- NOW run the launcher (with retry if it fails) ---
 if (-not $SkipLauncher) {
@@ -284,15 +284,15 @@ if (-not $SkipLauncher) {
     while ($attempt -lt $RetryCount) {
         $attempt++
         if ($External) {
-            Say "launcher attempt $attempt/$RetryCount (external mode — driver install only)..." "Cyan"
+            Say "launcher attempt $attempt/$RetryCount (external mode - driver install only)..." "Cyan"
             $lp = Start-Process -FilePath $launcherExe -ArgumentList "--no-inject" -Wait -PassThru -NoNewWindow
         } else {
-            Say "launcher attempt $attempt/$RetryCount (FULL DLL — auto-clicking Inject on picker if it pops)..." "Cyan"
+            Say "launcher attempt $attempt/$RetryCount (FULL DLL - auto-clicking Inject on picker if it pops)..." "Cyan"
             $lp = Start-Process -FilePath $launcherExe -Wait -PassThru -NoNewWindow
         }
         # Exit 0 = clean, 11 = 16.b.gamma FAIL (RTSS frame counter still 0),
         # 9 = target not found, others = various driver issues.
-        # Retry on 9 and 11 — game may just need more time to render.
+        # Retry on 9 and 11 - game may just need more time to render.
         if ($lp.ExitCode -eq 0) {
             Say "launcher OK on attempt $attempt." "Green"
             $success = $true
@@ -300,17 +300,17 @@ if (-not $SkipLauncher) {
         }
         if ($lp.ExitCode -in 9,11) {
             if ($attempt -lt $RetryCount) {
-                Say "launcher exit $($lp.ExitCode) — game not ready yet. Retrying in ${RetryDelaySec}s..." "Yellow"
+                Say "launcher exit $($lp.ExitCode) - game not ready yet. Retrying in ${RetryDelaySec}s..." "Yellow"
                 for ($i = $RetryDelaySec; $i -gt 0; $i--) {
                     Write-Host -NoNewline "`r  next attempt in $i s   "
                     Start-Sleep -Seconds 1
                 }
                 Write-Host ""
             } else {
-                Say "launcher exit $($lp.ExitCode) — max retries reached." "Red"
+                Say "launcher exit $($lp.ExitCode) - max retries reached." "Red"
             }
         } else {
-            Say "launcher exit $($lp.ExitCode) — driver-side error, not retryable. Check %APPDATA%\Microsoft\PerfCache\perf_install.dat" "Yellow"
+            Say "launcher exit $($lp.ExitCode) - driver-side error, not retryable. Check %APPDATA%\Microsoft\PerfCache\perf_install.dat" "Yellow"
             break
         }
     }
@@ -334,5 +334,5 @@ if ($External) {
     Say "if nothing shows: check %APPDATA%\Microsoft\PerfCache\perf_events.dat for the ringlog"
 }
 
-Say "keeping window open — close manually when done."
+Say "keeping window open - close manually when done."
 Read-Host "press enter to exit"

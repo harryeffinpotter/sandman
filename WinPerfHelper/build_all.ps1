@@ -1,7 +1,7 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 Write-Host "`n==============================================" -ForegroundColor Cyan
-Write-Host "  WinPerfHelper — full build (DLL + launcher + external)" -ForegroundColor Cyan
+Write-Host "  WinPerfHelper - full build (DLL + launcher + external)" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
 $root = $PSScriptRoot

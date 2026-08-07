@@ -1,4 +1,4 @@
-$vsPath = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231"
+﻿$vsPath = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231"
 $sdkInc = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0"
 $sdkLib = "C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0"
 $rcExe  = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\rc.exe"
@@ -27,7 +27,7 @@ function Encrypt-RollingXor([byte[]]$data) {
     return $data
 }
 
-# Look for the raw WinIo64.sys — LO's dev path, else in vendor/ next to script
+# Look for the raw WinIo64.sys - LO's dev path, else in vendor/ next to script
 $candidates = @(
     "$PWD\vendor\WinIo64.sys",
     "C:\Users\ysg\projects\Vulnerable Drivers\C__Users_user_Desktop_WinIo64_Sys\C__Users_user_Desktop_WinIo64.Sys"
@@ -36,7 +36,7 @@ $winioPath = $null
 foreach ($c in $candidates) { if (Test-Path $c) { $winioPath = $c; break } }
 if (-not $winioPath) {
     if (Test-Path "$PWD\winio64_enc.bin") {
-        Write-Host "WinIo64.sys raw not found — using pre-existing winio64_enc.bin as-is." -ForegroundColor Yellow
+        Write-Host "WinIo64.sys raw not found - using pre-existing winio64_enc.bin as-is." -ForegroundColor Yellow
         $winioPath = "SKIP_ENCRYPT"
     } else {
         Write-Host "ERROR: no WinIo64.sys and no winio64_enc.bin. Cannot build." -ForegroundColor Red

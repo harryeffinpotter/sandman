@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM Double-click me to open the launcher dialog.
 REM If anything errors, the window stays open so you can read the message.
 

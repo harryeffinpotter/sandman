@@ -1,5 +1,5 @@
-#requires -Version 5.0
-# launch.ps1 — click-through launcher UI. Double-click this from Explorer;
+﻿#requires -Version 5.0
+# launch.ps1 - click-through launcher UI. Double-click this from Explorer;
 # picks between DLL mode and external mode with a proper Windows dialog.
 
 $ErrorActionPreference = "Stop"
@@ -11,7 +11,7 @@ trap {
 }
 
 try { Add-Type -AssemblyName System.Windows.Forms } catch {
-    Write-Host "[launch.ps1] System.Windows.Forms unavailable — need .NET Framework 4.x installed." -ForegroundColor Red
+    Write-Host "[launch.ps1] System.Windows.Forms unavailable - need .NET Framework 4.x installed." -ForegroundColor Red
     Read-Host "press ENTER to close"
     exit 2
 }
@@ -26,7 +26,7 @@ if (-not $root) {
 $runScript = Join-Path $root "run.ps1"
 if (-not (Test-Path $runScript)) {
     Write-Host "[launch.ps1] run.ps1 not found at: $runScript" -ForegroundColor Red
-    Write-Host "You need the full project directory — LAUNCH.bat can't run standalone." -ForegroundColor Yellow
+    Write-Host "You need the full project directory - LAUNCH.bat can't run standalone." -ForegroundColor Yellow
     Read-Host "press ENTER to close"
     exit 4
 }
@@ -51,7 +51,7 @@ $title.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.Fon
 $form.Controls.Add($title)
 
 # ==========================================
-# DLL MODE — big button + description
+# DLL MODE - big button + description
 # ==========================================
 $dllBox = New-Object System.Windows.Forms.GroupBox
 $dllBox.Text = "  Full DLL mode  "
@@ -98,7 +98,7 @@ $dllBtn.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.Fo
 $dllBox.Controls.Add($dllBtn)
 
 # ==========================================
-# EXTERNAL MODE — big button + description
+# EXTERNAL MODE - big button + description
 # ==========================================
 $extBox = New-Object System.Windows.Forms.GroupBox
 $extBox.Text = "  External / KWARE mode  "
@@ -174,7 +174,7 @@ $skipGameCB.ForeColor = [System.Drawing.Color]::LightGray
 $optPanel.Controls.Add($skipGameCB)
 
 # ==========================================
-# Button handlers — build args + fire run.ps1
+# Button handlers - build args + fire run.ps1
 # ==========================================
 function Invoke-Run([bool]$external) {
     $args = @()
@@ -188,7 +188,7 @@ function Invoke-Run([bool]$external) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
     $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runScript`" " + ($args -join " ")
-    # Not elevated here — run.ps1 self-elevates. Show its window so LO can
+    # Not elevated here - run.ps1 self-elevates. Show its window so LO can
     # watch driver install output.
     $psi.WindowStyle = "Normal"
     [System.Diagnostics.Process]::Start($psi) | Out-Null
