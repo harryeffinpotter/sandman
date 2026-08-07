@@ -1838,8 +1838,12 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             "SWAP CHAIN: EXCLUSIVE FULLSCREEN -- stream-proof menu WILL be hidden.");
                         ImGui::SameLine();
                         if (ImGui::SmallButton("Force windowed")) {
+                            // One-shot flip -- but the game re-forces fullscreen
+                            // next frame if we don't also enable the every-frame
+                            // toggle. So do BOTH.
                             if (g_initSwapChain)
                                 g_initSwapChain->SetFullscreenState(FALSE, nullptr);
+                            g_forceWindowed.store(true);
                         }
                     } else {
                         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
