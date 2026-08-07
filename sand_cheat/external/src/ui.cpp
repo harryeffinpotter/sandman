@@ -401,6 +401,26 @@ void draw_writeops() {
     ImGui::End();
 }
 
+void draw_opsec() {
+    ImGui::SetNextWindowPos(ImVec2(1080, 440), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 240), ImGuiCond_FirstUseEver);
+    ImGui::Begin("opsec");
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Runtime track covering");
+    ImGui::Separator();
+    ImGui::Checkbox("silent_mode (no disk writes)", &state::g.silent_mode);
+    ImGui::TextDisabled("Skips perfmon.log + perfmon.ini writes this session.");
+    ImGui::Checkbox("preflight refuse if BEDaisy loaded", &state::g.preflight_bedaisy);
+    ImGui::Separator();
+    ImGui::Text("Scan timing (jittered to avoid regular rhythm)");
+    ImGui::SliderInt("base ms",   &state::g.scan_tick_base_ms,   50, 500);
+    ImGui::SliderInt("jitter ms", &state::g.scan_tick_jitter_ms,  0, 500);
+    ImGui::SliderInt("first-scan delay (s)", &state::g.first_scan_delay_s, 0, 60);
+    ImGui::Separator();
+    ImGui::TextDisabled("Kernel-side scrubs happen in launcher (PiDDBCache,");
+    ImGui::TextDisabled("KernelHashBucket, MmUnloadedDrivers pre-zero).");
+    ImGui::End();
+}
+
 void draw_all() {
     if (!state::g.menu_visible) return;
     draw_overview();
@@ -408,6 +428,7 @@ void draw_all() {
     draw_entity_list();
     draw_radar();
     draw_writeops();
+    draw_opsec();
 }
 
 } // namespace ui

@@ -30,6 +30,7 @@
 #include "ui.h"
 #include "scan.h"
 #include "config.h"
+#include "opsec.h"
 #include "imgui.h"
 
 // -----------------------------------------------------------------------
@@ -63,8 +64,7 @@ static void ext_log(const char* fmt, ...) {
         }
     }
     if (s_path_ready) {
-        FILE* f = nullptr;
-        fopen_s(&f, s_trace_path, "a");
+        FILE* f = opsec::silent_fopen(s_trace_path, "a");
         if (f) {
             fprintf(f, "[%lu] %s", GetTickCount(), buf);
             fclose(f);
@@ -202,6 +202,13 @@ int main(int argc, char** argv) {
 
     config::load();
 
+    if (!opsec::preflight_ok()) {
+        ext_log("[main] OpSec preflight FAILED — refusing to attach.\n");
+        ext_log("[main] Disable BE / kill offending drivers, then re-run.\n");
+        return 4;
+    }
+    opsec::arm_settle_timer();
+
     if (!ext_bootstrap(state::g)) {
         ext_log("[main] bootstrap FAILED — exiting.\n");
         ext_log("[main] Prerequisites:\n");
@@ -234,12 +241,15 @@ int main(int argc, char** argv) {
         ui::poll_hotkeys();
         overlay::pump_messages();
 
-        // Scan tick — throttle to every ~200ms so we don't hammer the kernel
-        // driver. UI stays smooth because rendering is decoupled.
+        // Scan tick — jittered interval + startup settle window. Avoids
+        // regular syscall rhythm that could fingerprint us over minutes.
         ULONGLONG now = GetTickCount64();
-        if (state::g.scan_enabled && (now - last_scan_tick) >= 200) {
+        static uint32_t next_delay_ms = 200;
+        if (state::g.scan_enabled && opsec::settled()
+            && (now - last_scan_tick) >= next_delay_ms) {
             last_scan_tick = now;
             scan::tick();
+            next_delay_ms = opsec::next_scan_delay_ms();
         }
 
         overlay::frame(ui::draw_all);

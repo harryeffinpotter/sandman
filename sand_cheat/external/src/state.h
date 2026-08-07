@@ -39,6 +39,33 @@ struct GameCtx {
     // (first PlayerAvatar with position). When set, scan uses this
     // entity as the reference point for distance sorting + radar centering.
     int32_t  self_entity_id      = 0;
+
+    // -----------------------------------------------------------
+    // OpSec knobs (KWARE-style track covering during runtime)
+    // -----------------------------------------------------------
+
+    // Silent mode: no disk writes at all during operation (no perfmon.log,
+    // no perfmon.ini writes). All state is memory-only. Config LOAD still
+    // works so an existing perfmon.ini boots correctly, but nothing is
+    // saved back. Use when we've verified stable settings and want a
+    // clean disk footprint per session.
+    bool     silent_mode         = false;
+
+    // Preflight: refuse to attach if BEDaisy.sys is loaded. Prevents any
+    // syscall/handle activity in the presence of the AC kernel driver.
+    // Since we already run without OpenProcess handles this is a
+    // belt-and-suspenders check — matches kware §3.16 WdFilter refusal.
+    bool     preflight_bedaisy   = true;
+
+    // Delay first scan by N seconds after attach — lets any BE
+    // initial-scan window pass before we start touching game memory.
+    int      first_scan_delay_s  = 5;
+
+    // Scan tick base interval + jitter. Instead of a fixed 200ms tick
+    // we vary between [base, base+jitter] each iteration so the syscall
+    // rhythm isn't a clean sine wave.
+    int      scan_tick_base_ms   = 180;
+    int      scan_tick_jitter_ms = 120;
 };
 
 extern GameCtx g;

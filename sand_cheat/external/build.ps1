@@ -21,6 +21,7 @@ $sources = @(
     "src\finder.cpp"
     "src\config.cpp"
     "src\writeops.cpp"
+    "src\opsec.cpp"
     "$launcherSrc\cmdchannel.cpp"
     "$imguiDir\imgui.cpp"
     "$imguiDir\imgui_draw.cpp"
@@ -41,6 +42,7 @@ $libs = @(
     "dwmapi.lib"
     "dcomp.lib"
     "dxguid.lib"
+    "psapi.lib"
 )
 
 # Build outputs BOTH filenames — 'sand_external.exe' (dev), and
