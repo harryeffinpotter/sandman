@@ -10,10 +10,10 @@
 *.sys.bak
 
 # Encrypted driver blobs (produced by build_launcher.ps1 at build time)
-*_enc.bin
-iqvw64_enc.bin
-kerneldriver_enc.bin
-winio64_enc.bin
+
+
+
+
 
 # ImGui persisted layout
 imgui_layout.ini

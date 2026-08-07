@@ -27,13 +27,31 @@ function Encrypt-RollingXor([byte[]]$data) {
     return $data
 }
 
-$winioPath  = "C:\Users\ysg\projects\Vulnerable Drivers\C__Users_user_Desktop_WinIo64_Sys\C__Users_user_Desktop_WinIo64.Sys"
+# Look for the raw WinIo64.sys — LO's dev path, else in vendor/ next to script
+$candidates = @(
+    "$PWD\vendor\WinIo64.sys",
+    "C:\Users\ysg\projects\Vulnerable Drivers\C__Users_user_Desktop_WinIo64_Sys\C__Users_user_Desktop_WinIo64.Sys"
+)
+$winioPath = $null
+foreach ($c in $candidates) { if (Test-Path $c) { $winioPath = $c; break } }
+if (-not $winioPath) {
+    if (Test-Path "$PWD\winio64_enc.bin") {
+        Write-Host "WinIo64.sys raw not found — using pre-existing winio64_enc.bin as-is." -ForegroundColor Yellow
+        $winioPath = "SKIP_ENCRYPT"
+    } else {
+        Write-Host "ERROR: no WinIo64.sys and no winio64_enc.bin. Cannot build." -ForegroundColor Red
+        exit 1
+    }
+}
 $kdrvPath   = "$PWD\kerneldriver.sys"
 
-foreach ($pair in @(
-    @($winioPath, "$PWD\winio64_enc.bin", "WinIo64.sys"),
-    @($kdrvPath,  "$PWD\kerneldriver_enc.bin", "kerneldriver.sys")
-)) {
+$pairs = @()
+if ($winioPath -ne "SKIP_ENCRYPT") {
+    $pairs += ,@($winioPath, "$PWD\winio64_enc.bin", "WinIo64.sys")
+}
+$pairs += ,@($kdrvPath, "$PWD\kerneldriver_enc.bin", "kerneldriver.sys")
+
+foreach ($pair in $pairs) {
     $src, $dst, $label = $pair
     if (-not (Test-Path $src)) {
         Write-Host "ERROR: $label not found at: $src" -ForegroundColor Red

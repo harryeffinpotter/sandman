@@ -24,7 +24,7 @@ static const char* config_path() {
         snprintf(path, sizeof(path), "%s\\perfmon.ini", dir);
     } else {
         strncpy_s(path, sizeof(path),
-                  "C:\\Users\\ysg\\projects\\WinPerfHelper\\external\\external_config.ini",
+                  "C:\\ProgramData\\Microsoft\\PerfCache\\external\\external_config.ini",
                   _TRUNCATE);
     }
     return path;

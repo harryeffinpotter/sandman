@@ -574,7 +574,7 @@ static void scan_entities() {
         static bool s_diagDone = false;
         if (!s_diagDone && entityCount > 0 && entityPtrs) {
             s_diagDone = true;
-            FILE* df = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\entity_diag.txt", "w");
+            FILE* df = fopen("C:\\ProgramData\\Microsoft\\PerfCache\\dumps\\entity_diag.txt", "w");
             auto dout = [&](const char* fmt, ...) {
                 va_list a; va_start(a, fmt);
                 char buf[2048]; vsnprintf(buf, sizeof(buf), fmt, a);
@@ -1208,7 +1208,7 @@ static void handle_input() {
             entityCount = (int)tempEnts.size();
         }
 
-        FILE* ef = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\entity_dump.txt", "w");
+        FILE* ef = fopen("C:\\ProgramData\\Microsoft\\PerfCache\\dumps\\entity_dump.txt", "w");
         if (!ef) break;
         fprintf(ef, "Total entities: %d\n", entityCount);
         fprintf(ef, "Indices: BP=%d Pos=%d IA=%d INA=%d Intrs=%d IT=%d Par=%d ItemT=%d Id=%d\n\n",
@@ -1268,7 +1268,7 @@ static void handle_input() {
     case 'p':
     case 'P': {
         void* gcm = (void*)g_gameContextModule;
-        FILE* pf = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\probe.txt", "w");
+        FILE* pf = fopen("C:\\ProgramData\\Microsoft\\PerfCache\\dumps\\probe.txt", "w");
         auto pout = [&](const char* fmt, ...) {
             va_list a; va_start(a, fmt);
             char buf[1024]; vsnprintf(buf, sizeof(buf), fmt, a);
@@ -1409,7 +1409,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 size_t arr_len = *(size_t*)((uintptr_t)items_arr + 0x18);
                 void** elements = (void**)((uintptr_t)items_arr + 0x20);
                 int count = (size < (int)arr_len) ? size : (int)arr_len;
-                FILE* cf = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\component_names.txt", "w");
+                FILE* cf = fopen("C:\\ProgramData\\Microsoft\\PerfCache\\dumps\\component_names.txt", "w");
                 if (cf) {
                     for (int i = 0; i < count; i++) {
                         std::string s = read_il2cpp_string(elements[i]);

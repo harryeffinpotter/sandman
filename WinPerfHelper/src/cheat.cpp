@@ -704,7 +704,7 @@ bool discover_component_indices(void* gameContextModule) {
     FILE* cdf = nullptr;
     { char p[MAX_PATH]; char ad[MAX_PATH]; DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
       if (n && n < MAX_PATH) { snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_j.dat", ad); }
-      else { strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\WinPerfHelper\\ComponentDump.txt", _TRUNCATE); }
+      else { strncpy_s(p, sizeof(p), "C:\\ProgramData\\Microsoft\\PerfCache\\ComponentDump.txt", _TRUNCATE); }
       fopen_s(&cdf, p, "w"); }
     if (cdf) fprintf(cdf, "# All %d component classes registered on GameContextModule\n\n", count);
     for (int i = 0; i < count; i++) {
@@ -1253,7 +1253,7 @@ static void process_one_entity(
             FILE* nf = nullptr;
             char p[MAX_PATH]; char ad[MAX_PATH]; DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
             if (n && n < MAX_PATH) { snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_k.dat", ad); }
-            else { strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\WinPerfHelper\\entity_names.txt", _TRUNCATE); }
+            else { strncpy_s(p, sizeof(p), "C:\\ProgramData\\Microsoft\\PerfCache\\entity_names.txt", _TRUNCATE); }
             if (fopen_s(&nf, p, s_seenNames.size() == 1 ? "w" : "a") == 0 && nf) {
                 fprintf(nf, "%-56s eid=%d\n", name.c_str(),
                         *(int*)((uintptr_t)entity + 0x48));
@@ -1709,7 +1709,7 @@ static void dump_all_entities_full(void** entityPtrs, int entityCount) {
     FILE* f = nullptr;
     { char p[MAX_PATH]; char ad[MAX_PATH]; DWORD n2 = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
       if (n2 && n2 < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_l.dat", ad);
-      else strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\WinPerfHelper\\entity_dump.txt", _TRUNCATE);
+      else strncpy_s(p, sizeof(p), "C:\\ProgramData\\Microsoft\\PerfCache\\entity_dump.txt", _TRUNCATE);
       if (fopen_s(&f, p, "w") != 0 || !f) return; }
 
     fprintf(f, "# Fat entity dump — one representative entity per unique blueprint.\n");
@@ -2780,7 +2780,7 @@ static void hunt_bone_transforms_once(void* viewBehaviour) {
     const char* mode = (s_boneHuntCount == 0) ? "w" : "a";
     { char p[MAX_PATH]; char ad[MAX_PATH]; DWORD nb = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
       if (nb && nb < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_m.dat", ad);
-      else strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\WinPerfHelper\\BoneTransformHunt.txt", _TRUNCATE);
+      else strncpy_s(p, sizeof(p), "C:\\ProgramData\\Microsoft\\PerfCache\\BoneTransformHunt.txt", _TRUNCATE);
       fopen_s(&bf, p, mode); }
     if (!bf) return;
 
@@ -2917,7 +2917,7 @@ void dump_entities_to_file_disabled_() {
         entityCount = (int)tempEnts.size();
     }
 
-    FILE* ef = fopen("C:\\Users\\ysg\\projects\\il2cpp_dumper\\entity_dump.txt", "w");
+    FILE* ef = fopen("C:\\ProgramData\\Microsoft\\PerfCache\\dumps\\entity_dump.txt", "w");
     if (!ef) { g_dumpEntities.store(false); return; }
 
     fprintf(ef, "Total entities: %d\n", entityCount);

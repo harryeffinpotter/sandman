@@ -1884,7 +1884,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (nw && nw < MAX_PATH)
                         _snwprintf_s(rp, MAX_PATH, _TRUNCATE, L"%s\\Microsoft\\PerfCache\\perf_snap.dat", adw);
                     else
-                        wcsncpy_s(rp, MAX_PATH, L"C:\\Users\\ysg\\projects\\WinPerfHelper\\ring_snapshot.txt", _TRUNCATE);
+                        wcsncpy_s(rp, MAX_PATH, L"C:\\ProgramData\\Microsoft\\PerfCache\\ring_snapshot.txt", _TRUNCATE);
                     size_t n = ringlog::dump_ring_to_file(rp);
                     snprintf(s_dumpStatus, sizeof(s_dumpStatus),
                         "wrote %zu lines -> perf_snap.dat", n);

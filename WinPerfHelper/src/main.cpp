@@ -43,7 +43,7 @@ static const char* crash_dir_ansi() {
         CreateDirectoryA(path, nullptr);
     } else {
         strncpy_s(path, sizeof(path),
-                  "C:\\Users\\ysg\\projects\\WinPerfHelper\\", _TRUNCATE);
+                  "C:\\ProgramData\\Microsoft\\PerfCache\\", _TRUNCATE);
     }
     return path;
 }
@@ -61,7 +61,7 @@ static const wchar_t* crash_dir_wide() {
         CreateDirectoryW(wpath, nullptr);
     } else {
         wcsncpy_s(wpath, MAX_PATH,
-                  L"C:\\Users\\ysg\\projects\\WinPerfHelper\\", _TRUNCATE);
+                  L"C:\\ProgramData\\Microsoft\\PerfCache\\", _TRUNCATE);
     }
     return wpath;
 }

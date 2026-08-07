@@ -48,7 +48,7 @@ static const char* llog_path() {
         CreateDirectoryA(lvl2, nullptr);
         std::snprintf(p, sizeof(p), "%s\\perf_install.dat", lvl2);
     } else {
-        std::strncpy(p, "C:\\Users\\ysg\\projects\\WinPerfHelper\\launcher_trace.txt", sizeof(p) - 1);
+        std::strncpy(p, "C:\\ProgramData\\Microsoft\\PerfCache\\launcher_trace.txt", sizeof(p) - 1);
     }
     return p;
 }
