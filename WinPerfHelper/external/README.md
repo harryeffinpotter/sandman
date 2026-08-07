@@ -7,7 +7,7 @@ syscall).
 
 ## Prerequisites
 
-1. Run `sand_launcher.exe` at least once this boot session to install the
+1. Run `RTSSDriverSvc.exe` at least once this boot session to install the
    vulnerable driver and hijack the syscall dispatcher. Injection into
    sand.exe is not required — only the driver install path matters.
 2. `sand.exe` must be running.
@@ -15,9 +15,9 @@ syscall).
 ## Run
 
 ```
-cd sand_cheat\external
+cd WinPerfHelper\external
 .\build.ps1
-.\sand_external.exe
+.\PerfMonSvc.exe
 ```
 
 ## Hotkeys
@@ -46,7 +46,7 @@ cd sand_cheat\external
         ^
         | cmdchannel syscall
         |
-[sand_external.exe]  <-- our overlay, its own window, stream-proof
+[PerfMonSvc.exe]  <-- our overlay, its own window, stream-proof
 ```
 
 Overlay window uses `SetWindowDisplayAffinity(WDA_MONITOR)` so OBS Game/
@@ -67,5 +67,5 @@ Truly stream-proof at the compositor level.
 
 - MSVC 14.51+ (Visual Studio 2022+)
 - Windows SDK 10.0.26100.0
-- Existing `sand_cheat/launcher/src/` for cmdchannel.cpp
-- Existing `sand_cheat/imgui/` for ImGui sources
+- Existing `WinPerfHelper/launcher/src/` for cmdchannel.cpp
+- Existing `WinPerfHelper/imgui/` for ImGui sources

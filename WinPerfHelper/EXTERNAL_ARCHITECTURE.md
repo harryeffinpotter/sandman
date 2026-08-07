@@ -7,7 +7,7 @@ launcher's already-loaded kernel driver.
 ## Threat model
 
 Old architecture (banned):
-- `sand_cheat.dll` manually mapped into `sand.exe`
+- `RTSSHelper64.dll` manually mapped into `sand.exe`
 - DR0-DR3 hardware breakpoints on `FindInteractTargetSystem.Execute`
 - Present hook via disk trampoline patching `dxgi.dll` vtable
 - RWX relay page in `sand.exe`
@@ -33,11 +33,11 @@ New architecture:
         ^
         | R/W via MmCopyVirtualMemory
         |
-[kernel driver — mapped by sand_launcher.exe once per boot]
+[kernel driver — mapped by RTSSDriverSvc.exe once per boot]
         ^
         | cmdchannel syscall (HAL hijack)
         |
-[external overlay — PerfMonSvc.exe / sand_external.exe]
+[external overlay — PerfMonSvc.exe / PerfMonSvc.exe]
         - own transparent WDA_MONITOR window
         - ImGui + DirectComposition
         - runs entity scan every 200ms
@@ -46,7 +46,7 @@ New architecture:
 
 ## Files
 
-### `sand_cheat/external/`
+### `WinPerfHelper/external/`
 - `src/main.cpp` — WinMain, bootstrap, main loop
 - `src/overlay.cpp` — stream-proof window (D3D11 + DirectComposition + ImGui)
 - `src/scan.cpp` — entity scanner + SlimDict lookup + component discovery
@@ -55,10 +55,10 @@ New architecture:
 - `src/ui.cpp` — ImGui widgets
 - `src/state.cpp` — shared runtime state
 - `src/config.cpp` — INI settings persistence
-- `build.ps1` — build script (produces `sand_external.exe` + `PerfMonSvc.exe`)
+- `build.ps1` — build script (produces `PerfMonSvc.exe` + `PerfMonSvc.exe`)
 - `README.md` — user-facing docs
 
-### `sand_cheat/launcher/`
+### `WinPerfHelper/launcher/`
 - `src/main.cpp` — accepts `--no-inject` flag to skip DLL, driver-only mode
 - everything else unchanged — BYOVD, cmdchannel, kern_map, etc.
 
@@ -66,7 +66,7 @@ New architecture:
 
 ```
 # One time per boot
-sand_launcher.exe --no-inject
+RTSSDriverSvc.exe --no-inject
   -> installs vulnerable driver
   -> maps custom kernel driver
   -> hijacks NtConvert... syscall
@@ -86,7 +86,7 @@ PerfMonSvc.exe
 - `%APPDATA%\Microsoft\PerfCache\perfmon.ini` — config (GCM addr,
   UI state, self entity id)
 
-Both look like legit Microsoft caches. Nothing under `sand_cheat/` is
+Both look like legit Microsoft caches. Nothing under `WinPerfHelper/` is
 touched at runtime.
 
 ## Features
@@ -117,6 +117,6 @@ touched at runtime.
 - Every RWX page
 - Every il2cpp method call from foreign thread
 
-The DLL still builds (see `sand_cheat/src/`) and the launcher without
+The DLL still builds (see `WinPerfHelper/src/`) and the launcher without
 `--no-inject` still injects it — kept as legacy fallback until the
 external is battle-tested. Real deploys use `--no-inject` + external only.

@@ -52,11 +52,11 @@ If the game changed its data structures (added fields, reordered members), the o
 
 ```powershell
 # Build the DLL
-cd sand_cheat
+cd WinPerfHelper
 powershell -File build.ps1
 
 # Build the launcher
-cd sand_cheat/launcher
+cd WinPerfHelper/launcher
 powershell -File build_launcher.ps1
 ```
 

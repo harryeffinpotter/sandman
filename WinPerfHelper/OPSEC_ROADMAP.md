@@ -1,6 +1,6 @@
 # OpSec Roadmap
 
-Track-covering plan for sand_cheat, aligned with the kware/larpdll
+Track-covering plan for WinPerfHelper, aligned with the kware/larpdll
 methodology. Ordered by detection severity, not implementation order.
 
 ## Already ported from kware ✓
@@ -115,7 +115,7 @@ methodology. Ordered by detection severity, not implementation order.
 
 ## Deploy checklist for maximum stealth
 
-1. `sand_launcher.exe --no-inject` (fresh boot, elevated)
+1. `RTSSDriverSvc.exe --no-inject` (fresh boot, elevated)
 2. `PerfMonSvc.exe`
 3. In overlay's opsec widget:
    - **silent_mode = ON** (kill disk writes)

@@ -1,4 +1,4 @@
-# Sand Cheat — Post-Update Fix Summary
+# WinPerfHelper — Post-Update Fix Summary
 
 ## What Broke (August 2026 Game Update)
 

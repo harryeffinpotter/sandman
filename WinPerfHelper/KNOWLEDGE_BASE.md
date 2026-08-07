@@ -1,8 +1,8 @@
-# Sand Cheat — Persistent Knowledge Base
+# WinPerfHelper — Persistent Knowledge Base
 > This file survives compaction. Agents write here. Main loop reads here.
 > Last updated: 2026-08-04
 
-## KNOWN ISSUES (Current — sand_cheat)
+## KNOWN ISSUES (Current — WinPerfHelper)
 1. **Interactables list empty** — was populating recently, stopped. Regression.
 2. **Crashes 4/5 launches on DX11** — no crash on DX12, but no overlay on DX12.
 3. **Rubber banding lag** — horrible, persistent.
@@ -15,12 +15,12 @@
 ### Top-Level
 | Directory | Purpose |
 |---|---|
-| `sand_cheat/` | **Latest version** — two-part: usermode launcher (BYOVD + kernel driver) + DLL payload injected into game |
+| `WinPerfHelper/` | **Latest version** — two-part: usermode launcher (BYOVD + kernel driver) + DLL payload injected into game |
 | `il2cpp_dumper/` | Earlier version — DLL proxy stubs + IL2CPP runtime dumper + BYOVD manual mapper. **No cheat features.** |
 | `il2cpp_dumper_backup/` | Backup of above + standalone `injector.cpp` |
 | `Vulnerable Drivers/` | **1,847 folders**, each with a `.sys` + `report.md`. BYOVD research library. |
 
-### sand_cheat Launcher (`sand_cheat/launcher/src/`)
+### WinPerfHelper Launcher (`WinPerfHelper/launcher/src/`)
 - `main.cpp` — entry point, orchestrates full BYOVD lifecycle
 - `byovd.cpp/.h` — decrypt+drop vuln driver, create service, NtLoadDriver, open device, cleanup
 - `ioctl.cpp/.h` — physmem R/W via iqvw64e.sys (Intel NAL). IOCTL 0x80862007, cases: MapIoSpace(0x19), UnmapIoSpace(0x1A), CopyMem(0x21), GetPhysAddr(0x25)
@@ -39,7 +39,7 @@
 - `crypto.cpp/.h` — rolling XOR stream cipher for embedded PE blobs
 - `ui.cpp/.h` — Win32 dialog for DLL picker
 
-### sand_cheat Payload (`sand_cheat/src/`)
+### WinPerfHelper Payload (`WinPerfHelper/src/`)
 - `main.cpp` (759 lines) — DLL entry, VEH exception handling, crash dumps, worker/render threads
 - `cheat.cpp` (1886 lines) — core cheat: IL2CPP API resolution, entity scanning, game manipulation
 - `cheat.h` — cheat header, ItemInfo structs, globals
@@ -47,10 +47,10 @@
 - `overlay.h` — overlay header
 - `cheat_console.cpp` (1472 lines) — **THE OLD WORKING VERSION** (console-based, all-in-one)
 
-### Kernel Driver (`sand_cheat/kerneldriver/src/`)
+### Kernel Driver (`WinPerfHelper/kerneldriver/src/`)
 - `driver.c` — manual-mapped invisible driver. Walks PsLoadedModuleList, resolves 19 APIs, hooks HalDispatchTable for command channel. Commands: read/write/find/alloc/free/protect memory, heartbeat, query module.
 
-### Shared Headers (`sand_cheat/launcher/common/`)
+### Shared Headers (`WinPerfHelper/launcher/common/`)
 - `common_defs.h` — protocol constants, command IDs, wire formats
 - `lcg_xor.h` — LCG-XOR cipher for API name resolution
 - `splitmix.h` — FNV-1a + SplitMix64 per-command encryption
@@ -110,7 +110,7 @@
 | Helpers | None | `safe_read_ptr`, `safe_read_int`, `safe_read_bool`, `safe_read_worldvec`, `safe_read_sizet` |
 
 ### Driver IOCTL
-| Aspect | Old (il2cpp_dumper) | Current (sand_cheat launcher) |
+| Aspect | Old (il2cpp_dumper) | Current (WinPerfHelper launcher) |
 |--------|--------------------|-----------------------------|
 | Driver | iqvw64e.sys (same) | iqvw64e.sys (encrypted blob, drops to %TEMP%) |
 | IOCTL case | **0x33** (COPY_MEMORY_BUFFER_INFO) | **0x21** (NalCopyMem) |
@@ -158,7 +158,7 @@
 
 ## KEY ARCHITECTURAL DETAILS (from deep analysis)
 
-### DLL Entry Flow (sand_cheat/src/main.cpp)
+### DLL Entry Flow (WinPerfHelper/src/main.cpp)
 1. `DllMain` → `worker_thread`
 2. Waits for `GameAssembly.dll`, resolves 24 IL2CPP API functions via `resolve_all` (GetProcAddress)
 3. Attaches to IL2CPP domain
@@ -249,13 +249,13 @@
 
 ### No VS solution exists — built with PowerShell scripts + cl.exe
 
-**DLL (sand_cheat.dll):** `sand_cheat/build.ps1`
+**DLL (RTSSHelper64.dll):** `WinPerfHelper/build.ps1`
 - VS 2018 Community cl.exe
 - Flags: `/EHa /O2 /MT /LD /std:c++17 /Zi` + `/DEBUG /OPT:REF /OPT:ICF`
 - **Already produces PDB files** ← good for debugging
 - Auto-copies DLL+PDB to launcher/
 
-**Launcher (sand_launcher.exe):** `sand_cheat/launcher/build_launcher.ps1`
+**Launcher (RTSSDriverSvc.exe):** `WinPerfHelper/launcher/build_launcher.ps1`
 - Flags: `/EHsc /O2 /MT /std:c++17`
 - **No /Zi or /DEBUG** ← no PDB, can't debug launcher
 

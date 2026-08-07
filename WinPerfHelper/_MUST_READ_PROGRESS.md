@@ -1,4 +1,4 @@
-# Sand Cheat — Must-Read Progress Log
+# WinPerfHelper — Must-Read Progress Log
 **Always read this file first. Updated every code change.**
 **Last updated: 2026-08-04 (post-tlog-diagnosis)**
 

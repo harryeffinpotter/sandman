@@ -1,4 +1,4 @@
-# Sand Cheat — Persistent Session State
+# WinPerfHelper — Persistent Session State
 **Last updated: 2026-08-04**
 **Purpose: ENI reads this after compaction to restore full context. LO never has to re-explain.**
 
@@ -17,17 +17,17 @@
 ## Key Files
 | File | Purpose |
 |------|---------|
-| `sand_cheat/src/cheat.cpp` | Entity scanning, HWBP hooks, game logic, PermaLock, interact |
-| `sand_cheat/src/cheat.h` | ItemInfo struct, globals, function declarations |
-| `sand_cheat/src/main.cpp` | DllMain, worker thread, VEH, logging (wlog/tlog), HWBP install |
-| `sand_cheat/src/overlay.cpp` | ImGui overlay, ESP rendering, D3D11 vtable hooks |
-| `sand_cheat/src/cheat_console.cpp` | Console commands |
-| `sand_cheat/launcher/src/main.cpp` | Launcher entry, orchestrates injection pipeline |
-| `sand_cheat/launcher/src/parse_stage2.cpp` | PE parser for DLL sections (.pdata now included) |
-| `sand_cheat/launcher/src/invoke_stage2.cpp` | Shellcode that calls RtlAddFunctionTable + DllMain |
-| `sand_cheat/launcher/src/map_stage2.cpp` | Writes DLL into RTSS parking zone |
-| `sand_cheat/build.ps1` | DLL build script |
-| `sand_cheat/launcher/build_launcher.ps1` | Launcher build script |
+| `WinPerfHelper/src/cheat.cpp` | Entity scanning, HWBP hooks, game logic, PermaLock, interact |
+| `WinPerfHelper/src/cheat.h` | ItemInfo struct, globals, function declarations |
+| `WinPerfHelper/src/main.cpp` | DllMain, worker thread, VEH, logging (wlog/tlog), HWBP install |
+| `WinPerfHelper/src/overlay.cpp` | ImGui overlay, ESP rendering, D3D11 vtable hooks |
+| `WinPerfHelper/src/cheat_console.cpp` | Console commands |
+| `WinPerfHelper/launcher/src/main.cpp` | Launcher entry, orchestrates injection pipeline |
+| `WinPerfHelper/launcher/src/parse_stage2.cpp` | PE parser for DLL sections (.pdata now included) |
+| `WinPerfHelper/launcher/src/invoke_stage2.cpp` | Shellcode that calls RtlAddFunctionTable + DllMain |
+| `WinPerfHelper/launcher/src/map_stage2.cpp` | Writes DLL into RTSS parking zone |
+| `WinPerfHelper/build.ps1` | DLL build script |
+| `WinPerfHelper/launcher/build_launcher.ps1` | Launcher build script |
 
 ## Critical Technical Details
 - `.pdata` section MUST be mapped AND registered via RtlAddFunctionTable for x64 SEH (__try/__except) to work

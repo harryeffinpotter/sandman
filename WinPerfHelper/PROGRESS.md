@@ -1,4 +1,4 @@
-# Sand Cheat — Backup Parity Progress
+# WinPerfHelper — Backup Parity Progress
 **Goal: Match il2cpp_dumper_backup behavior to fix stutter + empty entity list**
 **Updated: 2026-08-04**
 
