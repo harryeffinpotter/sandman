@@ -12,7 +12,7 @@ static void llog(const char* fmt, ...) {
     if (!p[0]) {
         char ad[MAX_PATH]; DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
         if (n && n < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_install.dat", ad);
-        else strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", _TRUNCATE);
+        else strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\WinPerfHelper\\launcher_trace.txt", _TRUNCATE);
     }
     FILE* f = fopen(p, "a");
     if (!f) return;

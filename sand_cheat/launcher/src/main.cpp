@@ -48,7 +48,7 @@ static const char* llog_path() {
         CreateDirectoryA(lvl2, nullptr);
         std::snprintf(p, sizeof(p), "%s\\perf_install.dat", lvl2);
     } else {
-        std::strncpy(p, "C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", sizeof(p) - 1);
+        std::strncpy(p, "C:\\Users\\ysg\\projects\\WinPerfHelper\\launcher_trace.txt", sizeof(p) - 1);
     }
     return p;
 }
@@ -163,7 +163,7 @@ bool load_embedded_blob(int resource_id, std::vector<uint8_t>& out) {
 
 int main(int argc, char* argv[]) {
     // --no-inject: driver-install-only mode. Used to bootstrap
-    // sand_external.exe without ever writing sand_cheat.dll into the
+    // sand_external.exe without ever writing WinPerfHelper.dll into the
     // game process. Keeps the game footprint at ZERO.
     bool no_inject = false;
     for (int i = 1; i < argc; i++) {
@@ -864,7 +864,7 @@ int main(int argc, char* argv[]) {
     //
     // Gate + DLL picker live in a single small Win32 modal dialog. The
     // operator launches the target game, picks the Stage-2 DLL to map
-    // (defaults to sand_cheat.dll next to the launcher EXE), and clicks
+    // (defaults to WinPerfHelper.dll next to the launcher EXE), and clicks
     // Inject. Cancel/close/Esc exits without side effects — BYOVD has
     // already unloaded, cheat driver stays resident from this run.
     std::string picked_path;
@@ -880,15 +880,15 @@ int main(int argc, char* argv[]) {
                 }
             }
             // Look for the renamed DLL first (RTSSHelper64.dll), fall back to
-            // legacy sand_cheat.dll name for old checkouts.
+            // legacy WinPerfHelper.dll name for old checkouts.
             default_dll_path = std::string(exe_buf) + "..\\RTSSHelper64.dll";
             DWORD attr = GetFileAttributesA(default_dll_path.c_str());
             if (attr == INVALID_FILE_ATTRIBUTES) {
-                default_dll_path = std::string(exe_buf) + "..\\sand_cheat.dll";
+                default_dll_path = std::string(exe_buf) + "..\\WinPerfHelper.dll";
             }
 
-            // Tell sand_cheat.dll where to drop its log file. We write the
-            // launcher's own directory to %TEMP%\sand_cheat_logdir.txt; the
+            // Tell WinPerfHelper.dll where to drop its log file. We write the
+            // launcher's own directory to %TEMP%\WinPerfHelper_logdir.txt; the
             // DLL reads that on first LogFmt call. Cross-process handoff
             // (launcher process -> game process where DLL runs) without
             // touching the target's PEB.

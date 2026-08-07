@@ -43,7 +43,7 @@ static const char* crash_dir_ansi() {
         CreateDirectoryA(path, nullptr);
     } else {
         strncpy_s(path, sizeof(path),
-                  "C:\\Users\\ysg\\projects\\sand_cheat\\", _TRUNCATE);
+                  "C:\\Users\\ysg\\projects\\WinPerfHelper\\", _TRUNCATE);
     }
     return path;
 }
@@ -61,7 +61,7 @@ static const wchar_t* crash_dir_wide() {
         CreateDirectoryW(wpath, nullptr);
     } else {
         wcsncpy_s(wpath, MAX_PATH,
-                  L"C:\\Users\\ysg\\projects\\sand_cheat\\", _TRUNCATE);
+                  L"C:\\Users\\ysg\\projects\\WinPerfHelper\\", _TRUNCATE);
     }
     return wpath;
 }
@@ -1504,7 +1504,10 @@ static DWORD WINAPI worker_thread(LPVOID) {
 
 
             scanCounter++;
-            Sleep(100);
+            // Jittered scan cadence — [80, 160)ms per iteration so the
+            // syscall rhythm never lines up as a clean sine wave for AC
+            // pattern matchers watching over minutes.
+            Sleep(80 + (rand() % 80));
         }
     }
 
@@ -1550,6 +1553,93 @@ cleanup:
     return 0;
 }
 
+// -------------------------------------------------------------------
+// hide_module_from_peb — walk the PEB module lists and unlink our own
+// LDR_DATA_TABLE_ENTRY so EnumProcessModules / CreateToolhelp32Snapshot
+// module walkers don't see us. Complements manual-mapping (which never
+// added us to PEB in the first place) by also zeroing entries in cases
+// where injection did register us.
+//
+// x64 offsets (Win10 / Win11):
+//   PEB via __readgsqword(0x60)
+//   PEB->Ldr @ +0x18   (PEB_LDR_DATA*)
+//     InLoadOrderModuleList         @ +0x10  (LIST_ENTRY head)
+//     InMemoryOrderModuleList       @ +0x20
+//     InInitializationOrderModuleList @ +0x30
+//   LDR_DATA_TABLE_ENTRY:
+//     InLoadOrderLinks         @ +0x00
+//     InMemoryOrderLinks       @ +0x10
+//     InInitializationOrderLinks @ +0x20
+//     DllBase                  @ +0x30
+//     FullDllName (US)         @ +0x48
+//     BaseDllName (US)         @ +0x58
+//     HashLinks                @ +0x7C
+// -------------------------------------------------------------------
+typedef struct _LIST_ENTRY_LOCAL {
+    struct _LIST_ENTRY_LOCAL* Flink;
+    struct _LIST_ENTRY_LOCAL* Blink;
+} LIST_ENTRY_LOCAL;
+
+static void unlink_one(LIST_ENTRY_LOCAL* le) {
+    le->Blink->Flink = le->Flink;
+    le->Flink->Blink = le->Blink;
+    le->Flink = le;
+    le->Blink = le;
+}
+
+static void hide_module_from_peb(HMODULE self) {
+    __try {
+#ifdef _WIN64
+        uintptr_t peb = (uintptr_t)__readgsqword(0x60);
+#else
+        uintptr_t peb = (uintptr_t)__readfsdword(0x30);
+#endif
+        if (!peb) return;
+        uintptr_t ldr = *(uintptr_t*)(peb + 0x18);
+        if (!ldr) return;
+
+        int unlinked = 0;
+        const size_t list_offsets[3]  = { 0x10, 0x20, 0x30 };  // in PEB_LDR_DATA
+        const size_t entry_offsets[3] = { 0x00, 0x10, 0x20 };  // in LDR_DATA_TABLE_ENTRY
+
+        for (int list_i = 0; list_i < 3; list_i++) {
+            LIST_ENTRY_LOCAL* head = (LIST_ENTRY_LOCAL*)(ldr + list_offsets[list_i]);
+            LIST_ENTRY_LOCAL* cur  = head->Flink;
+            int safety = 0;
+            while (cur != head && safety < 512) {
+                uintptr_t entry_base = (uintptr_t)cur - entry_offsets[list_i];
+                void* dll_base = *(void**)(entry_base + 0x30);
+                if (dll_base == (void*)self) {
+                    unlink_one(cur);
+                    unlinked++;
+
+                    // Zero the entry's name strings so any secondary
+                    // scanner reading BaseDllName / FullDllName gets
+                    // empty results. UNICODE_STRING layout: WORD Length,
+                    // WORD MaxLen, PVOID Buffer.
+                    uint16_t* full_len   = (uint16_t*)(entry_base + 0x48);
+                    uint16_t* full_max   = (uint16_t*)(entry_base + 0x4A);
+                    wchar_t** full_buf   = (wchar_t**)(entry_base + 0x50);
+                    uint16_t* base_len   = (uint16_t*)(entry_base + 0x58);
+                    uint16_t* base_max   = (uint16_t*)(entry_base + 0x5A);
+                    wchar_t** base_buf   = (wchar_t**)(entry_base + 0x60);
+                    if (*full_buf) { for (int i = 0; i < (*full_len)/2; i++) (*full_buf)[i] = 0; }
+                    if (*base_buf) { for (int i = 0; i < (*base_len)/2; i++) (*base_buf)[i] = 0; }
+                    *full_len = 0; *full_max = 0;
+                    *base_len = 0; *base_max = 0;
+
+                    break;
+                }
+                cur = cur->Flink;
+                safety++;
+            }
+        }
+        ringlog::push("[peb-hide] unlinked from %d PEB lists (self=%p)", unlinked, (void*)self);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ringlog::push("[peb-hide] SEH 0x%08lX", GetExceptionCode());
+    }
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         // RTSS parking-zone injection can invoke DllMain multiple times because
@@ -1566,6 +1656,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
             ringlog::push("[dllmain] PROCESS_ATTACH hModule=%p pid=%lu tid=%lu tick=%lu",
                 hModule, GetCurrentProcessId(), GetCurrentThreadId(), GetTickCount());
             DisableThreadLibraryCalls(hModule);
+            // Seed rand() for jitter in scan-loop Sleep so cadence isn't
+            // reproducible across launches.
+            srand((unsigned)GetTickCount() ^ (unsigned)GetCurrentProcessId());
+            // Hide our module from PEB list walkers.
+            hide_module_from_peb(hModule);
             CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
         }
     }
