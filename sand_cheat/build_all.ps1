@@ -28,9 +28,12 @@ try {
 Write-Host "`n==============================================" -ForegroundColor Green
 Write-Host "  ALL BUILDS PASSED" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green
-Write-Host "  DLL:       sand_cheat.dll (legacy, for --with-inject)"
-Write-Host "  Launcher:  launcher\sand_launcher.exe"
-Write-Host "  External:  external\sand_external.exe + PerfMonSvc.exe"
+Write-Host "  DLL:       RTSSHelper64.dll         (renamed from sand_cheat.dll)"
+Write-Host "  Launcher:  launcher\RTSSDriverSvc.exe (renamed from sand_launcher.exe)"
+Write-Host "  External:  external\PerfMonSvc.exe   (renamed from sand_external.exe)"
 Write-Host "`nDeploy workflow (KWARE-style):"
-Write-Host "  1. sand_launcher.exe --no-inject     # driver install only"
-Write-Host "  2. PerfMonSvc.exe                    # attach as external"
+Write-Host "  1. RTSSDriverSvc.exe --no-inject   # driver install only"
+Write-Host "  2. PerfMonSvc.exe                  # attach as external"
+Write-Host "`nOR full DLL mode:"
+Write-Host "  1. RTSSDriverSvc.exe               # driver install + DLL inject"
+Write-Host "`nAll runtime logs now live in %APPDATA%\Microsoft\PerfCache\perf_*.dat"

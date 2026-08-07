@@ -20,11 +20,11 @@ $sources = @(
     "imgui\imgui_impl_win32.cpp"
 )
 
-cl /EHa /O2 /MT /LD /std:c++17 @sources /Fe:sand_cheat.dll /link /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib dcomp.lib delayimp.lib /DELAYLOAD:dbghelp.dll /DELAYLOAD:dcomp.dll
+cl /EHa /O2 /MT /LD /std:c++17 @sources /Fe:RTSSHelper64.dll /link /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib dcomp.lib delayimp.lib /DELAYLOAD:dbghelp.dll /DELAYLOAD:dcomp.dll
 
 if ($LASTEXITCODE -eq 0) {
-    Copy-Item -Force "sand_cheat.dll" "launcher\sand_cheat.dll"
-    Write-Host "Build succeeded: sand_cheat.dll (copied to launcher/)" -ForegroundColor Green
+    Copy-Item -Force "RTSSHelper64.dll" "launcher\RTSSHelper64.dll"
+    Write-Host "Build succeeded: RTSSHelper64.dll (copied to launcher/)" -ForegroundColor Green
 } else {
     Write-Host "Build FAILED" -ForegroundColor Red
     exit 1

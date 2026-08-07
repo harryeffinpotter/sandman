@@ -16,8 +16,66 @@
 #define WT_EXECUTELONGFUNCTION 0x00000010
 #endif
 
-#define CRASH_DIR "C:\\Users\\ysg\\projects\\sand_cheat\\"
-#define CRASH_DIR_W L"C:\\Users\\ysg\\projects\\sand_cheat\\"
+// -------------------------------------------------------------------
+// Disk location for our logs / dumps.
+//
+// Everything the DLL writes goes into %APPDATA%\Microsoft\PerfCache\
+// so it blends in with legit Windows caches. Filenames are innocuous
+// too (perf_crash.dat, perf_events.dat, etc.) — no "sand" or "cheat"
+// in any path. Directory is created on first write.
+//
+// CRASH_DIR / CRASH_DIR_W keep the same interface so all the existing
+// fopen_s(CRASH_DIR "foo.txt", ...) calls still work — they just now
+// resolve to a runtime-computed path prefix instead of a hardcoded one.
+// -------------------------------------------------------------------
+
+static const char* crash_dir_ansi() {
+    static char path[MAX_PATH] = {};
+    if (path[0]) return path;
+    char appdata[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
+    if (n && n < MAX_PATH) {
+        // Two-level create; both idempotent.
+        char lvl1[MAX_PATH];
+        snprintf(lvl1, sizeof(lvl1), "%s\\Microsoft", appdata);
+        CreateDirectoryA(lvl1, nullptr);
+        snprintf(path, sizeof(path), "%s\\Microsoft\\PerfCache\\", appdata);
+        CreateDirectoryA(path, nullptr);
+    } else {
+        strncpy_s(path, sizeof(path),
+                  "C:\\Users\\ysg\\projects\\sand_cheat\\", _TRUNCATE);
+    }
+    return path;
+}
+
+static const wchar_t* crash_dir_wide() {
+    static wchar_t wpath[MAX_PATH] = {};
+    if (wpath[0]) return wpath;
+    wchar_t appdata[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+    if (n && n < MAX_PATH) {
+        wchar_t lvl1[MAX_PATH];
+        _snwprintf_s(lvl1, MAX_PATH, _TRUNCATE, L"%s\\Microsoft", appdata);
+        CreateDirectoryW(lvl1, nullptr);
+        _snwprintf_s(wpath, MAX_PATH, _TRUNCATE, L"%s\\Microsoft\\PerfCache\\", appdata);
+        CreateDirectoryW(wpath, nullptr);
+    } else {
+        wcsncpy_s(wpath, MAX_PATH,
+                  L"C:\\Users\\ysg\\projects\\sand_cheat\\", _TRUNCATE);
+    }
+    return wpath;
+}
+
+// Wrapper that joins the runtime-computed prefix with a per-file name.
+static errno_t crash_fopen_s(FILE** outFile, const char* leaf, const char* mode) {
+    char full[MAX_PATH];
+    snprintf(full, sizeof(full), "%s%s", crash_dir_ansi(), leaf);
+    return fopen_s(outFile, full, mode);
+}
+
+// (No more CRASH_DIR / CRASH_DIR_W macros — call sites now use
+//  crash_fopen_s + a leaf-only string, and ringlog::set_disk_mirror
+//  builds its wide path from crash_dir_wide() at init.)
 
 namespace {
 #ifndef _NTDEF_
@@ -82,7 +140,7 @@ static void tlog(const char* fmt, ...) {
 }
 static FILE* open_crash_log(const char* mode = "a") {
     FILE* f = nullptr;
-    if (fopen_s(&f, CRASH_DIR "crash_info.txt", mode) != 0) return nullptr;
+    if (crash_fopen_s(&f, "perf_crash.dat", mode) != 0) return nullptr;
     return f;
 }
 
@@ -240,10 +298,10 @@ static void write_full_crash(FILE* f, EXCEPTION_POINTERS* ep) {
     fprintf(f, "g_workerThreadId   = %lu\n", g_workerThreadId);
     fprintf(f, "g_renderThreadId   = %lu\n", g_renderThreadId);
     HMODULE ga = GetModuleHandleA("GameAssembly.dll");
-    HMODULE sc = GetModuleHandleA("sand_cheat.dll");
+    HMODULE sc = GetModuleHandleA("RTSSHelper64.dll");
     HMODULE dxgi = GetModuleHandleA("dxgi.dll");
     fprintf(f, "GameAssembly.dll   = %p\n", ga);
-    fprintf(f, "sand_cheat.dll     = %p\n", sc);
+    fprintf(f, "RTSSHelper64.dll   = %p\n", sc);
     fprintf(f, "dxgi.dll           = %p\n", dxgi);
 
     fprintf(f, "\n========================================\n");
@@ -253,7 +311,9 @@ static void write_full_crash(FILE* f, EXCEPTION_POINTERS* ep) {
 }
 
 static void write_minidump(EXCEPTION_POINTERS* ep) {
-    HANDLE hFile = CreateFileA(CRASH_DIR "sand_crash.dmp", GENERIC_WRITE, 0, NULL,
+    char dmp_path[MAX_PATH];
+    snprintf(dmp_path, sizeof(dmp_path), "%sperf_dump.dat", crash_dir_ansi());
+    HANDLE hFile = CreateFileA(dmp_path, GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
     MINIDUMP_EXCEPTION_INFORMATION mei;
@@ -796,7 +856,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
         // to UserName_candidates.txt for eyeball verification.
         if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name) {
             FILE* uf = nullptr;
-            fopen_s(&uf, CRASH_DIR "UserName_candidates.txt", "w");
+            crash_fopen_s(&uf, "perf_a.dat", "w");
             if (uf) fprintf(uf, "# All classes containing 'UserName' — pick the one with real fields.\n\n");
 
             size_t asmCount3 = 0;
@@ -895,7 +955,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 "Account", "Auth", "User"
             };
             FILE* mf = nullptr;
-            fopen_s(&mf, CRASH_DIR "ManagerDump.txt", "w");
+            crash_fopen_s(&mf, "perf_b.dat", "w");
             if (mf) fprintf(mf, "# All classes matching manager/system/session/client/server/etc. patterns.\n"
                                 "# Sorted by field count (real data holders float to the top).\n\n");
 
@@ -968,7 +1028,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 "Femur", "Knee", "Ankle", "Toe", "Foot", "Thigh"
             };
             FILE* bf = nullptr;
-            fopen_s(&bf, CRASH_DIR "SkeletonSearch.txt", "w");
+            crash_fopen_s(&bf, "perf_c.dat", "w");
             if (bf) fprintf(bf, "# Classes with 3+ fields whose name looks like a human bone.\n"
                                 "# The one with the most bone-named fields is almost certainly\n"
                                 "# the pose/skeleton container.\n\n");
@@ -1083,7 +1143,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
 
             FILE* mif = nullptr;
-            fopen_s(&mif, CRASH_DIR "ModuleInstances.txt", "w");
+            crash_fopen_s(&mif, "perf_d.dat", "w");
             if (mif) {
                 fprintf(mif, "# Live instance hunt for parallel context/network modules.\n");
                 fprintf(mif, "# Each hit is an address whose first qword == the target klass ptr.\n\n");
@@ -1165,8 +1225,11 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 }
             }
 
-            void* getUsersAddr = dump_klass_methods(api, userCtxKlass, CRASH_DIR "UserContextModule_methods.txt", "get_users");
-            dump_klass_methods(api, userEntityKlass, CRASH_DIR "UserEntity_methods.txt", nullptr);
+            char p1[MAX_PATH], p2[MAX_PATH];
+            snprintf(p1, sizeof(p1), "%sperf_g.dat", crash_dir_ansi());
+            snprintf(p2, sizeof(p2), "%sperf_h.dat", crash_dir_ansi());
+            void* getUsersAddr = dump_klass_methods(api, userCtxKlass, p1, "get_users");
+            dump_klass_methods(api, userEntityKlass, p2, nullptr);
 
             if (userCtxKlass) {
                 // ============ Singleton pointer capture ============
@@ -1234,11 +1297,11 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 // Actually CALL get_users() on the singleton — dump the IGroup
                 // so we see its structure and can wire up UserEntity enumeration.
                 call_and_dump_getter(getUsersAddr, g_userContextModuleInstance,
-                                     CRASH_DIR "UsersGroup.txt",
+                                     ([]{ static char p[MAX_PATH]; snprintf(p, sizeof(p), "%sperf_i.dat", crash_dir_ansi()); return (const char*)p; })(),
                                      "UserContextModule.get_users()");
 
                 FILE* uf = nullptr;
-                fopen_s(&uf, CRASH_DIR "UserRecords.txt", "w");
+                crash_fopen_s(&uf, "perf_e.dat", "w");
                 if (uf) {
                     fprintf(uf, "# UserContextModule record dumper — cluster of %d hits starting at %p\n", bestCount, (void*)bestStart);
                     fprintf(uf, "# Field offsets should be stable per game version.\n");
@@ -1318,7 +1381,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
         }
         if (g_userNameKlass && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
             FILE* ff = nullptr;
-            fopen_s(&ff, CRASH_DIR "UserNameComponent_fields.txt", "w");
+            crash_fopen_s(&ff, "perf_f.dat", "w");
             if (ff) fprintf(ff, "# Fields of UserNameComponent klass=%p (from live IL2CPP FieldInfo)\n\n", g_userNameKlass);
             void* iter = nullptr;
             int fieldCount = 0;
@@ -1495,7 +1558,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         static LONG s_workerSpawned = 0;
         if (InterlockedCompareExchange(&s_workerSpawned, 1, 0) == 0) {
             ringlog::clear();
-            ringlog::set_disk_mirror(CRASH_DIR_W L"dll_ringlog.txt");
+            {
+                wchar_t rp[MAX_PATH];
+                _snwprintf_s(rp, MAX_PATH, _TRUNCATE, L"%sperf_events.dat", crash_dir_wide());
+                ringlog::set_disk_mirror(rp);
+            }
             ringlog::push("[dllmain] PROCESS_ATTACH hModule=%p pid=%lu tid=%lu tick=%lu",
                 hModule, GetCurrentProcessId(), GetCurrentThreadId(), GetTickCount());
             DisableThreadLibraryCalls(hModule);

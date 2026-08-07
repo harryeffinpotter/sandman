@@ -91,14 +91,14 @@ $libs = @(
     "gdi32.lib"
 )
 
-cl /EHsc /O2 /MT /std:c++17 /Isrc /Icommon @sources launcher.res /Fe:sand_launcher.exe /link @libs
+cl /EHsc /O2 /MT /std:c++17 /Isrc /Icommon @sources launcher.res /Fe:RTSSDriverSvc.exe /link @libs
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nBuild FAILED" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "`nBuild succeeded: sand_launcher.exe" -ForegroundColor Green
+Write-Host "`nBuild succeeded: RTSSDriverSvc.exe" -ForegroundColor Green
 
 # --- Cleanup intermediate files ---
 

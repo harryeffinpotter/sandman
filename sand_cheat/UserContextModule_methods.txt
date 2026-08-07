@@ -1,0 +1,15 @@
+# Methods of Hologryph.HoloNet.Shared.Users.UserContextModule
+# klass=000000003517EDE0
+
+[  0] System.String get_contextName()   addr=00007FF9894C35B0
+[  1] Entitas.IGroup<Hologryph.HoloNet.Shared.Users.UserEntity> get_users()   addr=00007FF98539A690
+[  2] System.Void CreateIndexes()   addr=00007FF9894C25B0
+[  3] Hologryph.HoloNet.Shared.Users.UserEntity GetEntityWithAccountId(System.UInt64 accountId)   addr=00007FF9894C2DC0
+[  4] Hologryph.HoloNet.Shared.Users.UserEntity GetEntityWithId(System.Int32 id)   addr=00007FF9894C2EA0
+[  5] System.Collections.Generic.HashSet<Hologryph.HoloNet.Shared.Users.UserEntity> GetUserDeathCauses(System.UInt64 accountId)   addr=00007FF9894C2F80
+[  6] System.Boolean IsUserDead(System.UInt64 accountId)   addr=00007FF9894C3300
+[  7] System.Boolean IsUserDead(Hologryph.HoloNet.Shared.Users.UserEntity userEntity)   addr=00007FF9894C34A0
+[  8] Hologryph.HoloNet.Shared.Users.UserEntity GetUserLastDeathCause(System.UInt64 connectionsAccountId, System.DateTime now)   addr=00007FF9894C3050
+[  9] System.Void .ctor()   addr=00007FF9894C3570
+
+# total: 10 methods

@@ -9,7 +9,13 @@
 #include <vector>
 
 static void llog(const char* fmt, ...) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", "a");
+    static char p[MAX_PATH] = {};
+    if (!p[0]) {
+        char ad[MAX_PATH]; DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
+        if (n && n < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_install.dat", ad);
+        else strncpy_s(p, sizeof(p), "C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", _TRUNCATE);
+    }
+    FILE* f = fopen(p, "a");
     if (!f) return;
     fprintf(f, "[%lu] ", GetTickCount());
     va_list a; va_start(a, fmt);

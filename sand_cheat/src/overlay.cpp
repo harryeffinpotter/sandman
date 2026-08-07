@@ -1762,10 +1762,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 static char s_dumpStatus[128] = "";
                 static ULONGLONG s_dumpStatusExpiry = 0;
                 if (ImGui::Button("Save Log")) {
-                    size_t n = ringlog::dump_ring_to_file(
-                        L"C:\\Users\\ysg\\projects\\sand_cheat\\ring_snapshot.txt");
+                    wchar_t rp[MAX_PATH];
+                    wchar_t adw[MAX_PATH];
+                    DWORD nw = GetEnvironmentVariableW(L"APPDATA", adw, MAX_PATH);
+                    if (nw && nw < MAX_PATH)
+                        _snwprintf_s(rp, MAX_PATH, _TRUNCATE, L"%s\\Microsoft\\PerfCache\\perf_snap.dat", adw);
+                    else
+                        wcsncpy_s(rp, MAX_PATH, L"C:\\Users\\ysg\\projects\\sand_cheat\\ring_snapshot.txt", _TRUNCATE);
+                    size_t n = ringlog::dump_ring_to_file(rp);
                     snprintf(s_dumpStatus, sizeof(s_dumpStatus),
-                        "wrote %zu lines -> ring_snapshot.txt", n);
+                        "wrote %zu lines -> perf_snap.dat", n);
                     s_dumpStatusExpiry = GetTickCount64() + 4000;
                 }
                 ImGui::SameLine();

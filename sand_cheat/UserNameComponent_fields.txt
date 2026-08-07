@@ -1,0 +1,4 @@
+# Fields of UserNameComponent klass=00000000356CB450 (from live IL2CPP FieldInfo)
+
+
+# Chosen name-field offset: 0xFFFFFFFF

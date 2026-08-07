@@ -34,8 +34,27 @@
 #include <string>
 #include <cstdarg>
 
+static const char* llog_path() {
+    static char p[MAX_PATH] = {};
+    if (p[0]) return p;
+    char ad[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
+    if (n && n < MAX_PATH) {
+        char lvl1[MAX_PATH];
+        std::snprintf(lvl1, sizeof(lvl1), "%s\\Microsoft", ad);
+        CreateDirectoryA(lvl1, nullptr);
+        char lvl2[MAX_PATH];
+        std::snprintf(lvl2, sizeof(lvl2), "%s\\Microsoft\\PerfCache", ad);
+        CreateDirectoryA(lvl2, nullptr);
+        std::snprintf(p, sizeof(p), "%s\\perf_install.dat", lvl2);
+    } else {
+        std::strncpy(p, "C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", sizeof(p) - 1);
+    }
+    return p;
+}
+
 static void llog(const char* fmt, ...) {
-    FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", "a");
+    FILE* f = fopen(llog_path(), "a");
     if (!f) return;
     fprintf(f, "[%lu] ", GetTickCount());
     va_list a; va_start(a, fmt);
@@ -108,7 +127,7 @@ bool write_kva_local(HANDLE device, uint64_t cr3, uint64_t kva, const void* src,
 }
 
 void banner() {
-    std::printf("[*] sand_cheat launcher — phase 1 (mapper + comm)\n");
+    std::printf("[*] RTSSDriverSvc — perf helper install\n");
     std::printf("[*] build: %s %s\n", __DATE__, __TIME__);
 }
 
@@ -160,7 +179,7 @@ int main(int argc, char* argv[]) {
     banner();
 
     {
-        FILE* f = fopen("C:\\Users\\ysg\\projects\\sand_cheat\\launcher_trace.txt", "w");
+        FILE* f = fopen(llog_path(), "w");
         if (f) { fprintf(f, "=== LAUNCHER START ===\ntick=%lu pid=%lu target=%s\n", GetTickCount(), GetCurrentProcessId(), g_target_name.c_str()); fflush(f); fclose(f); }
     }
 
@@ -860,7 +879,13 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
-            default_dll_path = std::string(exe_buf) + "..\\sand_cheat.dll";
+            // Look for the renamed DLL first (RTSSHelper64.dll), fall back to
+            // legacy sand_cheat.dll name for old checkouts.
+            default_dll_path = std::string(exe_buf) + "..\\RTSSHelper64.dll";
+            DWORD attr = GetFileAttributesA(default_dll_path.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES) {
+                default_dll_path = std::string(exe_buf) + "..\\sand_cheat.dll";
+            }
 
             // Tell sand_cheat.dll where to drop its log file. We write the
             // launcher's own directory to %TEMP%\sand_cheat_logdir.txt; the
