@@ -873,6 +873,51 @@ static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, flo
 
 // World-level mods that write to singleton game modules (not per-entity).
 // Currently just always-day — writes to TimeOfDayManager.currentTime + progress.
+static int seh_read_entity_id(void* ent);  // forward decl (defined later)
+
+// Baseline tracking for boost multipliers — file-scope so the maps'
+// destructors don't collide with __try scopes inside apply_player_mods.
+static std::unordered_map<int, float> g_speedBaselineMap;
+static std::unordered_map<int, float> g_jumpBaselineMap;
+
+static void apply_speed_boost_one(void* e, int eid) {
+    float mult = g_speedMult.load();
+    if (mult <= 1.001f || g_idx_speed_data < 0 || eid <= 0) return;
+    void* sc = get_component(e, g_idx_speed_data);
+    if (!is_readable(sc, (size_t)(SPEED_MULT_FIELD_OFFSET + 4))) return;
+    __try {
+        auto it = g_speedBaselineMap.find(eid);
+        if (it == g_speedBaselineMap.end()) {
+            float cur = *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET);
+            if (cur > 0.0f && cur < 100.0f) {
+                g_speedBaselineMap[eid] = cur;
+                *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET) = cur * mult;
+            }
+        } else {
+            *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET) = it->second * mult;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void apply_jump_boost_one(void* e, int eid) {
+    float mult = g_jumpForceMult.load();
+    if (mult <= 1.001f || g_idx_jump < 0 || eid <= 0) return;
+    void* jc = get_component(e, g_idx_jump);
+    if (!is_readable(jc, (size_t)(JUMP_FORCE_FIELD_OFFSET + 4))) return;
+    __try {
+        auto it = g_jumpBaselineMap.find(eid);
+        if (it == g_jumpBaselineMap.end()) {
+            float cur = *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET);
+            if (cur > 0.0f && cur < 1000.0f) {
+                g_jumpBaselineMap[eid] = cur;
+                *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET) = cur * mult;
+            }
+        } else {
+            *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET) = it->second * mult;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 void apply_world_mods() {
     if (!g_alwaysDay.load() || !g_todInstance) return;
     // Verify singleton pointer is still readable — Il2Cpp GC may have moved
@@ -968,43 +1013,16 @@ void apply_player_mods() {
                 if (g_idx_ammo >= 0)     strip_component(e, g_idx_ammo);
                 if (g_idx_inv_ammo >= 0) strip_component(e, g_idx_inv_ammo);
             }
-            // Speed multiplier — write-once-per-entity via range guard so
-            // we don't compound. Applied to SpeedData component.
-            float speedMult = g_speedMult.load();
-            if (speedMult > 1.001f && g_idx_speed_data >= 0) {
-                void* sc = get_component(e, g_idx_speed_data);
-                if (is_readable(sc, (size_t)(SPEED_MULT_FIELD_OFFSET + 4))) {
-                    float cur = *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET);
-                    if (cur > 0.0f && cur < 100.0f) {
-                        *(float*)((uintptr_t)sc + SPEED_MULT_FIELD_OFFSET) = cur * speedMult;
-                    }
-                }
-            }
-            // Walker fly — flip CheatWalkerFly to true.
+            // Speed / jump multipliers offloaded to helpers to keep the
+            // per-entity __try free of C++ containers (else C2712).
+            int eid = seh_read_entity_id(e);
+            apply_speed_boost_one(e, eid);
+            apply_jump_boost_one(e, eid);
+
             if (g_walkerFly.load() && g_idx_cheat_walker_fly >= 0) {
                 void* wc = get_component(e, g_idx_cheat_walker_fly);
                 if (is_readable(wc, (size_t)(WALKER_FLY_FIELD_OFFSET + 1))) {
                     *(uint8_t*)((uintptr_t)wc + WALKER_FLY_FIELD_OFFSET) = 1;
-                }
-            }
-            // Jump-force multiplier — write-once-per-entity via sentinel
-            // to avoid compounding every tick. Sentinel is the negative
-            // of a plausible base value.
-            if (jumpMult > 1.001f && g_idx_jump >= 0) {
-                void* jc = get_component(e, g_idx_jump);
-                if (is_readable(jc, (size_t)(JUMP_FORCE_FIELD_OFFSET + 4))) {
-                    float cur = *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET);
-                    // Sentinel: any large negative value we chose. If it's
-                    // already sentinel'd, do nothing.
-                    if (cur > 0.0f && cur < 1000.0f) {
-                        float boosted = cur * jumpMult;
-                        *(float*)((uintptr_t)jc + JUMP_FORCE_FIELD_OFFSET) = boosted;
-                        // No sentinel marker unfortunately without another field.
-                        // Practically: rewriting the same * mult next tick would
-                        // compound. Guard: only apply if cur is close to the
-                        // original range. As long as the mult keeps blasting cur
-                        // past 1000 we stop touching it.
-                    }
                 }
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) { /* skip bad ent */ }
