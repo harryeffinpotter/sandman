@@ -212,6 +212,49 @@ static IDXGISwapChain* g_initSwapChain = nullptr;
 bool g_menuVisible = true;
 std::atomic<bool> g_forceWindowed{false};
 
+// Auto re-equip for dupe mode. When on, DLL sends key A then key B via
+// SendInput on a timer so the game's held-item entity is re-spawned each
+// tick, letting dupe mode grab a fresh copy.
+std::atomic<bool> g_autoReequip{false};
+int g_reequipKey1 = 0x31;   // '1'
+int g_reequipKey2 = 0x32;   // '2'
+int g_reequipIntervalMs = 500;  // default matches game's ~5s equip animation
+
+static void send_key(int vk, bool down) {
+    INPUT in = {};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = (WORD)vk;
+    in.ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    in.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+    SendInput(1, &in, sizeof(in));
+}
+
+static void send_scroll(int wheelDelta) {
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    in.mi.mouseData = (DWORD)wheelDelta;  // WHEEL_DELTA = 120
+    SendInput(1, &in, sizeof(in));
+}
+
+static void auto_reequip_tick() {
+    if (!g_autoReequip.load() || !g_dupeMode.load()) return;
+    // Only fire when the game window is foreground so we don't spam keys
+    // into other apps if LO Alt-Tabs.
+    if (GetForegroundWindow() != g_gameHwnd) return;
+    static ULONGLONG s_last = 0;
+    ULONGLONG now = GetTickCount64();
+    if (now - s_last < (ULONGLONG)g_reequipIntervalMs) return;
+    s_last = now;
+    // Scroll wheel bounce — cycles one slot away and back so the game
+    // re-equips whatever slot we're currently on (medkit, core, whatever)
+    // without needing to know which slot number it is. Ends on the ORIGINAL
+    // slot so we don't drift.
+    send_scroll(120);         // wheel up = slot -1
+    Sleep(30);
+    send_scroll(-120);        // wheel down = slot +1 = back to original
+}
+
 
 typedef HRESULT(STDMETHODCALLTYPE* fn_Present)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 typedef HRESULT(STDMETHODCALLTYPE* fn_ResizeBuffers)(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
@@ -1208,6 +1251,10 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
     static int s_frameCount = 0;
     if (s_frameCount < 5) { dbglog("[frame %d] start\n", s_frameCount); }
 
+    // Auto re-equip tick for dupe mode — SendInput spam slot swap so
+    // non-weapon items get re-spawned as fresh entities.
+    auto_reequip_tick();
+
     // Global emergency-reset hotkey (F1). GetAsyncKeyState is polled here
     // instead of via WndProc because WndProc-based INSERT stops working if
     // the game loses focus or our wndproc hook got clobbered by a freeze.
@@ -1380,6 +1427,23 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             g_lockedEntityId.store(-1);
                             g_lockedEntityPtr.store(0);
                         }
+                    }
+                }
+                {
+                    // Auto re-equip via SendInput — forces the game to re-spawn
+                    // the held item entity so dupe-mode picker sees it fresh
+                    // every tick. Fixes 'gun dupes fast because of hand-swap
+                    // animation, but medkits/rods need manual swap-and-back'.
+                    bool are = g_autoReequip.load();
+                    if (ImGui::Checkbox("Auto re-equip (spam slot swap)", &are))
+                        g_autoReequip.store(are);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(dupe non-weapons w/o manual swap)");
+                    if (are) {
+                        int i = g_reequipIntervalMs;
+                        ImGui::SliderInt("Interval ms", &i, 100, 2000);
+                        g_reequipIntervalMs = i;
+                        ImGui::TextDisabled("Scroll bounce: wheel up + wheel down. Re-equips current slot regardless of what's on it.");
                     }
                 }
                 {
@@ -1705,11 +1769,20 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(strips AmmoId/InventoryItemAmmoId)");
                 }
                 ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "GRAVITY MODES (write to Jump component — likely gravity field, negative = anti-grav)");
+                {
+                    bool v = g_flyMode.load();
+                    if (ImGui::Checkbox("Fly mode (gravity = -1x, floats up)", &v)) g_flyMode.store(v);
+                }
+                {
+                    bool v = g_lowGravMode.load();
+                    if (ImGui::Checkbox("Low gravity (0.3x, floaty jumps)", &v)) g_lowGravMode.store(v);
+                }
                 {
                     float m = g_jumpForceMult.load();
-                    if (ImGui::SliderFloat("Jump force multiplier", &m, 1.0f, 5.0f, "%.2fx"))
+                    if (ImGui::SliderFloat("Manual gravity multiplier", &m, -3.0f, 5.0f, "%.2fx"))
                         g_jumpForceMult.store(m);
-                    ImGui::TextDisabled("Writes Jump.force *= mult once per entity (offset guess 0x10 — adjust if no effect).");
+                    ImGui::TextDisabled("1.0 = default, 0.5 = double jump height, 0 = no fall damage, -1 = anti-grav. Fly/Low-grav checkboxes override.");
                 }
                 {
                     float m = g_speedMult.load();
@@ -1806,7 +1879,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         g_espShowPlayers.store(showPlayers);
                     ImGui::SameLine();
                     ImGui::BeginDisabled(!showPlayers);
-                    ImGui::SliderFloat("Dist##player", &g_espPlayerDist, 100.0f, 10000.0f, "%.0f m");
+                    ImGui::SliderFloat("Dist##player", &g_espPlayerDist, 100.0f, 20000.0f, "%.0f m");
                     ImGui::EndDisabled();
                 }
                 {

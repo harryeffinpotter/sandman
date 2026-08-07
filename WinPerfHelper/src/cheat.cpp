@@ -113,6 +113,14 @@ std::atomic<float> g_weaponVelocityMult{1.0f};
 //   Entitas systems that require these components short-circuit when
 //   the component is missing, so stripping them = the effect is bypassed.
 std::atomic<bool> g_noFallDamage{false};
+std::atomic<bool> g_flyMode{false};
+std::atomic<bool> g_lowGravMode{false};
+std::atomic<bool> g_heavyFix2{false};        // flip ItemType to weapon on locked large item
+std::atomic<bool> g_hooverRequest{false};    // one-shot re-dump trigger
+std::atomic<bool> g_hardKillRequested{false};// hotkey → TerminateProcess
+float g_lootT1Color[4] = {0.4f, 0.9f, 0.4f, 1.0f}; // green
+float g_lootT2Color[4] = {0.4f, 0.6f, 1.0f, 1.0f}; // blue
+float g_lootT3Color[4] = {1.0f, 0.6f, 0.2f, 1.0f}; // orange
 std::atomic<bool> g_noJumpDelay{false};
 std::atomic<bool> g_infiniteAmmo{false};
 // Jump-force multiplier — 1.0 = default, 2.0 = 2x jump height, etc.
@@ -146,6 +154,7 @@ void* g_userNameKlass = nullptr;
 void* g_userNameHUDKlass = nullptr;
 void* g_userNameHUDType  = nullptr;
 void* g_userContextModuleInstance = nullptr;
+fn_getEntByAcctId g_getUserEntityByAcctId = nullptr;
 void* g_userContextModuleKlass = nullptr;
 int   g_userNameFieldOffset = -1;
 std::atomic<int> g_userNameRescanRequest{0};
@@ -901,7 +910,14 @@ static void apply_speed_boost_one(void* e, int eid) {
 
 static void apply_jump_boost_one(void* e, int eid) {
     float mult = g_jumpForceMult.load();
-    if (mult <= 1.001f || g_idx_jump < 0 || eid <= 0) return;
+    // Fly mode forces mult = -1 (invert gravity → float up)
+    // No-fall-damage forces mult = 0 (zero gravity → no landing force)
+    // Low-grav forces mult = 0.3 (weak gravity → floaty jumps)
+    if (g_flyMode.load())           mult = -1.0f;
+    else if (g_noFallDamage.load()) mult = 0.0f;
+    else if (g_lowGravMode.load())  mult = 0.3f;
+    // Skip if effectively baseline (no work to do)
+    if (fabsf(mult - 1.0f) < 0.001f || g_idx_jump < 0 || eid <= 0) return;
     void* jc = get_component(e, g_idx_jump);
     if (!is_readable(jc, (size_t)(JUMP_FORCE_FIELD_OFFSET + 4))) return;
     __try {
@@ -958,9 +974,11 @@ void apply_player_mods() {
     bool noJumpDelay = g_noJumpDelay.load();
     bool infAmmo = g_infiniteAmmo.load();
     bool anyToggle = noFall || noJumpDelay || infAmmo
-                     || g_jumpForceMult.load() > 1.001f
+                     || fabsf(g_jumpForceMult.load() - 1.0f) > 0.001f
                      || g_speedMult.load()    > 1.001f
-                     || g_walkerFly.load();
+                     || g_walkerFly.load()
+                     || g_flyMode.load()
+                     || g_lowGravMode.load();
     if (!anyToggle) return;
 
     void* gcm = (void*)g_gameContextModule;
@@ -1184,6 +1202,7 @@ static bool seh_resolve_bones(void* entity, BoneWorldPos* bones);
 static int s_boneProbeCount = 0;
 static void probe_bones_once(void* entity);
 static bool seh_resolve_username(void* entity, char* outBuf, int bufSize);
+static bool seh_resolve_username_via_usercontext(void* entity, char* outBuf, int bufSize);
 
 static std::string get_display_name(const std::string& raw) {
     static std::unordered_map<std::string, std::string> s_cache;
@@ -1314,7 +1333,14 @@ static void process_one_entity(
 
     void* posComp = get_component(entity, g_idx_position);
     bool hasParent = (g_idx_parent >= 0 && get_component(entity, g_idx_parent));
-    if (!posComp && !hasParent) return;
+    // View/ViewData escape hatch — PlayerAvatars carry no Position/Parent
+    // but do have a View component, and seh_resolve_transform_pos below walks
+    // viewBehaviour.transform.position to get a real world pos. Let them
+    // through the drop-gate; resolvedPos gets filled from transformWorldPos
+    // in the fallback branch below.
+    bool hasView = ((g_idx_view >= 0 && get_component(entity, g_idx_view)) ||
+                    (g_idx_view_data >= 0 && get_component(entity, g_idx_view_data)));
+    if (!posComp && !hasParent && !hasView) return;
     (*pDbgHasPosParent)++;
 
     ItemInfo info;
@@ -1385,6 +1411,8 @@ static void process_one_entity(
             auto it = idToEntity.find(parentId);
             if (it != idToEntity.end()) {
                 void* parentPos = get_component(it->second, g_idx_position);
+                if (!parentPos && g_idx_view_position >= 0)
+                    parentPos = get_component(it->second, g_idx_view_position);
                 if (parentPos) {
                     resolvedPos = *(WorldVector*)((uintptr_t)parentPos + 0x10);
                     hasResolvedPos = true;
@@ -1405,13 +1433,67 @@ static void process_one_entity(
     if (name.rfind("PlayerAvatar", 0) == 0) {
         info.displayName = "";
 
-        // Shape-guessing name discovery was pulled — matched too many
-        // component fields (inventory item names, interact targets, etc.)
-        // and labeled players with random strings like "InventorySlotMedium".
-        // Next session: proper il2cpp metadata lookup — find UserEntity by
-        // blueprint name, resolve UserNameComponent klass via
-        // il2cpp_class_from_name, get field offset from il2cpp FieldInfo,
-        // read that specific field. Zero hardcoded offsets, zero shape guessing.
+        // Path 1 — direct ECS read: game exposes UserNameComponent as a
+        // regular component on PlayerAvatar entities. g_idx_user_name is
+        // the component index resolved by name; g_userNameFieldOffset is
+        // the string-field offset resolved from live IL2CPP FieldInfo at
+        // boot. If the offset didn't resolve, fall back to 0x10 (matches
+        // the walker-owner path below).
+        if (g_idx_user_name >= 0) {
+            void* unc = get_component(entity, g_idx_user_name);
+            static int s_diagLogged = 0;
+            bool logThis = (s_diagLogged < 5);
+            if (is_readable(unc, 0x40)) {
+                int off = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
+                void* np = *(void**)((uintptr_t)unc + off);
+                std::string n = read_il2cpp_string(np);
+                if (logThis) {
+                    ringlog::push("[name-diag] PlayerAvatar eid=%d unc=%p off=0x%X np=%p strlen=%zu str='%s'",
+                                  eid, unc, off, np, n.size(), n.c_str());
+                    s_diagLogged++;
+                }
+                if (!n.empty() && n.size() < 64) info.displayName = n;
+            } else if (logThis) {
+                ringlog::push("[name-diag] PlayerAvatar eid=%d g_idx_user_name=%d unc=%p (unreadable/null)",
+                              eid, g_idx_user_name, unc);
+                s_diagLogged++;
+            }
+            // Also log AccountId — for the "resolve via UserContext" fallback plan.
+            if (logThis && g_idx_account_id >= 0) {
+                void* aidComp = get_component(entity, g_idx_account_id);
+                unsigned long long aid = 0;
+                if (is_readable(aidComp, 0x18)) aid = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
+                ringlog::push("[name-diag]   AccountId=%llu (component=%p)", aid, aidComp);
+            }
+        }
+
+        // Path 2 — reflection-based GetComponentInChildren via resolved
+        // il2cpp Type (HUD MonoBehaviour first, then ECS klass). Works
+        // even if the ECS-component-index lookup didn't find anything
+        // because the game moved the string into a HUD-side MB.
+        if (info.displayName.empty()) {
+            char nameBuf[128] = {0};
+            if (seh_resolve_username(entity, nameBuf, sizeof(nameBuf))) {
+                std::string n(nameBuf);
+                if (!n.empty() && n.size() < 64) info.displayName = n;
+            }
+        }
+
+        // Path 3 — UserContext invoke. See seh_resolve_username_via_usercontext.
+        if (info.displayName.empty()) {
+            char ucNameBuf[128] = {0};
+            if (seh_resolve_username_via_usercontext(entity, ucNameBuf, sizeof(ucNameBuf))) {
+                std::string n(ucNameBuf);
+                if (!n.empty() && n.size() < 64) info.displayName = n;
+            }
+        }
+
+        // Last-resort fallback so labels aren't blank in the overlay.
+        if (info.displayName.empty()) info.displayName = "Player";
+
+        // Old shape-guessing block preserved below (#if 0) for reference.
+        // Kept because if both paths above start failing after a game
+        // update, this is the escape hatch.
 #if 0
         // Runtime auto-discovery + cache. Once we find a (componentIndex,
         // byteOffset) whose pointer field yields a username-shaped string,
@@ -1578,10 +1660,12 @@ static void process_one_entity(
         }
 
         if (!ownerAvatar) {
-            info.displayName = name;
+            info.displayName = "Enemy Trampler";
         } else if (ownerEid == playerEntityId) {
-            info.displayName = "My Trampler";
+            info.displayName = "Your Trampler";
         } else {
+            // Try direct ECS read first (usually empty on non-local
+            // PlayerAvatars), then UserContext invoke path.
             std::string ownerName;
             if (g_idx_user_name >= 0) {
                 void* unc = get_component(ownerAvatar, g_idx_user_name);
@@ -1590,7 +1674,14 @@ static void process_one_entity(
                     ownerName = read_il2cpp_string(np);
                 }
             }
-            info.displayName = (ownerName.empty() ? std::string("Player") : ownerName) + "'s Trampler";
+            if (ownerName.empty()) {
+                char nbuf[128] = {0};
+                if (seh_resolve_username_via_usercontext(ownerAvatar, nbuf, sizeof(nbuf))) {
+                    ownerName = nbuf;
+                }
+            }
+            info.displayName = ownerName.empty() ? std::string("Enemy Trampler")
+                                                 : (ownerName + "'s Trampler");
         }
     } else {
         info.displayName = get_display_name(name);
@@ -1608,7 +1699,7 @@ static void process_one_entity(
     }
 
     bool isPlayer = (name.rfind("PlayerAvatar", 0) == 0);
-    if (isPlayer || info.isCreature) {
+    if ((isPlayer || info.isCreature) && g_espShowSkeleton.load()) {
         memset(info.bonePositions, 0, sizeof(info.bonePositions));
         info.hasBones = seh_resolve_bones(entity, info.bonePositions);
     }
@@ -1699,6 +1790,91 @@ static bool seh_read_bp_name_raw(void* entity, char* nameOut, int nameCap, int* 
     return seh_read_string_at(ns, nameOut, nameCap);
 }
 
+// Type-aware field value read. Reads (comp + off) as the declared type and
+// prints a human-readable value to f. Wrapped by caller in SEH.
+static void mega_write_field_value(FILE* f, void* comp, size_t off, const char* typeName) {
+    if (!comp || !typeName) { fprintf(f, "?"); return; }
+    if      (!strcmp(typeName, "System.Int32"))   fprintf(f, "%d",   *(int*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.UInt32"))  fprintf(f, "%u",   *(uint32_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.Int64"))   fprintf(f, "%lld", (long long)*(int64_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.UInt64"))  fprintf(f, "%llu", (unsigned long long)*(uint64_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.Int16"))   fprintf(f, "%d",   (int)*(int16_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.UInt16"))  fprintf(f, "%u",   (unsigned)*(uint16_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.Byte"))    fprintf(f, "%u",   (unsigned)*(uint8_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.SByte"))   fprintf(f, "%d",   (int)*(int8_t*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.Single"))  fprintf(f, "%.4f", *(float*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.Double"))  fprintf(f, "%.6f", *(double*)((uintptr_t)comp + off));
+    else if (!strcmp(typeName, "System.Boolean")) fprintf(f, "%s",   (*(uint8_t*)((uintptr_t)comp + off)) ? "true" : "false");
+    else if (!strcmp(typeName, "System.String")) {
+        void* strPtr = *(void**)((uintptr_t)comp + off);
+        if (!strPtr) { fprintf(f, "null"); return; }
+        char sb[256];
+        if (seh_read_string_at(strPtr, sb, sizeof(sb))) fprintf(f, "\"%s\"", sb);
+        else fprintf(f, "<badstr@%p>", strPtr);
+    }
+    else if (strstr(typeName, "UnityEngine.Vector3") || strstr(typeName, "Vector3")) {
+        float* v = (float*)((uintptr_t)comp + off);
+        fprintf(f, "(%.2f, %.2f, %.2f)", v[0], v[1], v[2]);
+    }
+    else if (strstr(typeName, "UnityEngine.Vector2") || strstr(typeName, "Vector2")) {
+        float* v = (float*)((uintptr_t)comp + off);
+        fprintf(f, "(%.2f, %.2f)", v[0], v[1]);
+    }
+    else {
+        // Pointer to another il2cpp object — print klass name of what it points to
+        void* ptr = *(void**)((uintptr_t)comp + off);
+        if (!ptr) { fprintf(f, "null"); return; }
+        if (!is_readable(ptr, 8)) { fprintf(f, "<unreadable@%p>", ptr); return; }
+        void* klass = *(void**)ptr;
+        IL2CPP_API* api = get_il2cpp_api();
+        if (api && api->il2cpp_class_get_name && is_readable(klass, 0x40)) {
+            const char* kn = api->il2cpp_class_get_name(klass);
+            fprintf(f, "→%s@%p", kn ? kn : "?", ptr);
+        } else {
+            fprintf(f, "→?@%p", ptr);
+        }
+    }
+}
+
+// Walk a klass's inheritance chain and dump every field's name + value from
+// the given component instance. Uses il2cpp reflection — no hardcoded offsets,
+// no filtering, no guessing. Nested output indented by 'indent' spaces.
+static void mega_dump_component_fields(FILE* f, void* comp, void* klass, int indent) {
+    IL2CPP_API* api = get_il2cpp_api();
+    if (!f || !comp || !klass || !api) return;
+    if (!api->il2cpp_class_get_fields || !api->il2cpp_field_get_name
+        || !api->il2cpp_field_get_offset || !api->il2cpp_field_get_type
+        || !api->il2cpp_type_get_name) return;
+
+    void* cur = klass;
+    int depth = 0;
+    while (cur && depth < 8) {
+        __try {
+            void* fit = nullptr;
+            void* field;
+            while ((field = api->il2cpp_class_get_fields(cur, &fit)) != nullptr) {
+                const char* fname = api->il2cpp_field_get_name(field);
+                size_t foff = api->il2cpp_field_get_offset(field);
+                void* ftype = api->il2cpp_field_get_type(field);
+                const char* tname = ftype ? api->il2cpp_type_get_name(ftype) : "?";
+                // Skip statics (offset == 0 on instance layout) and things
+                // that would read out-of-bounds. Instance fields typically
+                // start at >= 0x10.
+                if (foff == 0 && depth == 0) continue;
+                for (int s = 0; s < indent; ++s) fputc(' ', f);
+                fprintf(f, "%s: ", fname ? fname : "?");
+                __try {
+                    mega_write_field_value(f, comp, foff, tname ? tname : "?");
+                } __except(EXCEPTION_EXECUTE_HANDLER) { fprintf(f, "<SEH reading value>"); }
+                fprintf(f, "\n");
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) { /* continue to parent */ }
+        if (!api->il2cpp_class_get_parent) break;
+        cur = api->il2cpp_class_get_parent(cur);
+        depth++;
+    }
+}
+
 static void dump_one_component(FILE* f, void* ent, int idx) {
     void* c = seh_get_component_ptr(ent, idx);
     if (!c) return;
@@ -1706,28 +1882,13 @@ static void dump_one_component(FILE* f, void* ent, int idx) {
     char klassName[128] = "?";
     seh_read_component_klass_name(c, klassName, sizeof(klassName));
 
-    unsigned char raw[0x40];
-    bool haveHex = seh_component_hex(c, raw, sizeof(raw));
+    fprintf(f, "  [%3d] %s\n", idx, klassName);
 
-    fprintf(f, "  [%3d] %p  class=%s\n", idx, c, klassName);
-    if (haveHex) {
-        char hex[3 * 0x40 + 8]; int off = 0;
-        for (int i = 0; i < (int)sizeof(raw); ++i)
-            off += snprintf(hex + off, sizeof(hex) - off, "%02X ", raw[i]);
-        fprintf(f, "        hex: %s\n", hex);
-    }
-
-    for (int probe = 0x08; probe <= 0x38; probe += 0x08) {
-        void* p = nullptr;
-        __try {
-            if (!is_readable((void*)((uintptr_t)c + probe), 8)) continue;
-            p = *(void**)((uintptr_t)c + probe);
-        } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
-        if (!p) continue;
-        char sbuf[256];
-        if (seh_read_string_at(p, sbuf, sizeof(sbuf))) {
-            fprintf(f, "        str[+0x%02X]='%s'\n", probe, sbuf);
-        }
+    // il2cpp reflection walk — every field, every parent class, real values.
+    void* klass = nullptr;
+    __try { if (is_readable(c, 8)) klass = *(void**)c; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    if (klass && is_readable(klass, 0x40)) {
+        mega_dump_component_fields(f, c, klass, 8);
     }
 }
 
@@ -2135,7 +2296,9 @@ void scan_entities() {
         // First-tick full dump: every unique blueprint gets a fat structural
         // dump — all attached components with class names, first 0x40 bytes
         // hex, and probed pointer-to-string fields. One file, greppable.
-        // Runs once per session; guarded so we never write it twice.
+        // Mega runtime dump — once per session by default so it doesn't eat
+        // the per-tick 750ms scan budget (which nuked ESP for LO). On-demand
+        // re-trigger comes from the Hoover button (task 27).
         {
             static bool s_dumpDone = false;
             if (!s_dumpDone) {
@@ -2218,12 +2381,39 @@ void scan_entities() {
             LARGE_INTEGER qpEntStart;
             QueryPerformanceCounter(&qpEntStart);
 
+            // Per-entity VEH scope: if any Unity call throws AV inside this
+            // entity's processing, VEH restores context to right here (after
+            // RtlCaptureContext) and we `continue` to the next entity instead
+            // of aborting the whole tick and eating a 3s cooldown.
+            RtlCaptureContext(&g_vehEntityCtx);
+            if (g_vehCrashRecovered) {
+                g_vehCrashRecovered = false;
+                g_vehEntityActive = false;
+                g_workerVehActive = true;  // re-arm for the next entity
+                vehEntityRecoveries++;
+                static int s_perEntSkipLogged = 0;
+                if (s_perEntSkipLogged < 10 || s_perEntSkipLogged % 500 == 0) {
+                    if (g_lastVehModBase && g_lastVehModName[0]) {
+                        wlog("[scan] entity %d/%d skipped: AV at %s+0x%llX eid=%d (total skipped this session: %d)\n",
+                             e, entityCount, g_lastVehModName,
+                             (unsigned long long)(g_lastVehRip - g_lastVehModBase),
+                             eid, vehEntityRecoveries);
+                    } else {
+                        wlog("[scan] entity %d/%d skipped: AV at %p eid=%d (total skipped this session: %d)\n",
+                             e, entityCount, (void*)g_lastVehRip, eid, vehEntityRecoveries);
+                    }
+                }
+                s_perEntSkipLogged++;
+                continue;
+            }
+            g_vehEntityActive = true;
             seh_process_one_entity(
                 ent,
                 playerEntityId, havePlayerPos, playerPos, idToEntity, items,
                 &dbgReadable, &dbgValidObj, &dbgEnabled, &dbgHasBP,
                 &dbgNameOK, &dbgPassFilter, &dbgHasPosParent,
                 &heldCount, &resolvedParentCount, &entitiesPushed);
+            g_vehEntityActive = false;
 
             LARGE_INTEGER qpEntEnd;
             QueryPerformanceCounter(&qpEntEnd);
@@ -2259,6 +2449,36 @@ void scan_entities() {
                         dbgReadable, dbgValidObj, dbgEnabled, dbgHasBP, dbgNameOK, dbgPassFilter, dbgHasPosParent, entitiesPushed);
         if (doLog) wlog("[scan] heldItems=%d resolvedParents=%d idToEntitySize=%d\n",
                         heldCount, resolvedParentCount, (int)idToEntity.size());
+
+        // One-shot diagnostic: dump unique blueprint-name prefixes in items
+        // so we can see what player/mob entities are actually named. Fires
+        // ONCE per session on the first non-empty scan.
+        {
+            static bool s_namesDumped = false;
+            if (!s_namesDumped && !items.empty()) {
+                s_namesDumped = true;
+                std::unordered_map<std::string, int> prefixCount;
+                for (const auto& it : items) {
+                    // Group by first underscore-delimited token or first 20 chars
+                    std::string p = it.name;
+                    size_t sp = p.find('_');
+                    if (sp != std::string::npos && sp < 24) p = p.substr(0, sp);
+                    if (p.size() > 24) p = p.substr(0, 24);
+                    prefixCount[p]++;
+                }
+                ringlog::push("[name-inv] %zu unique prefixes in %zu items:", prefixCount.size(), items.size());
+                // Sort by count desc, log top 20
+                std::vector<std::pair<std::string, int>> sorted(prefixCount.begin(), prefixCount.end());
+                std::sort(sorted.begin(), sorted.end(),
+                          [](const auto& a, const auto& b){ return a.second > b.second; });
+                int n = 0;
+                for (const auto& kv : sorted) {
+                    if (n >= 30) break;
+                    ringlog::push("[name-inv]   [%d]='%s' count=%d", n, kv.first.c_str(), kv.second);
+                    n++;
+                }
+            }
+        }
 
 #if 0
         {
@@ -2694,6 +2914,60 @@ static bool seh_resolve_transform_pos(void* entity, Vec3* out) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_transform_pos] SEH: 0x%08lX\n", GetExceptionCode()); return false; }
 }
 
+// UserContext-invoke path. UserNameComponent lives on UserEntity in the
+// User context, not on PlayerAvatar in game context. Read PlayerAvatar's
+// AccountId, invoke UserContextModule.GetEntityWithAccountId(accountId),
+// then brute-scan the returned UserEntity's first 0x100 bytes for a
+// pointer whose klass matches g_userNameKlass — that pointer's +0x10 is
+// the name string. Free function because __try can't sit in
+// process_one_entity (which has std::string / std::vector destructors → C2712).
+static bool seh_resolve_username_via_usercontext(void* entity, char* outBuf, int bufSize) {
+    if (!outBuf || bufSize <= 0) return false;
+    outBuf[0] = 0;
+    if (!g_getUserEntityByAcctId || !g_userContextModuleInstance ||
+        g_idx_account_id < 0 || !g_userNameKlass) return false;
+    __try {
+        void* aidComp = get_component(entity, g_idx_account_id);
+        if (!is_readable(aidComp, 0x18)) return false;
+        unsigned long long aid = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
+        if (aid == 0) return false;
+
+        g_vehInnerActive = true;
+        RtlCaptureContext(&g_vehInnerCtx);
+        if (g_vehCrashRecovered) {
+            g_vehCrashRecovered = false;
+            g_vehInnerActive = false;
+            g_workerVehActive = true;
+            return false;
+        }
+        void* userEnt = g_getUserEntityByAcctId(g_userContextModuleInstance, aid, nullptr);
+        g_vehInnerActive = false;
+        if (!is_readable(userEnt, 0x100)) return false;
+
+        int nameOff = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
+        for (int off = 0x08; off <= 0xF8; off += 0x08) {
+            void* p = *(void**)((uintptr_t)userEnt + off);
+            if (!is_readable(p, 0x18)) continue;
+            void* klass = *(void**)p;
+            if (klass != g_userNameKlass) continue;
+            void* np = *(void**)((uintptr_t)p + nameOff);
+            if (!is_readable(np, 0x14)) continue;
+            int len = *(int*)((uintptr_t)np + 0x10);
+            if (len <= 0 || len >= bufSize) continue;
+            wchar_t* wchars = (wchar_t*)((uintptr_t)np + 0x14);
+            if (!is_readable(wchars, len * 2)) continue;
+            for (int c = 0; c < len; c++) outBuf[c] = (char)wchars[c];
+            outBuf[len] = 0;
+            return true;
+        }
+        return false;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_vehInnerActive = false;
+        g_workerVehActive = true;
+        return false;
+    }
+}
+
 static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
     if (!g_getComponentInChildren || g_idx_view < 0) return false;
     // Try HUD type first (real MonoBehaviour findable via GCiC), then ECS
@@ -2737,7 +3011,13 @@ static bool seh_resolve_username(void* entity, char* outBuf, int bufSize) {
                 }
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { wlog("[seh_resolve_username] SEH: 0x%08lX\n", GetExceptionCode()); }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        static int s_unSehLogged = 0;
+        if (s_unSehLogged < 3) {
+            wlog("[seh_resolve_username] SEH: 0x%08lX (further occurrences silenced)\n", GetExceptionCode());
+            s_unSehLogged++;
+        }
+    }
     return false;
 }
 
@@ -2788,12 +3068,17 @@ static void hunt_walk_recursive(void* tf, int depth, const char* parentPath, FIL
     char path[512];
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s/%s", parentPath, nameBuf);
 
+    // Always dump every visited child — even non-bone-named — so we see
+    // the actual rig naming convention. Indent by depth for readability.
+    for (int i = 0; i < depth; i++) fputs("  ", out);
     if (matched) {
         Vec3 pos = {0,0,0};
         if (g_getPosition) g_getPosition(&pos, tf, nullptr);
-        fprintf(out, "  MATCH tf=%p depth=%d pos=(%.2f,%.2f,%.2f) path=%s\n",
-                tf, depth, pos.x, pos.y, pos.z, path);
+        fprintf(out, "* '%s' (MATCH pos=%.2f,%.2f,%.2f)\n",
+                nameBuf, pos.x, pos.y, pos.z);
         (*hits)++;
+    } else {
+        fprintf(out, "'%s'\n", nameBuf);
     }
 
     if (!g_getChildCount || !g_getChild) return;
@@ -2815,7 +3100,7 @@ static void hunt_bone_transforms_once(void* viewBehaviour) {
     FILE* bf = nullptr;
     const char* mode = (s_boneHuntCount == 0) ? "w" : "a";
     { char p[MAX_PATH]; char ad[MAX_PATH]; DWORD nb = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
-      if (nb && nb < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_m.dat", ad);
+      if (nb && nb < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_n.dat", ad);
       else strncpy_s(p, sizeof(p), "C:\\ProgramData\\Microsoft\\PerfCache\\BoneTransformHunt.txt", _TRUNCATE);
       fopen_s(&bf, p, mode); }
     if (!bf) return;

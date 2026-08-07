@@ -155,6 +155,11 @@ CONTEXT g_vehInnerCtx;
 volatile bool g_vehInnerActive = false;
 CONTEXT g_vehEntityCtx;
 volatile bool g_vehEntityActive = false;
+volatile uintptr_t g_lastVehRip = 0;
+volatile ULONG g_lastVehCode = 0;
+volatile uintptr_t g_lastVehModBase = 0;
+char g_lastVehModName[64] = {0};
+volatile int g_lastVehScope = 0;
 
 static const char* exception_code_name(DWORD code) {
     switch (code) {
@@ -363,13 +368,34 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
     if (code == 0xC0000005 && GetCurrentThreadId() == g_workerThreadId && g_workerVehActive) {
         g_workerVehActive = false;
         g_vehCrashRecovered = true;
+        uintptr_t rip = (uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+        g_lastVehRip = rip;
+        g_lastVehCode = code;
+        HMODULE hmod = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)rip, &hmod) && hmod) {
+            g_lastVehModBase = (uintptr_t)hmod;
+            char path[MAX_PATH] = {0};
+            if (GetModuleFileNameA(hmod, path, MAX_PATH)) {
+                const char* base = strrchr(path, '\\');
+                strncpy_s(g_lastVehModName, sizeof(g_lastVehModName), base ? base + 1 : path, _TRUNCATE);
+            } else {
+                g_lastVehModName[0] = 0;
+            }
+        } else {
+            g_lastVehModBase = 0;
+            g_lastVehModName[0] = 0;
+        }
         if (g_vehInnerActive) {
             g_vehInnerActive = false;
+            g_lastVehScope = 1;
             *ep->ContextRecord = g_vehInnerCtx;
         } else if (g_vehEntityActive) {
             g_vehEntityActive = false;
+            g_lastVehScope = 2;
             *ep->ContextRecord = g_vehEntityCtx;
         } else {
+            g_lastVehScope = 0;
             *ep->ContextRecord = g_vehSavedCtx;
         }
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -1072,14 +1098,37 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 for (int i = 0; i < hitCount; ++i) {
                     fprintf(mf, "=== [%d] %s.%s   fields=%d   asm=%s   klass=%p ===\n",
                             i, hits[i].ns, hits[i].name, hits[i].fields, hits[i].asm_, hits[i].klass);
-                    if (hits[i].fields > 0 && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
-                        void* fi = nullptr;
-                        int fnum = 0;
-                        while (void* field = api.il2cpp_class_get_fields(hits[i].klass, &fi)) {
-                            const char* fname = api.il2cpp_field_get_name(field);
-                            size_t foff = api.il2cpp_field_get_offset(field);
-                            fprintf(mf, "    field[%d] name='%s' offset=0x%zX\n",
-                                    fnum++, fname ? fname : "?", foff);
+                    // Walk the full inheritance chain — real fields (like the
+                    // 'name' string on BaseTypeNameComponent`1) often live on
+                    // grandparents, not the leaf class. Same reason weeks of
+                    // guessing missed UserName.
+                    if (api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
+                        void* cur = hits[i].klass;
+                        int depth = 0;
+                        while (cur && depth < 8) {
+                            const char* cnCur = api.il2cpp_class_get_name(cur);
+                            const char* nsCur = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(cur) : "";
+                            void* fi = nullptr;
+                            int fnum = 0;
+                            // Peek field count before printing header so we
+                            // don't spam empty depth lines.
+                            void* peekIt = nullptr;
+                            int peekCount = 0;
+                            while (api.il2cpp_class_get_fields(cur, &peekIt)) peekCount++;
+                            if (peekCount > 0 || depth == 0) {
+                                fprintf(mf, "  [depth %d] %s.%s\n", depth,
+                                        nsCur ? nsCur : "", cnCur ? cnCur : "?");
+                                while (void* field = api.il2cpp_class_get_fields(cur, &fi)) {
+                                    const char* fname = api.il2cpp_field_get_name(field);
+                                    size_t foff = api.il2cpp_field_get_offset(field);
+                                    fprintf(mf, "      field[%d] name='%s' offset=0x%zX\n",
+                                            fnum++, fname ? fname : "?", foff);
+                                }
+                                if (fnum == 0) fprintf(mf, "      (no fields)\n");
+                            }
+                            if (api.il2cpp_class_get_parent) cur = api.il2cpp_class_get_parent(cur);
+                            else break;
+                            depth++;
                         }
                     }
                     fprintf(mf, "\n");
@@ -1088,6 +1137,213 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 fclose(mf);
             }
             wlog("[worker] ManagerDump: %d classes -> ManagerDump.txt\n", hitCount);
+        }
+
+        // ============================================================
+        // MEGA CLASS DUMP — every klass in every assembly, full parent
+        // chain, all fields, all methods with signatures. Zero pattern
+        // filter. One shot at boot. Overflow of data by design.
+        // ============================================================
+        if (api.il2cpp_domain_get && api.il2cpp_domain_get_assemblies
+            && api.il2cpp_assembly_get_image && api.il2cpp_image_get_class_count
+            && api.il2cpp_image_get_class && api.il2cpp_class_get_name) {
+            FILE* af = nullptr;
+            crash_fopen_s(&af, "perf_all.dat", "w");
+            if (af) {
+                fprintf(af, "# COMPLETE class dump — every klass in every assembly.\n");
+                fprintf(af, "# Full parent chain, all fields (name + type), all methods (name + return type + param types).\n");
+                fprintf(af, "# No pattern filter. No skip list. Everything.\n\n");
+                size_t asmCount = 0;
+                void* dom = api.il2cpp_domain_get();
+                void** assemblies = api.il2cpp_domain_get_assemblies(dom, &asmCount);
+                int totalKlasses = 0;
+                int totalFields = 0;
+                int totalMethods = 0;
+                for (size_t i = 0; i < asmCount; i++) {
+                    void* img = api.il2cpp_assembly_get_image(assemblies[i]);
+                    if (!img) continue;
+                    const char* imgName = api.il2cpp_image_get_name ? api.il2cpp_image_get_name(img) : "?";
+                    size_t classCount = api.il2cpp_image_get_class_count(img);
+                    fprintf(af, "\n\n########################################\n");
+                    fprintf(af, "## ASSEMBLY: %s   (%zu classes)\n", imgName, classCount);
+                    fprintf(af, "########################################\n");
+                    for (size_t j = 0; j < classCount; j++) {
+                        void* klass = api.il2cpp_image_get_class(img, j);
+                        if (!klass) continue;
+                        const char* cn = api.il2cpp_class_get_name(klass);
+                        const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                        fprintf(af, "\n=== %s.%s ===\n", ns ? ns : "", cn ? cn : "?");
+                        totalKlasses++;
+                        // Parent chain fields
+                        if (api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_type && api.il2cpp_type_get_name) {
+                            void* cur = klass;
+                            int depth = 0;
+                            while (cur && depth < 8) {
+                                const char* dcn = api.il2cpp_class_get_name(cur);
+                                const char* dns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(cur) : "";
+                                __try {
+                                    void* fit = nullptr;
+                                    void* field;
+                                    bool wroteHeader = false;
+                                    while ((field = api.il2cpp_class_get_fields(cur, &fit)) != nullptr) {
+                                        if (!wroteHeader) {
+                                            fprintf(af, "  fields (from %s.%s):\n", dns ? dns : "", dcn ? dcn : "?");
+                                            wroteHeader = true;
+                                        }
+                                        const char* fname = api.il2cpp_field_get_name(field);
+                                        void* ftype = api.il2cpp_field_get_type(field);
+                                        const char* tname = ftype ? api.il2cpp_type_get_name(ftype) : "?";
+                                        fprintf(af, "    %s: %s\n", fname ? fname : "?", tname ? tname : "?");
+                                        totalFields++;
+                                    }
+                                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                                if (!api.il2cpp_class_get_parent) break;
+                                cur = api.il2cpp_class_get_parent(cur);
+                                depth++;
+                            }
+                        }
+                        // Methods with signatures
+                        if (api.il2cpp_class_get_methods && api.il2cpp_method_get_name && api.il2cpp_method_get_param_count && api.il2cpp_method_get_return_type && api.il2cpp_method_get_param && api.il2cpp_type_get_name) {
+                            void* mit = nullptr;
+                            void* method;
+                            bool wroteHeader = false;
+                            while ((method = api.il2cpp_class_get_methods(klass, &mit)) != nullptr) {
+                                if (!wroteHeader) {
+                                    fprintf(af, "  methods:\n");
+                                    wroteHeader = true;
+                                }
+                                const char* mname = api.il2cpp_method_get_name(method);
+                                uint32_t pc = api.il2cpp_method_get_param_count(method);
+                                const char* retName = "void";
+                                __try {
+                                    void* rt = api.il2cpp_method_get_return_type(method);
+                                    if (rt) retName = api.il2cpp_type_get_name(rt);
+                                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                                fprintf(af, "    %s %s(", retName ? retName : "?", mname ? mname : "?");
+                                for (uint32_t p = 0; p < pc; p++) {
+                                    const char* ptype = "?";
+                                    __try {
+                                        void* pt = api.il2cpp_method_get_param(method, p);
+                                        if (pt) ptype = api.il2cpp_type_get_name(pt);
+                                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                                    fprintf(af, "%s%s", p > 0 ? ", " : "", ptype ? ptype : "?");
+                                }
+                                fprintf(af, ")\n");
+                                totalMethods++;
+                            }
+                        }
+                    }
+                }
+                fprintf(af, "\n\n# TOTAL: %d classes, %d fields, %d methods across %zu assemblies\n",
+                        totalKlasses, totalFields, totalMethods, asmCount);
+                fclose(af);
+                wlog("[worker] MEGA CLASS DUMP: %d klasses / %d fields / %d methods -> perf_all.dat\n",
+                     totalKlasses, totalFields, totalMethods);
+            }
+        }
+
+        // Inventory/Equip/Slot method hunt — every klass whose name matches
+        // inventory-related patterns, dump ALL its methods with signatures.
+        // We're looking for game-side functions like SelectSlot, EquipItem,
+        // HoldItem, PickHotbarSlot, TakeOut, PutAway — anything we can call
+        // directly to swap items without input simulation (which the game
+        // ignores for consumable slots).
+        if (api.il2cpp_domain_get && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name && api.il2cpp_class_get_methods && api.il2cpp_method_get_name) {
+            static const char* invPatterns[] = {
+                "Inventory", "Hotbar", "QuickAccess", "Equip", "Hold",
+                "Slot", "SelectItem", "ActiveItem", "HeldItem", "PickItem",
+                "TakeOut", "PutAway", "SwitchWeapon", "SwapItem",
+                "WeaponSelector", "WeaponSwitcher", "ItemSelector",
+                "ItemController", "WeaponController", "ItemUse"
+            };
+            FILE* ef = nullptr;
+            crash_fopen_s(&ef, "perf_m.dat", "w");
+            if (ef) fprintf(ef, "# Inventory/Equip/Slot method hunt — all methods on classes\n"
+                                "# whose name matches inventory/hotbar/equip/slot patterns.\n"
+                                "# Look for methods like Equip(int), SelectSlot(int),\n"
+                                "# HoldItem(entity), TakeOut(item) — anything with a slot\n"
+                                "# index or item pointer parameter we can call directly.\n\n");
+
+            size_t asmCount = 0;
+            void* dom = api.il2cpp_domain_get();
+            void** assemblies = api.il2cpp_domain_get_assemblies(dom, &asmCount);
+            int totalKlasses = 0;
+            int totalMethods = 0;
+            for (size_t i = 0; i < asmCount; i++) {
+                void* img = api.il2cpp_assembly_get_image(assemblies[i]);
+                if (!img) continue;
+                const char* imgName = api.il2cpp_image_get_name ? api.il2cpp_image_get_name(img) : "?";
+                // Skip system/third-party — noise
+                if (imgName && (strstr(imgName, "mscorlib") || strstr(imgName, "System.")
+                                || strstr(imgName, "Newtonsoft") || strstr(imgName, "Cinemachine")
+                                || strstr(imgName, "Rewired") || strstr(imgName, "UnityEngine")
+                                || strstr(imgName, "Sirenix") || strstr(imgName, "RootMotion")))
+                    continue;
+                size_t classCount = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < classCount; j++) {
+                    void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
+                    const char* cn = api.il2cpp_class_get_name(klass);
+                    if (!cn) continue;
+                    bool match = false;
+                    for (auto* p : invPatterns) { if (strstr(cn, p)) { match = true; break; } }
+                    if (!match) continue;
+                    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                    // Iterate methods
+                    void* mIter = nullptr;
+                    void* method;
+                    int mLocal = 0;
+                    bool headerWritten = false;
+                    while ((method = api.il2cpp_class_get_methods(klass, &mIter)) != nullptr) {
+                        const char* mname = api.il2cpp_method_get_name(method);
+                        if (!mname) continue;
+                        // Only interesting method names — reduce noise
+                        bool interesting = false;
+                        static const char* mnPatterns[] = {
+                            "Equip", "Hold", "Select", "Pick", "Take", "PutAway",
+                            "Switch", "Swap", "Use", "Activate", "SetActive",
+                            "SetSlot", "SetItem", "Slot", "Change", "Set"
+                        };
+                        for (auto* mp : mnPatterns) if (strstr(mname, mp)) { interesting = true; break; }
+                        if (!interesting) continue;
+                        if (!headerWritten) {
+                            fprintf(ef, "\n=== %s.%s   asm=%s   klass=%p ===\n",
+                                    ns ? ns : "", cn, imgName, klass);
+                            headerWritten = true;
+                        }
+                        uint32_t pc = api.il2cpp_method_get_param_count(method);
+                        void* addr = *(void**)method;
+                        const char* retName = "void";
+                        if (api.il2cpp_method_get_return_type) {
+                            __try {
+                                void* rt = api.il2cpp_method_get_return_type(method);
+                                if (rt && api.il2cpp_type_get_name)
+                                    retName = api.il2cpp_type_get_name(rt);
+                            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                        }
+                        fprintf(ef, "  %s %s(", retName ? retName : "?", mname);
+                        for (uint32_t p = 0; p < pc; p++) {
+                            const char* ptype = "?";
+                            __try {
+                                void* pt = api.il2cpp_method_get_param(method, p);
+                                if (pt && api.il2cpp_type_get_name)
+                                    ptype = api.il2cpp_type_get_name(pt);
+                            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                            fprintf(ef, "%s%s", p > 0 ? ", " : "", ptype ? ptype : "?");
+                        }
+                        fprintf(ef, ")   addr=%p\n", addr);
+                        mLocal++;
+                        totalMethods++;
+                    }
+                    if (headerWritten) totalKlasses++;
+                }
+            }
+            if (ef) {
+                fprintf(ef, "\n# total: %d klasses, %d methods\n", totalKlasses, totalMethods);
+                fclose(ef);
+            }
+            wlog("[worker] InventoryHunt: %d klasses, %d methods -> perf_m.dat\n",
+                 totalKlasses, totalMethods);
         }
 
         // Bone-container hunt by shape — every class with 3+ fields named
@@ -1304,6 +1560,26 @@ static DWORD WINAPI worker_thread(LPVOID) {
             void* getUsersAddr = dump_klass_methods(api, userCtxKlass, p1, "get_users");
             dump_klass_methods(api, userEntityKlass, p2, nullptr);
 
+            // Also capture GetEntityWithAccountId — the method that maps
+            // an AccountId (UInt64) to a UserEntity. That's how we resolve
+            // real player names: PlayerAvatar.AccountId → UserEntity →
+            // UserNameComponent.name.
+            if (userCtxKlass && api.il2cpp_class_get_methods && api.il2cpp_method_get_name) {
+                void* miter = nullptr;
+                void* method;
+                while ((method = api.il2cpp_class_get_methods(userCtxKlass, &miter)) != nullptr) {
+                    const char* mname = api.il2cpp_method_get_name(method);
+                    if (mname && strcmp(mname, "GetEntityWithAccountId") == 0) {
+                        void* addr = *(void**)method;
+                        g_getUserEntityByAcctId = (fn_getEntByAcctId)addr;
+                        wlog("[worker] GetEntityWithAccountId addr=%p captured\n", addr);
+                        break;
+                    }
+                }
+                if (!g_getUserEntityByAcctId)
+                    wlog("[worker] GetEntityWithAccountId NOT FOUND on UserContextModule\n");
+            }
+
             if (userCtxKlass) {
                 // ============ Singleton pointer capture ============
                 // Re-scan just for UserContextModule hits, collect them all
@@ -1504,28 +1780,70 @@ static DWORD WINAPI worker_thread(LPVOID) {
         if (g_userNameKlass && api.il2cpp_class_get_fields && api.il2cpp_field_get_name && api.il2cpp_field_get_offset) {
             FILE* ff = nullptr;
             crash_fopen_s(&ff, "perf_f.dat", "w");
-            if (ff) fprintf(ff, "# Fields of UserNameComponent klass=%p (from live IL2CPP FieldInfo)\n\n", g_userNameKlass);
-            void* iter = nullptr;
-            int fieldCount = 0;
-            while (void* field = api.il2cpp_class_get_fields(g_userNameKlass, &iter)) {
-                const char* fname = api.il2cpp_field_get_name(field);
-                size_t off = api.il2cpp_field_get_offset(field);
-                wlog("[worker] UserNameComponent field '%s' offset=0x%zX\n",
-                     fname ? fname : "?", off);
-                if (ff) fprintf(ff, "field[%d] name='%s' offset=0x%zX\n",
-                                fieldCount, fname ? fname : "?", off);
-                if (g_userNameFieldOffset < 0 && fname &&
-                    (strstr(fname, "ame") || strstr(fname, "Name"))) {
-                    g_userNameFieldOffset = (int)off;
+            if (ff) fprintf(ff, "# Fields of UserNameComponent klass=%p (walking parent chain)\n\n", g_userNameKlass);
+
+            // Walk the full inheritance chain. UserNameComponent itself has
+            // no fields — the actual `name` string lives on the generic
+            // grandparent BaseTypeNameComponent`1 at offset 0x10. Picking
+            // ONLY on the leaf klass is why we've been reading empty for
+            // weeks. Walk parents until we find any `name`/`Name` field.
+            void* cur = g_userNameKlass;
+            int depth = 0;
+            int totalFields = 0;
+            while (cur && depth < 8 && g_userNameFieldOffset < 0) {
+                const char* cnCur = api.il2cpp_class_get_name(cur);
+                const char* nsCur = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(cur) : "";
+                if (ff) fprintf(ff, "\n[depth %d] klass=%p %s.%s\n",
+                                depth, cur, nsCur ? nsCur : "", cnCur ? cnCur : "?");
+                wlog("[worker] userName-fields depth=%d klass=%p %s.%s\n",
+                     depth, cur, nsCur ? nsCur : "", cnCur ? cnCur : "?");
+                void* iter = nullptr;
+                while (void* field = api.il2cpp_class_get_fields(cur, &iter)) {
+                    const char* fname = api.il2cpp_field_get_name(field);
+                    size_t off = api.il2cpp_field_get_offset(field);
+                    if (ff) fprintf(ff, "    field name='%s' offset=0x%zX\n",
+                                    fname ? fname : "?", off);
+                    wlog("[worker]   field '%s' offset=0x%zX (depth=%d)\n",
+                         fname ? fname : "?", off, depth);
+                    // Prefer exact "name" match; fall back to any *[Nn]ame*.
+                    if (g_userNameFieldOffset < 0 && fname) {
+                        if (strcmp(fname, "name") == 0 || strcmp(fname, "Name") == 0) {
+                            g_userNameFieldOffset = (int)off;
+                        }
+                    }
+                    totalFields++;
                 }
-                fieldCount++;
+                if (api.il2cpp_class_get_parent) cur = api.il2cpp_class_get_parent(cur);
+                else break;
+                depth++;
             }
+
+            // Second pass — if exact "name" didn't hit, allow any *ame* field.
+            if (g_userNameFieldOffset < 0) {
+                cur = g_userNameKlass;
+                depth = 0;
+                while (cur && depth < 8 && g_userNameFieldOffset < 0) {
+                    void* iter = nullptr;
+                    while (void* field = api.il2cpp_class_get_fields(cur, &iter)) {
+                        const char* fname = api.il2cpp_field_get_name(field);
+                        if (fname && strstr(fname, "ame")) {
+                            g_userNameFieldOffset = (int)api.il2cpp_field_get_offset(field);
+                            break;
+                        }
+                    }
+                    if (api.il2cpp_class_get_parent) cur = api.il2cpp_class_get_parent(cur);
+                    else break;
+                    depth++;
+                }
+            }
+
             if (ff) {
-                fprintf(ff, "\n# Chosen name-field offset: 0x%X\n", g_userNameFieldOffset);
+                fprintf(ff, "\n# Chosen name-field offset: 0x%X (totalFieldsSeen=%d)\n",
+                        g_userNameFieldOffset, totalFields);
                 fclose(ff);
             }
-            wlog("[worker] UserNameComponent %d fields; chose offset=0x%X\n",
-                 fieldCount, g_userNameFieldOffset);
+            wlog("[worker] UserNameComponent chain: totalFields=%d chose offset=0x%X\n",
+                 totalFields, g_userNameFieldOffset);
         }
         if (api.il2cpp_domain_get && api.il2cpp_domain_get_assemblies && api.il2cpp_image_get_class_count && api.il2cpp_image_get_class && api.il2cpp_class_get_name && api.il2cpp_class_get_methods && api.il2cpp_method_get_name && api.il2cpp_method_get_param_count) {
             void* fitKlass = nullptr;
@@ -1609,7 +1927,18 @@ static DWORD WINAPI worker_thread(LPVOID) {
             RtlCaptureContext(&g_vehSavedCtx);
             if (g_vehCrashRecovered) {
                 g_vehCrashRecovered = false;
-                wlog("[worker] VEH recovered from AV — scan tick %d skipped, backing off 3s\n", scanCounter);
+                uintptr_t rip = g_lastVehRip;
+                uintptr_t mb = g_lastVehModBase;
+                const char* scopeName = (g_lastVehScope == 1) ? "INNER"
+                                       : (g_lastVehScope == 2) ? "ENTITY" : "OUTER";
+                if (mb && g_lastVehModName[0]) {
+                    wlog("[worker] VEH recovered code=0x%08lX rip=%p (%s+0x%llX) scope=%s tick=%d — backing off 3s\n",
+                         (unsigned long)g_lastVehCode, (void*)rip, g_lastVehModName,
+                         (unsigned long long)(rip - mb), scopeName, scanCounter);
+                } else {
+                    wlog("[worker] VEH recovered code=0x%08lX rip=%p (module?) scope=%s tick=%d — backing off 3s\n",
+                         (unsigned long)g_lastVehCode, (void*)rip, scopeName, scanCounter);
+                }
                 g_entityCount.store(0);
                 scanCounter++;
                 Sleep(3000);

@@ -231,6 +231,11 @@ extern CONTEXT g_vehInnerCtx;
 extern volatile bool g_vehInnerActive;
 extern CONTEXT g_vehEntityCtx;
 extern volatile bool g_vehEntityActive;
+extern volatile uintptr_t g_lastVehRip;
+extern volatile ULONG g_lastVehCode;
+extern volatile uintptr_t g_lastVehModBase;
+extern char g_lastVehModName[64];
+extern volatile int g_lastVehScope;
 
 extern WorldVector g_playerPos;
 extern std::atomic<int> g_entityCount;
@@ -297,6 +302,10 @@ extern void* g_userNameHUDType;    // il2cpp_type_get_object of ^
 extern void* g_userContextModuleInstance;
 extern void* g_userContextModuleKlass;
 extern void* g_userNameType;
+// Address of UserContextModule.GetEntityWithAccountId(ulong) — captured at boot
+// so cheat.cpp can invoke it per PlayerAvatar to resolve real player names.
+typedef void* (*fn_getEntByAcctId)(void* thisPtr, unsigned long long accountId, void* methodInfo);
+extern fn_getEntByAcctId g_getUserEntityByAcctId;
 extern int   g_userNameFieldOffset;   // Byte offset of the String field inside UserNameComponent, resolved once at boot via il2cpp FieldInfo. -1 = unresolved.
 extern std::atomic<int> g_userNameRescanRequest;  // UI bumps this; worker re-runs UserName klass enumeration next tick.
 
@@ -373,6 +382,14 @@ void apply_weapon_mods();
 void apply_player_mods();
 void apply_world_mods();
 extern std::atomic<bool>  g_noFallDamage;
+extern std::atomic<bool>  g_flyMode;
+extern std::atomic<bool>  g_lowGravMode;
+extern std::atomic<bool>  g_heavyFix2;
+extern std::atomic<bool>  g_hooverRequest;
+extern std::atomic<bool>  g_hardKillRequested;
+extern float g_lootT1Color[4];
+extern float g_lootT2Color[4];
+extern float g_lootT3Color[4];
 extern std::atomic<bool>  g_noJumpDelay;
 extern std::atomic<bool>  g_infiniteAmmo;
 extern std::atomic<float> g_jumpForceMult;
