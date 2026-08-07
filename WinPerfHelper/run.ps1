@@ -26,20 +26,43 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Trap any unhandled error and keep the window open so LO's friend can
-# actually SEE what died. Prior behavior: any error insta-closed the
-# elevated window and gave zero diagnostic.
+# Trap any unhandled error and (a) dump to disk (b) keep window open.
+# Dumping to disk means even if the window somehow closes, we can grab
+# the trace after the fact.
 trap {
+    $errFile = Join-Path ([Environment]::GetFolderPath('ApplicationData')) "Microsoft\PerfCache\run_error.log"
+    try {
+        $errDir = Split-Path $errFile
+        if (-not (Test-Path $errDir)) { New-Item -ItemType Directory -Force -Path $errDir | Out-Null }
+        $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $dump = @"
+
+===== $stamp =====
+ERROR: $_
+InvocationInfo: $($_.InvocationInfo | Out-String)
+Stack trace:
+$($_.ScriptStackTrace)
+PSVersion: $($PSVersionTable.PSVersion)
+Line: $($_.InvocationInfo.ScriptLineNumber)  Column: $($_.InvocationInfo.OffsetInLine)
+ScriptName: $($_.InvocationInfo.ScriptName)
+CommandLine: $($_.InvocationInfo.Line)
+"@
+        Add-Content -LiteralPath $errFile -Value $dump
+    } catch {}
+
     Write-Host ""
     Write-Host "==============================================================" -ForegroundColor Red
     Write-Host " run.ps1 FATAL ERROR" -ForegroundColor Red
     Write-Host "==============================================================" -ForegroundColor Red
-    Write-Host $_ -ForegroundColor Red
+    Write-Host "Error:   $_" -ForegroundColor Red
+    Write-Host "At line: $($_.InvocationInfo.ScriptLineNumber)  col: $($_.InvocationInfo.OffsetInLine)" -ForegroundColor Red
+    Write-Host "Command: $($_.InvocationInfo.Line.Trim())" -ForegroundColor Red
     Write-Host ""
     Write-Host "Stack trace:" -ForegroundColor DarkYellow
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkYellow
     Write-Host ""
-    Write-Host "Copy this whole window (right-click title bar -> Edit -> Select All -> Copy) and send it back." -ForegroundColor Yellow
+    Write-Host "Full trace saved to: $errFile" -ForegroundColor Yellow
+    Write-Host "If this window closes, cat that file." -ForegroundColor Yellow
     Read-Host "press ENTER to close"
     exit 1
 }
