@@ -1160,8 +1160,9 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         if (s_f1_now && !s_f1_prev) {
             g_menuVisible = true;
             if (g_overlayImguiInit) g_streamProofSwapRequest.store(2);
+            g_forceWindowed.store(false);   // panic-off if it went rogue
             if (g_gameHwnd) SetForegroundWindow(g_gameHwnd);
-            dbglog("[F1] emergency reset — menu on, stream-proof off\n");
+            dbglog("[F1] emergency reset — menu on, stream-proof off, force-windowed off\n");
         }
         s_f1_prev = s_f1_now;
     }
@@ -1818,10 +1819,54 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     // Persistent auto-force. When on, every Present frame checks
                     // fullscreen state + kicks it back to windowed. Also blocks
                     // Alt+Enter fullscreen toggle via DXGI_MWA_NO_ALT_ENTER.
+                    // Guarded by confirmation modal because if the game fights
+                    // back it can cause flicker/lockup that makes the UI hard
+                    // to reach to turn OFF. F1 (global) also disables it.
                     {
+                        static bool s_show_confirm = false;
                         bool afw = g_forceWindowed.load();
-                        if (ImGui::Checkbox("Force windowed EVERY FRAME (kills any fullscreen switch)", &afw))
-                            g_forceWindowed.store(afw);
+                        bool checked = afw;
+                        if (ImGui::Checkbox("Force windowed EVERY FRAME (kills any fullscreen switch)", &checked)) {
+                            if (checked && !afw) {
+                                // Attempting to turn ON — confirm
+                                s_show_confirm = true;
+                            } else if (!checked && afw) {
+                                // Off is always safe
+                                g_forceWindowed.store(false);
+                            }
+                        }
+                        if (s_show_confirm) {
+                            ImGui::OpenPopup("force_windowed_confirm");
+                            s_show_confirm = false;
+                        }
+                        if (ImGui::BeginPopupModal("force_windowed_confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "Enable Force Windowed?");
+                            ImGui::Separator();
+                            ImGui::TextWrapped(
+                                "This calls SetFullscreenState(FALSE) on the game's swap chain\n"
+                                "EVERY FRAME. If the game re-forces fullscreen just as often,\n"
+                                "you'll get flicker or a fight between the two. In the worst\n"
+                                "case the UI becomes unusable.\n"
+                                "\n"
+                                "Safety nets:\n"
+                                "  - press F1 anywhere to instantly disable this + reset menu\n"
+                                "  - toggle the checkbox again to turn off if you can see it\n"
+                                "\n"
+                                "Recommend using the one-shot 'Force windowed' button first\n"
+                                "and only enabling THIS toggle if the game keeps snapping\n"
+                                "back to fullscreen."
+                            );
+                            ImGui::Separator();
+                            if (ImGui::Button("Enable it")) {
+                                g_forceWindowed.store(true);
+                                ImGui::CloseCurrentPopup();
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Cancel")) {
+                                ImGui::CloseCurrentPopup();
+                            }
+                            ImGui::EndPopup();
+                        }
                     }
                     ImGui::TextDisabled("F1 anywhere = emergency reset (menu on, stream-proof off, focus overlay)");
                     ImGui::TextDisabled("If game keeps snapping to fullscreen: right-click sand.exe -> Properties");
