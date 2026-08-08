@@ -412,6 +412,103 @@ void dupelab_strip_interactible_not_active_on_locked() {
     wlog("[dupelab] stripped InteractibleNotActive from locked entity\n");
 }
 
+// Find an il2cpp klass by (namespace, name) across all assemblies. Cached
+// per name after first hit. Used by every direct-message-dispatch button.
+static void* dupelab_find_klass(const char* ns, const char* name) {
+    static std::unordered_map<std::string, void*> cache;
+    std::string key = std::string(ns) + "::" + name;
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    IL2CPP_API* api = get_il2cpp_api();
+    if (!api || !api->il2cpp_class_from_name || !api->il2cpp_domain_get) return nullptr;
+    void* dom = api->il2cpp_domain_get();
+    if (!dom) return nullptr;
+    size_t asmCount = 0;
+    void** assemblies = api->il2cpp_domain_get_assemblies(dom, &asmCount);
+    void* found = nullptr;
+    for (size_t i = 0; i < asmCount && !found; i++) {
+        void* img = api->il2cpp_assembly_get_image(assemblies[i]);
+        if (!img) continue;
+        found = api->il2cpp_class_from_name(img, ns, name);
+    }
+    cache[key] = found;
+    return found;
+}
+
+// Alloc + write + dispatch. Isolated __try, no C++ locals in scope.
+static void seh_dispatch_new_msg(void* klass, const unsigned char* writes, int writeCount) {
+    if (!klass) return;
+    IL2CPP_API* api = get_il2cpp_api();
+    if (!api || !api->il2cpp_object_new || !g_holoPublishAddr) return;
+    __try {
+        void* obj = api->il2cpp_object_new(klass);
+        if (!obj) return;
+        // writes = flat sequence of (offset:1 byte, size:1 byte, val:8 bytes) tuples
+        for (int i = 0; i < writeCount; i++) {
+            int off = writes[i * 10 + 0];
+            int sz  = writes[i * 10 + 1];
+            uint64_t v = *(uint64_t*)(writes + i * 10 + 2);
+            unsigned char* dst = (unsigned char*)obj + off;
+            if      (sz == 1) *(uint8_t*)dst  = (uint8_t)v;
+            else if (sz == 2) *(uint16_t*)dst = (uint16_t)v;
+            else if (sz == 4) *(uint32_t*)dst = (uint32_t)v;
+            else if (sz == 8) *(uint64_t*)dst = v;
+        }
+        ((fn_publish)g_publishHook.trampoline_exec)(g_holoMessengerInstance, obj);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[dupelab] seh_dispatch_new_msg SEH: 0x%08lX\n", GetExceptionCode());
+    }
+}
+
+// Individual dupe experiment dispatchers. Field offsets guessed from
+// il2cpp instance packing (header 0x10, then fields aligned). If a
+// message shape mismatches, replay just no-ops or generates a benign
+// server error — SEH-caught, doesn't crash game.
+void dupelab_dispatch_equip_slot(int slotId) {
+    void* k = dupelab_find_klass("Hologryph.Sand.Client.Inventory.Messages", "EquipItemInInventorySlotHoloMessage");
+    // slotId is a byte at +0x10
+    unsigned char writes[10] = { 0x10, 1, (unsigned char)slotId, 0,0,0,0,0,0,0 };
+    seh_dispatch_new_msg(k, writes, 1);
+    wlog("[dupelab] dispatched Equip slot=%d klass=%p\n", slotId, k);
+}
+void dupelab_dispatch_drop_slot(int slotId) {
+    void* k = dupelab_find_klass("Hologryph.Sand.Client.Inventory.Messages", "DropItemFromInventorySlotHoloMessage");
+    unsigned char writes[10] = { 0x10, 1, (unsigned char)slotId, 0,0,0,0,0,0,0 };
+    seh_dispatch_new_msg(k, writes, 1);
+    wlog("[dupelab] dispatched Drop slot=%d klass=%p\n", slotId, k);
+}
+void dupelab_dispatch_split(int fromSlot, int fromParent, int toSlot, int toParent, int count) {
+    void* k = dupelab_find_klass("Hologryph.Sand.Client.Inventory.Messages", "SplitInventorySlotHoloMessage");
+    // Field packing guess: byte at +0x10, int at +0x14, byte at +0x18, int at +0x1C, uint16 at +0x20
+    unsigned char writes[50] = {
+        0x10, 1, (unsigned char)fromSlot, 0,0,0,0,0,0,0,
+        0x14, 4, 0,0,0,0, 0,0,0,0,
+        0x18, 1, (unsigned char)toSlot, 0,0,0,0,0,0,0,
+        0x1C, 4, 0,0,0,0, 0,0,0,0,
+        0x20, 2, 0,0, 0,0,0,0,0,0,
+    };
+    *(int*)(writes + 1 * 10 + 2) = fromParent;
+    *(int*)(writes + 3 * 10 + 2) = toParent;
+    *(uint16_t*)(writes + 4 * 10 + 2) = (uint16_t)count;
+    seh_dispatch_new_msg(k, writes, 5);
+    wlog("[dupelab] dispatched Split fs=%d fp=%d ts=%d tp=%d cnt=%d klass=%p\n",
+         fromSlot, fromParent, toSlot, toParent, count, k);
+}
+void dupelab_dispatch_move(int fromSlot, int fromParent, int toSlot, int toParent) {
+    void* k = dupelab_find_klass("Hologryph.Sand.Client.Inventory.Messages", "MoveInventorySlotHoloMessage");
+    unsigned char writes[40] = {
+        0x10, 1, (unsigned char)fromSlot, 0,0,0,0,0,0,0,
+        0x14, 4, 0,0,0,0, 0,0,0,0,
+        0x18, 1, (unsigned char)toSlot, 0,0,0,0,0,0,0,
+        0x1C, 4, 0,0,0,0, 0,0,0,0,
+    };
+    *(int*)(writes + 1 * 10 + 2) = fromParent;
+    *(int*)(writes + 3 * 10 + 2) = toParent;
+    seh_dispatch_new_msg(k, writes, 4);
+    wlog("[dupelab] dispatched Move fs=%d fp=%d ts=%d tp=%d klass=%p\n",
+         fromSlot, fromParent, toSlot, toParent, k);
+}
+
 // __try can't sit in dupelab_playback (has std::vector local). Isolated.
 static void seh_dispatch_captured(const CapturedMsg* cm) {
     IL2CPP_API* api = get_il2cpp_api();

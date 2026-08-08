@@ -268,6 +268,12 @@ extern std::atomic<int>  g_dupeForceHandSlot;
 void dupelab_spoof_type_on_locked(int typeValue);
 void dupelab_force_slot_on_locked(int slotValue);
 void dupelab_strip_interactible_not_active_on_locked();
+// Direct HoloMessage dispatchers — construct + Publish. Field offsets are
+// guessed from il2cpp instance packing; if wrong the SEH catch traps it.
+void dupelab_dispatch_equip_slot(int slotId);
+void dupelab_dispatch_drop_slot(int slotId);
+void dupelab_dispatch_split(int fromSlot, int fromParent, int toSlot, int toParent, int count);
+void dupelab_dispatch_move(int fromSlot, int fromParent, int toSlot, int toParent);
 void __fastcall hooked_publish(void* thisPtr, void* msg);
 void dupelab_record_start(const std::string& name);
 void dupelab_record_stop();

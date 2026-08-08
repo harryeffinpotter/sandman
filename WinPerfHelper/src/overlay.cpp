@@ -1270,6 +1270,65 @@ static bool seh_present_init(IDXGISwapChain* pSwapChain) {
     }
 }
 
+// Stream-proof swap-request handler — extracted from hooked_present because
+// __try can't sit in a function with C++ objects that unwind (C2712).
+// Wrapped in __try/__except so a mid-swap crash reverts cleanly instead of
+// killing the game (LO's 'click stream-proof = instant crash' bug, task 15).
+static void seh_handle_streamproof_swap() {
+    __try {
+        int req = g_streamProofSwapRequest.exchange(0);
+        if (req == 1 && !g_overlayImguiInit) {
+            create_stream_proof_overlay();
+            if (g_overlayHwnd && g_overlayDevice && g_overlayContext
+                && g_overlaySwapChain && g_overlayRTV) {
+                ImGui_ImplDX11_Shutdown();
+                ImGui_ImplWin32_Shutdown();
+                bool win32ok = ImGui_ImplWin32_Init(g_overlayHwnd);
+                bool dx11ok  = ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
+                if (!win32ok || !dx11ok) {
+                    dbglog("[stream-proof] backend init FAILED (win32=%d dx11=%d) -- reverting\n", win32ok, dx11ok);
+                    ImGui_ImplDX11_Shutdown();
+                    ImGui_ImplWin32_Shutdown();
+                    ImGui_ImplWin32_Init(g_gameHwnd);
+                    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+                    destroy_stream_proof_overlay();
+                    g_streamProof.store(false);
+                } else {
+                    g_overlayImguiInit = true;
+                    g_streamProof.store(true);
+                    dbglog("[stream-proof] enabled -- overlay hwnd=%p rtv=%p\n", g_overlayHwnd, g_overlayRTV);
+                }
+            } else {
+                dbglog("[stream-proof] enable failed (hwnd=%p dev=%p ctx=%p sc=%p rtv=%p)\n",
+                       g_overlayHwnd, g_overlayDevice, g_overlayContext, g_overlaySwapChain, g_overlayRTV);
+                g_streamProof.store(false);
+            }
+        } else if (req == 2 && g_overlayImguiInit) {
+            ImGui_ImplDX11_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui_ImplWin32_Init(g_gameHwnd);
+            ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+            g_overlayImguiInit = false;
+            destroy_stream_proof_overlay();
+            g_streamProof.store(false);
+            dbglog("[stream-proof] disabled\n");
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        // Instant-crash guard: on swap failure fall back to game backend + kill stream-proof
+        dbglog("[stream-proof] SEH 0x%08lX during swap — reverting\n", GetExceptionCode());
+        __try { ImGui_ImplDX11_Shutdown(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try { ImGui_ImplWin32_Shutdown(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try {
+            if (g_gameHwnd) ImGui_ImplWin32_Init(g_gameHwnd);
+            if (g_pd3dDevice && g_pd3dDeviceContext) ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try { destroy_stream_proof_overlay(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        g_overlayImguiInit = false;
+        g_streamProof.store(false);
+        g_streamProofSwapRequest.store(0);
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     static bool s_logged = false;
     if (!s_logged) { dbglog("[hooked_present] FIRST CALL swapchain=%p\n", pSwapChain); s_logged = true; }
@@ -1381,50 +1440,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         }
     }
 
-    {
-        int req = g_streamProofSwapRequest.exchange(0);
-        if (req == 1 && !g_overlayImguiInit) {
-            create_stream_proof_overlay();
-            if (g_overlayHwnd && g_overlayDevice && g_overlayContext
-                && g_overlaySwapChain && g_overlayRTV) {
-                // Both backends need to be reset together — DX11 to point at
-                // the new device, Win32 to point at the new overlay hwnd. If
-                // we only reset DX11, ImGui_ImplWin32_NewFrame asserts on
-                // its stale/null hWnd (bd->hWnd != 0 at line 318).
-                ImGui_ImplDX11_Shutdown();
-                ImGui_ImplWin32_Shutdown();
-                bool win32ok = ImGui_ImplWin32_Init(g_overlayHwnd);
-                bool dx11ok  = ImGui_ImplDX11_Init(g_overlayDevice, g_overlayContext);
-                if (!win32ok || !dx11ok) {
-                    dbglog("[stream-proof] backend init FAILED (win32=%d dx11=%d) -- reverting to game\n", win32ok, dx11ok);
-                    ImGui_ImplDX11_Shutdown();
-                    ImGui_ImplWin32_Shutdown();
-                    ImGui_ImplWin32_Init(g_gameHwnd);
-                    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-                    destroy_stream_proof_overlay();
-                    g_streamProof.store(false);
-                } else {
-                    g_overlayImguiInit = true;
-                    g_streamProof.store(true);
-                    dbglog("[stream-proof] enabled -- overlay hwnd=%p rtv=%p\n", g_overlayHwnd, g_overlayRTV);
-                }
-            } else {
-                dbglog("[stream-proof] enable failed (hwnd=%p dev=%p ctx=%p sc=%p rtv=%p) -- staying on game device\n",
-                       g_overlayHwnd, g_overlayDevice, g_overlayContext, g_overlaySwapChain, g_overlayRTV);
-                g_streamProof.store(false);
-            }
-        } else if (req == 2 && g_overlayImguiInit) {
-            // Symmetric teardown -- reset BOTH backends back to game hwnd/device
-            ImGui_ImplDX11_Shutdown();
-            ImGui_ImplWin32_Shutdown();
-            ImGui_ImplWin32_Init(g_gameHwnd);
-            ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-            g_overlayImguiInit = false;
-            destroy_stream_proof_overlay();
-            g_streamProof.store(false);
-            dbglog("[stream-proof] disabled\n");
-        }
-    }
+    seh_handle_streamproof_swap();
 
     ImGui_ImplDX11_NewFrame();
     if (s_frameCount < 5) { dbglog("[frame %d] dx11 newframe ok\n", s_frameCount); }
@@ -2443,6 +2459,72 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled("Fires all three spoofs. Then F-force-interact in-game.");
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "DIRECT MESSAGE DISPATCH (server-side experiments, ANY result is data):");
+                ImGui::TextDisabled("Field offsets are il2cpp packing GUESSES. Wrong ones = SEH-caught no-op, safe.");
+                static int s_slot = 0, s_srcSlot = 0, s_dstSlot = 1, s_srcParent = 0, s_dstParent = 0, s_count = 1;
+                ImGui::SliderInt("Generic slot arg", &s_slot, 0, 9);
+                if (ImGui::Button("Equip Slot N (dispatch)")) dupelab_dispatch_equip_slot(s_slot);
+                ImGui::SameLine();
+                if (ImGui::Button("Drop from Slot N (dispatch)")) dupelab_dispatch_drop_slot(s_slot);
+                ImGui::Separator();
+                ImGui::TextDisabled("Move / Split — need slot indices + parent entity IDs:");
+                ImGui::InputInt("from Slot", &s_srcSlot); ImGui::SameLine();
+                ImGui::InputInt("from Parent (entity id)", &s_srcParent);
+                ImGui::InputInt("to Slot", &s_dstSlot); ImGui::SameLine();
+                ImGui::InputInt("to Parent (entity id)", &s_dstParent);
+                ImGui::InputInt("count (for split)", &s_count);
+                if (ImGui::Button("Move Slot (dispatch MoveInventorySlot)")) {
+                    dupelab_dispatch_move(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Split Stack (dispatch SplitInventorySlot)")) {
+                    dupelab_dispatch_split(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent, s_count);
+                }
+                ImGui::TextDisabled("Split with count=1 targeting materials/silver/food = material dupe test.");
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "MESSAGE STORM (dispatch N times rapid):");
+                static int s_stormCount = 5;
+                ImGui::SliderInt("Storm count", &s_stormCount, 1, 20);
+                if (ImGui::Button("Storm: Equip Slot N x count")) {
+                    for (int i = 0; i < s_stormCount; ++i) dupelab_dispatch_equip_slot(s_slot);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Storm: Split x count")) {
+                    for (int i = 0; i < s_stormCount; ++i)
+                        dupelab_dispatch_split(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent, s_count);
+                }
+                if (ImGui::Button("Storm: Move x count")) {
+                    for (int i = 0; i < s_stormCount; ++i)
+                        dupelab_dispatch_move(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent);
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "EDGE-CASE COMBOS (racing / weird):");
+                if (ImGui::Button("Move-to-Same-Slot (from==to, expect ghost)")) {
+                    dupelab_dispatch_move(s_srcSlot, s_srcParent, s_srcSlot, s_srcParent);
+                }
+                if (ImGui::Button("Move-to-Occupied (dst already has item)")) {
+                    dupelab_dispatch_move(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent);
+                    // dispatch a second identical move to try to fight the race
+                    dupelab_dispatch_move(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent);
+                }
+                if (ImGui::Button("Move + Equip Race (same frame)")) {
+                    dupelab_dispatch_move(s_srcSlot, s_srcParent, s_dstSlot, s_dstParent);
+                    dupelab_dispatch_equip_slot(s_dstSlot);
+                }
+                if (ImGui::Button("Drop + Equip Race (drop then equip immediately)")) {
+                    dupelab_dispatch_drop_slot(s_slot);
+                    dupelab_dispatch_equip_slot(s_slot);
+                }
+                if (ImGui::Button("Split x5 same target (rapid replicate)")) {
+                    for (int i = 0; i < 5; ++i)
+                        dupelab_dispatch_split(s_srcSlot, s_srcParent, s_dstSlot + i, s_dstParent, s_count);
+                }
+                if (ImGui::Button("Move x5 to 5 different dst slots")) {
+                    for (int i = 0; i < 5; ++i)
+                        dupelab_dispatch_move(s_srcSlot, s_srcParent, s_dstSlot + i, s_dstParent);
+                }
+                ImGui::TextDisabled("Each button = one hypothesis. Try each, watch inventory + debug log for behavior.");
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.9f, 1.0f), "NOTES ON DUPE MECHANISM (from LO's testing):");
                 ImGui::BulletText("Small items dupe: hand-brandish + interactables-list duplex + F-grab creates copy");
