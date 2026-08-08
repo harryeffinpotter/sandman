@@ -1598,7 +1598,10 @@ static void process_one_entity(
     int eid = *(int*)((uintptr_t)entity + 0x48);
     if (eid == playerEntityId) return;
 
-    if (name.rfind("item_containerBox", 0) == 0) return;
+    // Don't drop item_containerBox — LO wants boxes visible so we can see
+    // ship storage + drop targets. If we need to hide them per-user, use
+    // the ESP blacklist right-click, not a code-level filter.
+    // (formerly: if (name.rfind("item_containerBox", 0) == 0) return;)
     if (name.rfind("env_", 0) == 0) return;
     if (name.rfind("Ground", 0) == 0) return;
     if (name.rfind("prop_", 0) == 0) return;
