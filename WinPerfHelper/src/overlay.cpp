@@ -422,6 +422,8 @@ struct ESP3DEntry {
     ImU32 customColor;
     bool  isSentinel;
     Vec3  sentinelWorld;   // world pos for in-world ring
+    DWORD posTimestamp;    // when the position was sampled (velocity extrapolation)
+    float velX, velY, velZ;
 };
 
 // Canonical forum BoneId (0..21) → our internal Unity HumanBodyBones slot (0..54).
@@ -455,6 +457,7 @@ struct ESPSnapshot {
     Vec3 transformWorldPos;
     float distance;
     float velX, velY, velZ;
+    DWORD lastPosTime;
     char displayName[96];
     BoneWorldPos bonePositions[55];
     bool hasTransformPos;
@@ -561,6 +564,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         snap.velX = item.velX;
         snap.velY = item.velY;
         snap.velZ = item.velZ;
+        snap.lastPosTime = item.lastPosTime;
         snap.isCreature = item.isCreature;
         snap.isExtraction = item.isExtraction;
         snap.isReactor = item.isReactor;
@@ -599,6 +603,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
     LeaveCriticalSection(&g_itemsLock);
     csHeld = false;
 
+    DWORD nowTickMs = GetTickCount();
     for (auto& snap : snapshots) {
         Vec3 worldPos;
         if (snap.hasTransformPos) {
@@ -612,10 +617,27 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
             worldPos.z = refPos.z + (entityAbsZ - playerAbsZ);
         }
 
+        // Velocity extrapolation — labels track the entity between scans
+        // instead of teleporting in scan-interval jumps. Render thread runs
+        // 60+ Hz; scan runs at whatever speed the worker manages. Between
+        // scans, project where the entity should BE now given its last known
+        // velocity. Capped at 500ms extrapolation to avoid wild predictions
+        // when scan stalls or entity abruptly stops.
+        if (snap.lastPosTime != 0) {
+            DWORD ageMs = nowTickMs - snap.lastPosTime;
+            if (ageMs > 500) ageMs = 500;
+            float ageSec = ageMs / 1000.0f;
+            worldPos.x += snap.velX * ageSec;
+            worldPos.y += snap.velY * ageSec;
+            worldPos.z += snap.velZ * ageSec;
+        }
+
         if (aimbotActive) {
             bool isMob = (snap.type == 1);
             const AimbotProfile& pp = (isMob && !g_mobAimbotSame) ? g_aimMob : g_aimPlayer;
             if (pp.prediction && pp.bulletVelocity > 1.0f && snap.distance > 0.1f) {
+                // Bullet lead on top of the base extrapolation — total offset
+                // is (age-since-scan + bullet-travel-time) * velocity.
                 float predTime = snap.distance / pp.bulletVelocity;
                 worldPos.x += snap.velX * predTime;
                 worldPos.y += snap.velY * predTime;
@@ -661,6 +683,8 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         e.hasCustomColor = snap.hasCustomColor;
         e.customColor = snap.customColor;
         e.isSentinel = snap.isSentinel;
+        e.posTimestamp = snap.lastPosTime;
+        e.velX = snap.velX; e.velY = snap.velY; e.velZ = snap.velZ;
         // Extract world XYZ (chunk-adjusted) for in-world ring drawing.
         e.sentinelWorld.x = snap.sentinelWorldVec.cx * CHUNK_SIZE + snap.sentinelWorldVec.x;
         e.sentinelWorld.y = snap.sentinelWorldVec.y;
@@ -674,7 +698,12 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
             int pct = (int)(e.healthNorm * 100.0f + 0.5f);
             snprintf(hpTag, sizeof(hpTag), " [HP %d%%]", pct);
         }
-        snprintf(e.label, sizeof(e.label), "%s%s [%.0fm]%s", prefix, snap.displayName, e.dist, hpTag);
+        // Distance is optional per LO — toggle in ESP Render style.
+        if (g_espShowDistance.load()) {
+            snprintf(e.label, sizeof(e.label), "%s%s [%.0fm]%s", prefix, snap.displayName, e.dist, hpTag);
+        } else {
+            snprintf(e.label, sizeof(e.label), "%s%s%s", prefix, snap.displayName, hpTag);
+        }
 
         e.hasSkeleton = false;
         if (snap.type != 2 && snap.type != 3 && showSkeleton && snap.hasBones) {
@@ -2449,7 +2478,23 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SameLine();
                     bool shb = g_espShowHealthBar.load();
                     if (ImGui::Checkbox("HP Bar", &shb)) g_espShowHealthBar.store(shb);
-                    ImGui::TextDisabled("HP appends [HP N%%] text. HP Bar draws a colored bar above the box (green >=50%%, orange 20-50%%, red <20%%).");
+                    ImGui::SameLine();
+                    bool sd = g_espShowDistance.load();
+                    if (ImGui::Checkbox("Distance", &sd)) g_espShowDistance.store(sd);
+                    ImGui::TextDisabled("HP appends [HP N%%] text. HP Bar draws a colored bar above the box.");
+                }
+                {
+                    ImGui::PushItemWidth(160);
+                    float ls = g_espLabelScale.load();
+                    if (ImGui::SliderFloat("Label size##ls", &ls, 0.5f, 2.5f, "%.2fx"))
+                        g_espLabelScale.store(ls);
+                    ImGui::PopItemWidth();
+                    const char* posNames[] = { "On entity", "Above", "Below" };
+                    int lp = g_espLabelPos.load();
+                    ImGui::SetNextItemWidth(160);
+                    if (ImGui::Combo("Label position##lp", &lp, posNames, 3))
+                        g_espLabelPos.store(lp);
+                    ImGui::TextDisabled("Above/Below draws a small tether line to the entity so crowds stay readable.");
                 }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "Filters (hide from ESP)");
@@ -3013,10 +3058,23 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             // For in-world circle projection (sentinel radius, future features).
             void* camera = g_cameraGetMain ? g_cameraGetMain(nullptr) : nullptr;
             ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+            float labelScale = g_espLabelScale.load();
+            if (labelScale < 0.4f) labelScale = 0.4f;
+            if (labelScale > 3.0f) labelScale = 3.0f;
+            int labelPos = g_espLabelPos.load();   // 0=center, 1=above, 2=below
+            ImFont* labelFont = ImGui::GetFont();
+            // GetFontSize() returns current scaled size; scaling on top is fine
+            // for label-level scaling because we pass a computed size to AddText.
+            float labelFontSize = ImGui::GetFontSize() * labelScale;
             for (auto& e : espEntries) {
                 ImVec2 textSize = ImGui::CalcTextSize(e.label);
+                textSize.x *= labelScale; textSize.y *= labelScale;
                 float boxW = textSize.x + 10;
                 float boxH = textSize.y + 6;
+                // Anchor: center (default), above, or below the entity dot.
+                float labelDy = 0;
+                if (labelPos == 1) labelDy = -boxH - 6;   // above
+                else if (labelPos == 2) labelDy = boxH + 6; // below
 
                 ImU32 bgColor, borderColor, textColor;
                 if (e.hasCustomColor) {
@@ -3071,15 +3129,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     textColor = IM_COL32(180, 230, 100, 255);
                 }
 
+                float labelCY = e.sy + labelDy;
                 if (g_espShowBox.load() && !e.isSentinel) {
                     // Sentinels: no bounding box (per LO — label + ground ring only).
                     drawList->AddRectFilled(
-                        ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
-                        ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
+                        ImVec2(e.sx - boxW / 2, labelCY - boxH / 2),
+                        ImVec2(e.sx + boxW / 2, labelCY + boxH / 2),
                         bgColor, 3.0f);
                     drawList->AddRect(
-                        ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
-                        ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
+                        ImVec2(e.sx - boxW / 2, labelCY - boxH / 2),
+                        ImVec2(e.sx + boxW / 2, labelCY + boxH / 2),
                         borderColor, 3.0f);
                 }
                 // Health bar — draw ABOVE the box (or above the entity center
@@ -3110,12 +3169,28 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         IM_COL32(0, 0, 0, 200));                           // outline
                 }
                 drawList->AddText(
-                    ImVec2(e.sx - textSize.x / 2, e.sy - textSize.y / 2),
+                    labelFont, labelFontSize,
+                    ImVec2(e.sx - textSize.x / 2, labelCY - textSize.y / 2),
                     textColor, e.label);
-                drawList->AddLine(
-                    ImVec2(e.sx, e.sy + boxH / 2),
-                    ImVec2(e.sx, e.sy + boxH / 2 + 12),
-                    borderColor, 1.5f);
+                // Tether line — only when label is offset from the entity dot
+                // (below or above), so the user can tell which label goes to
+                // which enemy in a crowd.
+                if (labelPos == 2) {
+                    drawList->AddLine(
+                        ImVec2(e.sx, e.sy),
+                        ImVec2(e.sx, labelCY - boxH / 2),
+                        borderColor, 1.0f);
+                } else if (labelPos == 1) {
+                    drawList->AddLine(
+                        ImVec2(e.sx, labelCY + boxH / 2),
+                        ImVec2(e.sx, e.sy),
+                        borderColor, 1.0f);
+                } else {
+                    drawList->AddLine(
+                        ImVec2(e.sx, e.sy + boxH / 2),
+                        ImVec2(e.sx, e.sy + boxH / 2 + 12),
+                        borderColor, 1.5f);
+                }
                 // Sentinel detection radius — draw a red ring on the sand
                 // (world-space, projected). Skip entirely if you're INSIDE
                 // the ring (already inside danger zone, ring is huge & useless

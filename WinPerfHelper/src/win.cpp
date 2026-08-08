@@ -863,6 +863,9 @@ std::atomic<bool> g_espShowHealth{true};       // append [HP N%] to labels
 std::atomic<bool> g_espShowHealthBar{true};    // draw a colored bar above the box
 std::atomic<bool>  g_espShowSentinels{true};
 std::atomic<float> g_sentinelRadius{408.0f};    // detection radius, meters
+std::atomic<float> g_espLabelScale{1.0f};        // 0.5..2.0 label text size
+std::atomic<int>   g_espLabelPos{0};             // 0=center, 1=above, 2=below
+std::atomic<bool>  g_espShowDistance{true};      // append " [Nm]" to labels
 std::atomic<bool> g_espShowLootT1{true};
 std::atomic<bool> g_espShowLootT2{true};
 std::atomic<bool> g_espShowLootT3{true};

@@ -126,6 +126,9 @@ struct ItemInfo {
 
 extern std::atomic<bool>  g_espShowSentinels;
 extern std::atomic<float> g_sentinelRadius;   // meters, default 400
+extern std::atomic<float> g_espLabelScale;    // 0.5..2.0 label text size
+extern std::atomic<int>   g_espLabelPos;      // 0=center, 1=above, 2=below
+extern std::atomic<bool>  g_espShowDistance;  // append " [Nm]" to labels
 
 struct Hook {
     uint8_t original_bytes[32];

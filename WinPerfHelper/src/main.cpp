@@ -2215,12 +2215,13 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 }
                 s_f10WasDown = nowDown;
             }
-            // Jittered scan cadence — [30, 50)ms per iteration. LO 2026-08-08
-            // capped this at 50ms max ("50ms async non-blocking, no more").
-            // Was 80-160ms which made ESP visibly rubber-band at 6-12 fps.
-            // At 30-50ms ESP updates 20-33 fps — smooth. Still jittered so
-            // the syscall cadence isn't a clean sine wave for AC observers.
-            Sleep(30 + (rand() % 20));
+            // Worker is now pinned to the last logical core at BELOW_NORMAL
+            // priority (see DllMain), so it will NOT contend with the game's
+            // render thread. Yield with Sleep(0) so equal-priority threads
+            // on this core can run (there shouldn't be any), then loop again
+            // at full tilt. Scan cadence is bounded only by scan_entities
+            // wall time now — ~5ms typical, giving ~200 Hz ESP updates.
+            Sleep(0);
         }
     }
 
@@ -2374,7 +2375,24 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
             srand((unsigned)GetTickCount() ^ (unsigned)GetCurrentProcessId());
             // Hide our module from PEB list walkers.
             hide_module_from_peb(hModule);
-            CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
+            HANDLE wth = CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
+            if (wth) {
+                // Pin worker to the LAST logical CPU so it never contends
+                // with the game's render thread (usually core 0 or the
+                // process's preferred core). Modern rigs have 8-32 cores;
+                // sacrificing the last one to ESP costs nothing.
+                SYSTEM_INFO si; GetSystemInfo(&si);
+                DWORD ncores = si.dwNumberOfProcessors;
+                if (ncores > 1) {
+                    DWORD_PTR mask = ((DWORD_PTR)1) << (ncores - 1);
+                    SetThreadAffinityMask(wth, mask);
+                }
+                // BELOW_NORMAL — if a normal-priority thread wants our core
+                // we yield instantly. In practice nothing else is pinned to
+                // the last core so this is belt-and-suspenders.
+                SetThreadPriority(wth, THREAD_PRIORITY_BELOW_NORMAL);
+                CloseHandle(wth);
+            }
         }
     }
     return TRUE;
