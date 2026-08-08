@@ -3170,22 +3170,54 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (_dx*_dx + _dy*_dy > 250.0f*250.0f) continue;
                     ImU32 boneColor = (e.type == 0)
                         ? IM_COL32(255, 255, 255, 200)
-                        : IM_COL32(255, 200, 100, 200);
+                        : IM_COL32(255, 165, 0, 220);       // orange for mobs
                     drawList->AddLine(
                         ImVec2(e.bones[from].x, e.bones[from].y),
                         ImVec2(e.bones[to].x, e.bones[to].y),
                         boneColor, 1.5f);
                 }
-                // Draw a filled circle at EVERY valid bone slot 0-54.
-                // For named-mode entries this hits the ~20 skeletal joints.
-                // For raw-fallback mode (name matching found nothing) this
-                // paints a point cloud of every transform on the character
-                // — ugly but visible skeleton confirmation.
-                for (int bi = 0; bi < 55; bi++) {
+                // Count populated slots to decide if we're in raw-fallback mode.
+                // Raw fill starts at slot 0 sequentially, so if slots 22+ are
+                // set that means the walker didn't match named bones and we
+                // dumped every transform. In that case: draw the point cloud
+                // capped at 22 to avoid dot-storm, and connect adjacent slots
+                // as a chain so it reads as a skeleton not a random cluster.
+                int _validTotal = 0, _validHigh = 0;
+                for (int bi = 0; bi < 55; bi++)
+                    if (e.bones[bi].valid) { _validTotal++; if (bi >= 22) _validHigh++; }
+                bool _rawMode = (_validHigh > 3);   // heuristic
+
+                ImU32 jointColor = (e.type == 0)
+                    ? IM_COL32(255, 255, 255, 200)
+                    : IM_COL32(255, 165, 0, 240);           // orange for mobs
+                ImU32 headColor = IM_COL32(255, 50, 50, 255);
+                // Cap joint circles to slots 0-21 (canonical bone range).
+                // Skip higher slots even in raw mode — dot-storm was choking ESP.
+                for (int bi = 0; bi < 22; bi++) {
                     if (!e.bones[bi].valid) continue;
-                    ImU32 jointColor = (bi == 10) ? IM_COL32(255, 50, 50, 255) : IM_COL32(255, 255, 255, 180);
-                    float jointRadius = (bi == 10) ? 3.0f : 2.0f;
-                    drawList->AddCircleFilled(ImVec2(e.bones[bi].x, e.bones[bi].y), jointRadius, jointColor);
+                    ImU32 jc = (bi == 10) ? headColor : jointColor;
+                    float jr = (bi == 10) ? 3.0f : 1.8f;
+                    drawList->AddCircleFilled(ImVec2(e.bones[bi].x, e.bones[bi].y), jr, jc);
+                }
+                // Raw-mode: connect adjacent slots as a chain so ghouls with
+                // non-humanoid rigs still read as a stick figure. Same 250px
+                // sanity cap. Cheap — one line per adjacent-valid pair.
+                if (_rawMode) {
+                    int _prev = -1;
+                    for (int bi = 0; bi < 22; bi++) {
+                        if (!e.bones[bi].valid) continue;
+                        if (_prev >= 0) {
+                            float ddx = e.bones[_prev].x - e.bones[bi].x;
+                            float ddy = e.bones[_prev].y - e.bones[bi].y;
+                            if (ddx*ddx + ddy*ddy <= 250.0f*250.0f) {
+                                drawList->AddLine(
+                                    ImVec2(e.bones[_prev].x, e.bones[_prev].y),
+                                    ImVec2(e.bones[bi].x,    e.bones[bi].y),
+                                    jointColor, 1.0f);
+                            }
+                        }
+                        _prev = bi;
+                    }
                 }
             }
         }
