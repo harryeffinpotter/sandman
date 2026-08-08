@@ -110,8 +110,10 @@ std::atomic<bool> g_dupeSuspended{false};   // F9 hotkey toggles this
 // ---------------------------------------------------------------------------
 typedef void* (*fn_steam_friends_get)();
 typedef const char* (*fn_get_friend_name)(void* iface, unsigned long long steamId);
+typedef bool  (*fn_request_user_info)(void* iface, unsigned long long steamId, bool nameOnly);
 static fn_steam_friends_get g_pSteamFriendsGet = nullptr;
 static fn_get_friend_name   g_pGetFriendName   = nullptr;
+static fn_request_user_info g_pRequestUserInfo = nullptr;
 static void*                g_steamFriendsIface = nullptr;
 static std::unordered_map<unsigned long long, std::string> g_steamNameCache;
 static CRITICAL_SECTION g_steamNameCacheCS;
@@ -140,11 +142,23 @@ void steam_names_init() {
         wlog("[steam-names] SteamAPI_ISteamFriends_GetFriendPersonaName not exported\n");
         return;
     }
+    // RequestUserInformation kicks off a network fetch of a non-friend's
+    // persona. Without this, GetFriendPersonaName returns empty for any
+    // player who isn't already in Steam's cache (i.e. most lobby randoms).
+    g_pRequestUserInfo = (fn_request_user_info)GetProcAddress(hm, "SteamAPI_ISteamFriends_RequestUserInformation");
+    wlog("[steam-names] RequestUserInformation=%p\n", (void*)g_pRequestUserInfo);
     if (g_pSteamFriendsGet) {
         __try { g_steamFriendsIface = g_pSteamFriendsGet(); }
         __except(EXCEPTION_EXECUTE_HANDLER) { g_steamFriendsIface = nullptr; }
     }
     wlog("[steam-names] iface=%p getName=%p\n", g_steamFriendsIface, (void*)g_pGetFriendName);
+}
+
+// Isolated RequestUserInformation caller — plain C, no C++ unwinding.
+static void seh_steam_request_user_info(unsigned long long steamId) {
+    if (!g_pRequestUserInfo || !g_steamFriendsIface) return;
+    __try { g_pRequestUserInfo(g_steamFriendsIface, steamId, true); }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 // __try can't sit in a function that has std::string/unordered_map locals
@@ -179,9 +193,21 @@ std::string get_steam_name(unsigned long long steamId) {
     if (seh_steam_call_get_name(steamId, nameBuf, sizeof(nameBuf))) {
         result = nameBuf;
     }
-    // Cache HITS only. Empty results (Steam hasn't cached this player's
-    // persona yet — common right after they join the lobby) shouldn't
-    // become permanent misses. Retry on next scan.
+    // If Steam returned empty, kick a RequestUserInformation for this ID
+    // so Steam fetches the persona from network. The name will be
+    // available on a subsequent scan. Without this, non-friends never
+    // resolve. Track requested IDs so we don't spam per-scan.
+    if (result.empty() && g_pRequestUserInfo && g_steamFriendsIface) {
+        static std::unordered_map<unsigned long long, DWORD> s_requested;
+        DWORD now = GetTickCount();
+        auto rit = s_requested.find(steamId);
+        // Retry only every 5 seconds if a prior request didn't yield a name
+        if (rit == s_requested.end() || (now - rit->second) > 5000) {
+            s_requested[steamId] = now;
+            seh_steam_request_user_info(steamId);
+        }
+    }
+    // Cache HITS only. Empty results retry until Steam has the name.
     if (!result.empty()) {
         EnterCriticalSection(&g_steamNameCacheCS);
         g_steamNameCache[steamId] = result;
