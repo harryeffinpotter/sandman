@@ -334,6 +334,9 @@ static void ensure_rec_cs() {
     if (!g_recCSInit) { InitializeCriticalSection(&g_recCS); g_recCSInit = true; }
 }
 std::atomic<bool>  g_dupeLabRecording{false};
+std::atomic<bool>  g_showContainerContents{false};  // Items panel: show child-entities (Parent!=0)
+std::atomic<int>   g_dupeSpoofType{2};              // ItemTypeData.type value for spoof (guess: 2=consumable)
+std::atomic<int>   g_dupeForceHandSlot{0};          // InventoryItemSlotIndex.value target
 static std::string g_activeRecordingName;  // guarded by g_recCS
 
 void dupelab_record_start(const std::string& name) {
@@ -375,6 +378,38 @@ void dupelab_playback(const std::string& name) {
     for (auto& cm : local) {
         seh_dispatch_captured(&cm);
     }
+}
+
+// Dupe Lab scenario actions — one-shot writes to the currently-locked
+// entity's components. Reuse the g_lockedEntityPtr LO already sets by
+// clicking an item in the list. All SEH-safe.
+void dupelab_spoof_type_on_locked(int typeValue) {
+    uintptr_t ent = g_lockedEntityPtr.load();
+    if (!ent || g_idx_item_type < 0) return;
+    __try {
+        void* c = get_component((void*)ent, g_idx_item_type);
+        if (is_readable(c, 0x18)) {
+            *(int*)((uintptr_t)c + 0x10) = typeValue;
+            wlog("[dupelab] type-spoofed locked entity to type=%d\n", typeValue);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void dupelab_force_slot_on_locked(int slotValue) {
+    uintptr_t ent = g_lockedEntityPtr.load();
+    if (!ent || g_idx_inventory_item_slot_index < 0) return;
+    __try {
+        void* c = get_component((void*)ent, g_idx_inventory_item_slot_index);
+        if (is_readable(c, 0x18)) {
+            *(int*)((uintptr_t)c + 0x10) = slotValue;
+            wlog("[dupelab] force-slot on locked entity -> %d\n", slotValue);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void dupelab_strip_interactible_not_active_on_locked() {
+    uintptr_t ent = g_lockedEntityPtr.load();
+    if (!ent || g_idx_interact_not_active < 0) return;
+    strip_component((void*)ent, g_idx_interact_not_active);
+    wlog("[dupelab] stripped InteractibleNotActive from locked entity\n");
 }
 
 // __try can't sit in dupelab_playback (has std::vector local). Isolated.

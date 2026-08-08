@@ -1553,6 +1553,13 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (ImGui::Checkbox("Weapon Filter", &wfilt))
                         g_weaponFilter.store(wfilt);
                 }
+                {
+                    bool sc = g_showContainerContents.load();
+                    if (ImGui::Checkbox("Show container contents (items with Parent)", &sc))
+                        g_showContainerContents.store(sc);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(dupe research: click any child to lock+F-force it)");
+                }
 
                 {
                     std::string sel;
@@ -1629,6 +1636,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bool isWeapon;
                     bool isHeavy;
                     bool isHeldByPlayer;
+                    bool isInOthersInv;
+                    int  parentEntityId;
                 };
                 static std::vector<ItemRowSnap> rowSnaps;
                 rowSnaps.clear();
@@ -1638,9 +1647,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
                 EnterCriticalSection(&g_itemsLock);
                 rowSnaps.reserve(g_items.size());
+                bool showChildren = g_showContainerContents.load();
                 for (size_t i = 0; i < g_items.size(); i++) {
                     const ItemInfo& item = g_items[i];
                     if (wf && !item.isWeapon) continue;
+                    // Hide container-children by default (they clutter the
+                    // world-item list). Toggle in Items panel to expose them
+                    // for dupe research.
+                    if (!showChildren && item.parentEntityId != 0 && !item.isHeldByPlayer) continue;
                     if (nlen > 0) {
                         bool found = false;
                         const char* haystack = item.name.c_str();
@@ -1678,6 +1692,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     rs.isWeapon = item.isWeapon;
                     rs.isHeavy = item.isHeavy;
                     rs.isHeldByPlayer = item.isHeldByPlayer;
+                    rs.isInOthersInv = item.isInOthersInv;
+                    rs.parentEntityId = item.parentEntityId;
                     rowSnaps.push_back(std::move(rs));
                 }
                 LeaveCriticalSection(&g_itemsLock);
@@ -1779,6 +1795,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             ImGui::TableSetColumnIndex(1);
                             if (item.isHeldByPlayer)
                                 ImGui::Text("%s (held)", item.name.c_str());
+                            else if (item.isInOthersInv)
+                                ImGui::Text("[inv %d] %s", item.parentEntityId, item.name.c_str());
                             else
                                 ImGui::TextUnformatted(item.name.c_str());
 
@@ -2379,8 +2397,52 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::TextDisabled("Publish addr: %p | HoloMessengerModule instance: %p",
                                     g_holoPublishAddr, g_holoMessengerInstance);
                 ImGui::Separator();
-                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "COMPONENT SPOOFS (temporary while lock held):");
-                ImGui::TextDisabled("Requires locked entity (click item in Items tab). HeavyFix1/2 in Player tab are the existing ones.");
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "COMPONENT SPOOFS (writes to currently-locked entity):");
+                ImGui::TextDisabled("Click an item in the Items list first to lock. All buttons target that lock.");
+                {
+                    int t = g_dupeSpoofType.load();
+                    ImGui::SliderInt("Spoof type value (2 guess = consumable)", &t, 0, 20);
+                    g_dupeSpoofType.store(t);
+                    if (ImGui::Button("Type-Spoof (write ItemTypeData.type)")) {
+                        dupelab_spoof_type_on_locked(g_dupeSpoofType.load());
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Make target look like a canned food/consumable.");
+                }
+                {
+                    int s = g_dupeForceHandSlot.load();
+                    ImGui::SliderInt("Force-slot value (0 guess = hand)", &s, 0, 9);
+                    g_dupeForceHandSlot.store(s);
+                    if (ImGui::Button("Force-Into-Hand (write InventoryItemSlotIndex)")) {
+                        dupelab_force_slot_on_locked(g_dupeForceHandSlot.load());
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Force target into a specific slot (0 = usually hand).");
+                }
+                {
+                    if (ImGui::Button("TROJAN COMBO (type=2 + slot=0)")) {
+                        dupelab_spoof_type_on_locked(2);
+                        dupelab_force_slot_on_locked(0);
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Spoof to consumable + force into hand slot. Disguise + brandish.");
+                }
+                {
+                    if (ImGui::Button("Strip InteractibleNotActive (make interact-eligible)")) {
+                        dupelab_strip_interactible_not_active_on_locked();
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Removes the 'not interactible' flag so game treats target as grabbable.");
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "COMBO BUTTONS:");
+                if (ImGui::Button("ONE-CLICK DUPE ATTEMPT (spoof+slot+strip)")) {
+                    dupelab_spoof_type_on_locked(g_dupeSpoofType.load());
+                    dupelab_force_slot_on_locked(g_dupeForceHandSlot.load());
+                    dupelab_strip_interactible_not_active_on_locked();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("Fires all three spoofs. Then F-force-interact in-game.");
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.9f, 1.0f), "NOTES ON DUPE MECHANISM (from LO's testing):");
                 ImGui::BulletText("Small items dupe: hand-brandish + interactables-list duplex + F-grab creates copy");

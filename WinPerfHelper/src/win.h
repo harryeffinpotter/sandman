@@ -260,6 +260,14 @@ extern void* g_holoPublishAddr;
 extern void* g_holoMessengerInstance;
 extern std::atomic<bool> g_captureMessages;
 extern std::atomic<bool> g_dupeLabRecording;
+extern std::atomic<bool> g_showContainerContents;
+extern std::atomic<int>  g_dupeSpoofType;
+extern std::atomic<int>  g_dupeForceHandSlot;
+// Dupe Lab actions that mutate the currently-locked entity's components.
+// All SEH-safe: silently no-op if lock is empty or components missing.
+void dupelab_spoof_type_on_locked(int typeValue);
+void dupelab_force_slot_on_locked(int slotValue);
+void dupelab_strip_interactible_not_active_on_locked();
 void __fastcall hooked_publish(void* thisPtr, void* msg);
 void dupelab_record_start(const std::string& name);
 void dupelab_record_stop();
