@@ -2761,7 +2761,20 @@ static void process_one_entity(
         info.isReactor = true;
 
     bool isPlayer = (name.rfind("PlayerAvatar", 0) == 0);
-    if ((isPlayer || info.isCreature) && g_espShowSkeleton.load()) {
+    // Distance-gate bone resolution — Transform-hierarchy walks are the
+    // most expensive per-entity step and pile up when many mobs are near
+    // (LO reported 40s main-thread stalls approaching AI ambushes). Bones
+    // only matter for close targets you're shooting at; distant mobs get
+    // dots/box/name only. Skip resolve if beyond ~150m (roughly the
+    // "engagement" range — ghouls come to you well under that).
+    // Also skip for known-weird decorative entities that have huge/broken
+    // transform hierarchies (sentinel spawners, ambush decoration props).
+    bool isDecoration = (name.find("ambush_decoration") != std::string::npos) ||
+                        (name.find("_spawner")          != std::string::npos) ||
+                        (name.find("decoration")        != std::string::npos);
+    bool boneDistOk = (info.distance < 0.0f) || (info.distance <= 150.0f);
+    if ((isPlayer || info.isCreature) && g_espShowSkeleton.load()
+        && !isDecoration && boneDistOk) {
         memset(info.bonePositions, 0, sizeof(info.bonePositions));
         info.hasBones = seh_resolve_bones(entity, info.bonePositions);
         // Throttled bone diag — every ~5 sec for the first 10 PlayerAvatars log
