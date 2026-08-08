@@ -1676,6 +1676,33 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                                 g_dupeMode.store(false);
                             }
 
+                            // Right-click context menu — quick blacklist actions
+                            char popupId[64];
+                            snprintf(popupId, sizeof(popupId), "rowctx_%d", i);
+                            if (ImGui::BeginPopupContextItem(popupId)) {
+                                ImGui::Text("%s", item.name.c_str());
+                                ImGui::Separator();
+                                if (ImGui::MenuItem("Hide this name from ESP")) {
+                                    g_hiddenNames.insert(item.name);
+                                }
+                                // Compute a sensible prefix — first underscore token or first 8 chars
+                                std::string pfx = item.name;
+                                size_t sp = pfx.find('_');
+                                if (sp != std::string::npos && sp < 24) pfx = pfx.substr(0, sp);
+                                if (pfx.size() > 24) pfx = pfx.substr(0, 24);
+                                char label2[128];
+                                snprintf(label2, sizeof(label2), "Hide ALL '%s*' from ESP", pfx.c_str());
+                                if (ImGui::MenuItem(label2)) {
+                                    bool already = false;
+                                    for (auto& p : g_hiddenPrefixes) if (p == pfx) { already = true; break; }
+                                    if (!already) g_hiddenPrefixes.push_back(pfx);
+                                }
+                                if (ImGui::MenuItem("Copy name to clipboard")) {
+                                    ImGui::SetClipboardText(item.name.c_str());
+                                }
+                                ImGui::EndPopup();
+                            }
+
                             ImGui::TableSetColumnIndex(1);
                             if (item.isHeldByPlayer)
                                 ImGui::Text("%s (held)", item.name.c_str());

@@ -416,6 +416,8 @@ extern std::atomic<bool> g_espShowReactors;
 extern std::atomic<bool> g_stormImmunity;
 extern std::atomic<bool> g_shipResilience;
 extern std::atomic<float> g_walkerSpeedMult;
+void steam_names_init();
+std::string get_steam_name(unsigned long long steamId);
 extern float g_lootT1Color[4];
 extern float g_lootT2Color[4];
 extern float g_lootT3Color[4];

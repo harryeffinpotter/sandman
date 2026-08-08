@@ -1899,6 +1899,8 @@ static DWORD WINAPI worker_thread(LPVOID) {
 
     tlog("entering main scan loop\n");
     tlog("=== ENTERING MAIN LOOP tick=%lu ===\n", GetTickCount());
+    // Wire up Steam name resolver — resolves player SteamID64 -> platform name.
+    steam_names_init();
     {
         int scanCounter = 0;
         while (g_running.load()) {

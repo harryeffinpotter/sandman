@@ -84,6 +84,88 @@ int g_idx_reactor_state = -1;            // ReactorState (342)
 int g_idx_reactor_turbo = -1;            // ReactorTurboState (343)
 int g_idx_health_normalized = -1;        // HealthNormalizedComponent
 int g_idx_in_eye_of_storm = -1;          // InEyeOfStorm
+
+// ---------------------------------------------------------------------------
+// Steam API cache — GetFriendPersonaName resolves a SteamID64 to the real
+// platform display name ("JimmyBob"). Loaded at boot from steam_api64.dll.
+// ---------------------------------------------------------------------------
+typedef void* (*fn_steam_friends_get)();
+typedef const char* (*fn_get_friend_name)(void* iface, unsigned long long steamId);
+static fn_steam_friends_get g_pSteamFriendsGet = nullptr;
+static fn_get_friend_name   g_pGetFriendName   = nullptr;
+static void*                g_steamFriendsIface = nullptr;
+static std::unordered_map<unsigned long long, std::string> g_steamNameCache;
+static CRITICAL_SECTION g_steamNameCacheCS;
+static bool g_steamCacheInit = false;
+
+void steam_names_init() {
+    if (g_steamCacheInit) return;
+    g_steamCacheInit = true;
+    InitializeCriticalSection(&g_steamNameCacheCS);
+    HMODULE hm = GetModuleHandleA("steam_api64.dll");
+    if (!hm) {
+        wlog("[steam-names] steam_api64.dll not loaded — skipping\n");
+        return;
+    }
+    // Try common Steam API interface accessor versions (SDK bumps sometimes)
+    static const char* friendsAccessors[] = {
+        "SteamAPI_SteamFriends_v017", "SteamAPI_SteamFriends_v018",
+        "SteamAPI_SteamFriends_v016", "SteamAPI_SteamFriends_v015",
+    };
+    for (auto* n : friendsAccessors) {
+        g_pSteamFriendsGet = (fn_steam_friends_get)GetProcAddress(hm, n);
+        if (g_pSteamFriendsGet) { wlog("[steam-names] found accessor: %s\n", n); break; }
+    }
+    g_pGetFriendName = (fn_get_friend_name)GetProcAddress(hm, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+    if (!g_pGetFriendName) {
+        wlog("[steam-names] SteamAPI_ISteamFriends_GetFriendPersonaName not exported\n");
+        return;
+    }
+    if (g_pSteamFriendsGet) {
+        __try { g_steamFriendsIface = g_pSteamFriendsGet(); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { g_steamFriendsIface = nullptr; }
+    }
+    wlog("[steam-names] iface=%p getName=%p\n", g_steamFriendsIface, (void*)g_pGetFriendName);
+}
+
+// __try can't sit in a function that has std::string/unordered_map locals
+// (C2712), so the raw Steam API call is isolated in a plain C-style helper
+// that only touches primitives + fixed-size char buffer.
+static bool seh_steam_call_get_name(unsigned long long steamId, char* outBuf, int outCap) {
+    if (!outBuf || outCap <= 0) return false;
+    outBuf[0] = 0;
+    if (!g_pGetFriendName || !g_steamFriendsIface) return false;
+    __try {
+        const char* name = g_pGetFriendName(g_steamFriendsIface, steamId);
+        if (name && name[0]) {
+            strncpy_s(outBuf, outCap, name, _TRUNCATE);
+            return true;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+std::string get_steam_name(unsigned long long steamId) {
+    if (steamId == 0) return {};
+    EnterCriticalSection(&g_steamNameCacheCS);
+    auto it = g_steamNameCache.find(steamId);
+    if (it != g_steamNameCache.end()) {
+        std::string r = it->second;
+        LeaveCriticalSection(&g_steamNameCacheCS);
+        return r;
+    }
+    LeaveCriticalSection(&g_steamNameCacheCS);
+    char nameBuf[128];
+    std::string result;
+    if (seh_steam_call_get_name(steamId, nameBuf, sizeof(nameBuf))) {
+        result = nameBuf;
+    }
+    // Cache both hits and misses so we don't hammer the API every scan tick.
+    EnterCriticalSection(&g_steamNameCacheCS);
+    g_steamNameCache[steamId] = result;
+    LeaveCriticalSection(&g_steamNameCacheCS);
+    return result;
+}
 int g_idx_cheat_walker_speed = -1;
 int g_idx_shot_info = -1;
 int g_idx_nice_name = -1;
@@ -1584,17 +1666,19 @@ static void process_one_entity(
             }
         }
 
-        // Last-resort fallback: if all name-resolution paths failed, show
-        // the truncated AccountId so distinct players are at least
-        // distinguishable (better than every remote player showing as
-        // identical "Player"). Steam name resolution via steam_api64.dll
-        // is the real fix (task 24).
-        if (info.displayName.empty()) {
-            if (g_idx_account_id >= 0) {
-                void* aidComp = get_component(entity, g_idx_account_id);
-                if (is_readable(aidComp, 0x18)) {
-                    unsigned long long aid = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
-                    if (aid != 0) {
+        // Path 4 — Steam API. AccountId is a SteamID64. Ask Steam directly.
+        // Cached so we don't hit the API every scan tick.
+        if (info.displayName.empty() && g_idx_account_id >= 0) {
+            void* aidComp = get_component(entity, g_idx_account_id);
+            if (is_readable(aidComp, 0x18)) {
+                unsigned long long aid = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
+                if (aid != 0) {
+                    std::string steamName = get_steam_name(aid);
+                    if (!steamName.empty() && steamName.size() < 64) {
+                        info.displayName = steamName;
+                    } else {
+                        // Absolute last resort — show the SteamID so distinct
+                        // players are at least distinguishable.
                         char aidBuf[48];
                         snprintf(aidBuf, sizeof(aidBuf), "Player[%llu]", aid);
                         info.displayName = aidBuf;
