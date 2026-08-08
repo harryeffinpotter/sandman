@@ -251,6 +251,10 @@ extern std::vector<std::string> g_hiddenPrefixes;
 extern Hook g_executeHook;
 extern fn_execute g_original_execute;
 extern Hook g_farHook;
+extern Hook g_publishHook;
+extern void* g_holoPublishAddr;
+extern std::atomic<bool> g_captureMessages;
+void __fastcall hooked_publish(void* thisPtr, void* msg);
 
 extern std::atomic<bool> g_dumpEntities;
 extern std::atomic<bool> g_probeContext;

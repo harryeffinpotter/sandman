@@ -242,6 +242,19 @@ static void send_scroll(int wheelDelta) {
 }
 
 static void auto_reequip_tick() {
+    // Throttled diagnostic — every ~2 sec log the gate state so LO can see
+    // exactly what's blocking. Removed once feature is confirmed working.
+    static ULONGLONG s_lastDiag = 0;
+    ULONGLONG nowT = GetTickCount64();
+    if (nowT - s_lastDiag > 2000) {
+        s_lastDiag = nowT;
+        bool ar = g_autoReequip.load();
+        bool dm = g_dupeMode.load();
+        bool su = g_dupeSuspended.load();
+        bool fg = (GetForegroundWindow() == g_gameHwnd);
+        ringlog::push("[reequip-diag] autoRe=%d dupe=%d suspend=%d foreground=%d hwnd=%p",
+                      ar?1:0, dm?1:0, su?1:0, fg?1:0, g_gameHwnd);
+    }
     if (!g_autoReequip.load() || !g_dupeMode.load()) return;
     // Suspend hotkey (F9) — temporarily pauses re-equip so LO can interact
     // with the world normally without losing the locked item. Toggle again

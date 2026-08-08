@@ -1901,6 +1901,45 @@ static DWORD WINAPI worker_thread(LPVOID) {
     tlog("=== ENTERING MAIN LOOP tick=%lu ===\n", GetTickCount());
     // Wire up Steam name resolver — resolves player SteamID64 -> platform name.
     steam_names_init();
+
+    // -----------------------------------------------------------------
+    // Install HoloMessengerModule.Publish hook — captures every outbound
+    // HoloMessage from the game so we can replay them (dupe experiments).
+    // Logs to perf_capture.dat: klass name + first 0x40 bytes per call.
+    // -----------------------------------------------------------------
+    if (api.il2cpp_class_from_name && api.il2cpp_class_get_methods && api.il2cpp_method_get_name) {
+        void* holoModuleKlass = nullptr;
+        size_t asmCountH = 0;
+        void** assembliesH = api.il2cpp_domain_get_assemblies(api.il2cpp_domain_get(), &asmCountH);
+        for (size_t i = 0; i < asmCountH && !holoModuleKlass; i++) {
+            void* img = api.il2cpp_assembly_get_image(assembliesH[i]);
+            if (!img) continue;
+            holoModuleKlass = api.il2cpp_class_from_name(img, "Hologryph.HoloCore.Utils", "HoloMessengerModule");
+        }
+        if (holoModuleKlass) {
+            void* mIter = nullptr;
+            void* method;
+            while ((method = api.il2cpp_class_get_methods(holoModuleKlass, &mIter)) != nullptr) {
+                const char* mn = api.il2cpp_method_get_name(method);
+                if (mn && strcmp(mn, "Publish") == 0) {
+                    g_holoPublishAddr = *(void**)method;
+                    break;
+                }
+            }
+            if (g_holoPublishAddr) {
+                wlog("[worker] HoloMessengerModule.Publish addr=%p — installing hook\n", g_holoPublishAddr);
+                if (install_hook(g_publishHook, g_holoPublishAddr, (void*)hooked_publish)) {
+                    wlog("[worker] Publish hook INSTALLED — messages captured to perf_capture.dat\n");
+                } else {
+                    wlog("[worker] Publish hook install FAILED\n");
+                }
+            } else {
+                wlog("[worker] HoloMessengerModule.Publish method NOT found\n");
+            }
+        } else {
+            wlog("[worker] HoloMessengerModule klass NOT found in any assembly\n");
+        }
+    }
     {
         int scanCounter = 0;
         while (g_running.load()) {

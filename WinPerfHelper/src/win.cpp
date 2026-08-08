@@ -295,6 +295,76 @@ std::vector<std::string> g_hiddenPrefixes = { "Mob", "walker_", "EXPEDITION_WALK
 Hook g_executeHook;
 fn_execute g_original_execute = nullptr;
 Hook g_farHook;
+Hook g_publishHook;
+void* g_holoPublishAddr = nullptr;
+std::atomic<bool> g_captureMessages{true};   // logs every published HoloMessage to perf_capture.dat
+static FILE* g_captureFile = nullptr;
+static CRITICAL_SECTION g_captureCS;
+static bool g_captureCSInit = false;
+static void ensure_capture_cs() {
+    if (!g_captureCSInit) { InitializeCriticalSection(&g_captureCS); g_captureCSInit = true; }
+}
+
+typedef void (*fn_publish)(void* thisPtr, void* msg);
+static bool is_readable(const void* ptr, size_t len);  // fwd decl
+
+void __fastcall hooked_publish(void* thisPtr, void* msg) {
+    // Log first — before calling original so if orig crashes we still have
+    // the message that caused it.
+    if (g_captureMessages.load() && msg) {
+        ensure_capture_cs();
+        EnterCriticalSection(&g_captureCS);
+        __try {
+            if (!g_captureFile) {
+                char p[MAX_PATH]; char ad[MAX_PATH];
+                DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
+                if (n && n < MAX_PATH) {
+                    snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_capture.dat", ad);
+                    fopen_s(&g_captureFile, p, "a");
+                }
+            }
+            if (g_captureFile) {
+                // Read msg's klass name (first qword of any il2cpp object)
+                char klassName[128] = "?";
+                __try {
+                    void* klass = *(void**)msg;
+                    IL2CPP_API* api = get_il2cpp_api();
+                    if (api && api->il2cpp_class_get_name && is_readable(klass, 0x40)) {
+                        const char* n = api->il2cpp_class_get_name(klass);
+                        if (n) { strncpy_s(klassName, sizeof(klassName), n, _TRUNCATE); }
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                DWORD nowT = GetTickCount();
+                fprintf(g_captureFile, "\n[t=%lu] PUBLISH %s @%p\n", nowT, klassName, msg);
+                // Hex + interpretation of first 0x40 bytes
+                __try {
+                    if (is_readable(msg, 0x40)) {
+                        for (int off = 0; off < 0x40; off += 8) {
+                            uintptr_t v = *(uintptr_t*)((uintptr_t)msg + off);
+                            fprintf(g_captureFile, "  +0x%02X: %016llX", off, (unsigned long long)v);
+                            // Interpretation
+                            if (v == 0) fprintf(g_captureFile, "  null");
+                            else if (v < 0x100) fprintf(g_captureFile, "  byte/int=%llu", (unsigned long long)v);
+                            else if (v < 0x100000000ULL) fprintf(g_captureFile, "  int=%llu", (unsigned long long)v);
+                            else if (v >= 0x10000000ULL && v < 0x00007FFFFFFFFFFFULL) {
+                                fprintf(g_captureFile, "  ptr");
+                            }
+                            fprintf(g_captureFile, "\n");
+                        }
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                fflush(g_captureFile);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        LeaveCriticalSection(&g_captureCS);
+    }
+    // Call original — msg dispatch must continue normally
+    __try {
+        ((fn_publish)g_publishHook.trampoline_exec)(thisPtr, msg);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[hooked_publish] SEH: 0x%08lX\n", GetExceptionCode());
+    }
+}
 
 HWBPHook g_hwbpHooks[4] = {};
 
@@ -2853,6 +2923,17 @@ void scan_entities() {
         // name matches g_lastDupedName and re-lock it. That's what LO does
         // manually — waits half a sec, item comes back to top, re-clicks.
         // Now automatic.
+        {
+            static DWORD s_diagT = 0;
+            DWORD nt = GetTickCount();
+            if (nt - s_diagT > 2000) {
+                s_diagT = nt;
+                ringlog::push("[relock-diag] dupe=%d autoRe=%d perma=%d lockPtr=%p lastName='%s' items=%zu",
+                              g_dupeMode.load()?1:0, g_autoRelockDupe.load()?1:0,
+                              g_permaLockActive.load()?1:0, (void*)g_lockedEntityPtr.load(),
+                              g_lastDupedName.c_str(), g_items.size());
+            }
+        }
         if (g_dupeMode.load() && g_autoRelockDupe.load() && g_permaLockActive.load()) {
             uintptr_t curPtr = g_lockedEntityPtr.load();
             bool needRelock = (curPtr == 0);
