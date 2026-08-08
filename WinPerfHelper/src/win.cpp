@@ -297,6 +297,7 @@ fn_execute g_original_execute = nullptr;
 Hook g_farHook;
 Hook g_publishHook;
 void* g_holoPublishAddr = nullptr;
+void* g_holoMessengerInstance = nullptr;  // set on first Publish call — 'this' ptr from any hook fire
 std::atomic<bool> g_captureMessages{false};  // DEFAULT OFF. LO toggles from UI when actively capturing. On = every Publish call reads msg + writes to perf_capture.dat which can amplify AVs during instability.
 static FILE* g_captureFile = nullptr;
 static CRITICAL_SECTION g_captureCS;
@@ -307,8 +308,111 @@ static void ensure_capture_cs() {
 
 typedef void (*fn_publish)(void* thisPtr, void* msg);
 static bool is_readable(const void* ptr, size_t len);  // fwd decl
+struct CapturedMsg;
+static void seh_dispatch_captured(const CapturedMsg* cm);
+
+// ---------------------------------------------------------------------------
+// Dupe Lab recording buffer — snapshot HoloMessages so we can replay them.
+// Each capture stores the msg's klass ptr + up to 0x80 bytes of instance data.
+// Replay allocates a fresh il2cpp object of the same klass, memcpy's the
+// snapshot bytes over the instance, dispatches via Publish.
+// ---------------------------------------------------------------------------
+struct CapturedMsg {
+    void* klass;         // klass pointer at the time of capture
+    unsigned char bytes[0x80];
+    size_t byteLen;
+    DWORD tick;
+};
+struct Recording {
+    std::string name;
+    std::vector<CapturedMsg> msgs;
+};
+static std::unordered_map<std::string, Recording> g_recordings;
+static CRITICAL_SECTION g_recCS;
+static bool g_recCSInit = false;
+static void ensure_rec_cs() {
+    if (!g_recCSInit) { InitializeCriticalSection(&g_recCS); g_recCSInit = true; }
+}
+std::atomic<bool>  g_dupeLabRecording{false};
+static std::string g_activeRecordingName;  // guarded by g_recCS
+
+void dupelab_record_start(const std::string& name) {
+    ensure_rec_cs();
+    EnterCriticalSection(&g_recCS);
+    g_activeRecordingName = name;
+    g_recordings[name].name = name;
+    g_recordings[name].msgs.clear();
+    LeaveCriticalSection(&g_recCS);
+    g_dupeLabRecording.store(true);
+}
+void dupelab_record_stop() {
+    g_dupeLabRecording.store(false);
+    ensure_rec_cs();
+    EnterCriticalSection(&g_recCS);
+    g_activeRecordingName.clear();
+    LeaveCriticalSection(&g_recCS);
+}
+size_t dupelab_recording_count(const std::string& name) {
+    ensure_rec_cs();
+    EnterCriticalSection(&g_recCS);
+    size_t r = g_recordings.count(name) ? g_recordings[name].msgs.size() : 0;
+    LeaveCriticalSection(&g_recCS);
+    return r;
+}
+// Replay: for each captured msg, allocate a new il2cpp object of the same
+// klass, memcpy the snapshot bytes over the instance data, dispatch via Publish.
+void dupelab_playback(const std::string& name) {
+    if (!g_holoPublishAddr) { wlog("[dupelab] playback %s FAILED: Publish addr null\n", name.c_str()); return; }
+    IL2CPP_API* api = get_il2cpp_api();
+    if (!api || !api->il2cpp_object_new) { wlog("[dupelab] playback %s FAILED: object_new unavailable\n", name.c_str()); return; }
+    ensure_rec_cs();
+    // Snapshot the list so we don't hold CS across il2cpp calls
+    std::vector<CapturedMsg> local;
+    EnterCriticalSection(&g_recCS);
+    if (g_recordings.count(name)) local = g_recordings[name].msgs;
+    LeaveCriticalSection(&g_recCS);
+    wlog("[dupelab] playback '%s' — dispatching %zu messages\n", name.c_str(), local.size());
+    for (auto& cm : local) {
+        seh_dispatch_captured(&cm);
+    }
+}
+
+// __try can't sit in dupelab_playback (has std::vector local). Isolated.
+static void seh_dispatch_captured(const CapturedMsg* cm) {
+    IL2CPP_API* api = get_il2cpp_api();
+    if (!cm || !cm->klass || !api || !api->il2cpp_object_new) return;
+    __try {
+        void* newObj = api->il2cpp_object_new(cm->klass);
+        if (!newObj) return;
+        size_t copyLen = cm->byteLen > 0x10 ? cm->byteLen - 0x10 : 0;
+        if (copyLen > 0) memcpy((char*)newObj + 0x10, cm->bytes + 0x10, copyLen);
+        ((fn_publish)g_publishHook.trampoline_exec)(g_holoMessengerInstance, newObj);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[dupelab]   SEH during dispatch: 0x%08lX\n", GetExceptionCode());
+    }
+}
 
 void __fastcall hooked_publish(void* thisPtr, void* msg) {
+    // Grab the messenger instance ptr on first call — needed for replay.
+    if (!g_holoMessengerInstance && thisPtr) g_holoMessengerInstance = thisPtr;
+    // Dupe Lab recording — snapshot msg bytes into the active recording buffer.
+    if (g_dupeLabRecording.load() && msg) {
+        __try {
+            if (is_readable(msg, 0x80)) {
+                ensure_rec_cs();
+                EnterCriticalSection(&g_recCS);
+                if (!g_activeRecordingName.empty()) {
+                    CapturedMsg cm{};
+                    cm.klass = *(void**)msg;
+                    memcpy(cm.bytes, msg, 0x80);
+                    cm.byteLen = 0x80;
+                    cm.tick = GetTickCount();
+                    g_recordings[g_activeRecordingName].msgs.push_back(cm);
+                }
+                LeaveCriticalSection(&g_recCS);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
     // Log first — before calling original so if orig crashes we still have
     // the message that caused it.
     if (g_captureMessages.load() && msg) {
@@ -457,6 +561,7 @@ void resolve_all(HMODULE ga, IL2CPP_API& api) {
     RESOLVE(api, ga, il2cpp_field_get_flags);
     RESOLVE(api, ga, il2cpp_class_get_parent);
     RESOLVE(api, ga, il2cpp_class_instance_size);
+    RESOLVE(api, ga, il2cpp_object_new);
     RESOLVE(api, ga, il2cpp_class_get_methods);
     RESOLVE(api, ga, il2cpp_method_get_name);
     RESOLVE(api, ga, il2cpp_method_get_param_count);

@@ -31,6 +31,7 @@ typedef void        (*fn_il2cpp_field_static_get_value)(void* field, void* value
 typedef uint32_t    (*fn_il2cpp_field_get_flags)(void* field);
 typedef void*       (*fn_il2cpp_class_get_parent)(void* klass);
 typedef uint32_t    (*fn_il2cpp_class_instance_size)(void* klass);
+typedef void*       (*fn_il2cpp_object_new)(void* klass);
 typedef void*       (*fn_il2cpp_class_get_methods)(void* klass, void** iter);
 typedef const char* (*fn_il2cpp_method_get_name)(void* method);
 typedef uint32_t    (*fn_il2cpp_method_get_param_count)(void* method);
@@ -64,6 +65,7 @@ struct IL2CPP_API {
     fn_il2cpp_field_get_flags           il2cpp_field_get_flags;
     fn_il2cpp_class_get_parent          il2cpp_class_get_parent;
     fn_il2cpp_class_instance_size       il2cpp_class_instance_size;
+    fn_il2cpp_object_new                il2cpp_object_new;
     fn_il2cpp_class_get_methods         il2cpp_class_get_methods;
     fn_il2cpp_method_get_name           il2cpp_method_get_name;
     fn_il2cpp_method_get_param_count    il2cpp_method_get_param_count;
@@ -253,8 +255,14 @@ extern fn_execute g_original_execute;
 extern Hook g_farHook;
 extern Hook g_publishHook;
 extern void* g_holoPublishAddr;
+extern void* g_holoMessengerInstance;
 extern std::atomic<bool> g_captureMessages;
+extern std::atomic<bool> g_dupeLabRecording;
 void __fastcall hooked_publish(void* thisPtr, void* msg);
+void dupelab_record_start(const std::string& name);
+void dupelab_record_stop();
+size_t dupelab_recording_count(const std::string& name);
+void dupelab_playback(const std::string& name);
 
 extern std::atomic<bool> g_dumpEntities;
 extern std::atomic<bool> g_probeContext;

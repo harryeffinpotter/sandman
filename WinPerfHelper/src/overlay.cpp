@@ -2347,6 +2347,50 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::EndTabItem();
             }
 
+            if (ImGui::BeginTabItem("Dupe Lab")) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "MESSAGE CAPTURE + REPLAY (server-side dupe experiments)");
+                ImGui::Separator();
+                {
+                    bool cap = g_captureMessages.load();
+                    if (ImGui::Checkbox("Capture-to-file (perf_capture.dat)", &cap)) g_captureMessages.store(cap);
+                    ImGui::TextDisabled("Every Publish call logged. Default OFF (amplifies AVs during instability). Turn on right before action, off after.");
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "RECORD (in-memory msg buffer, per named action):");
+                bool recording = g_dupeLabRecording.load();
+                static const char* kRecordings[] = {
+                    "place-on-shelf", "place-in-box", "swap-box",
+                    "pickup-from-shelf", "pickup-from-box", "split-stack", "equip-item"
+                };
+                for (auto* nm : kRecordings) {
+                    char btn[128]; snprintf(btn, sizeof(btn), "Record: %s", nm);
+                    if (ImGui::Button(btn)) { dupelab_record_start(nm); }
+                    ImGui::SameLine();
+                    size_t c = dupelab_recording_count(nm);
+                    ImGui::TextDisabled("(%zu msgs)", c);
+                    ImGui::SameLine();
+                    char pb[128]; snprintf(pb, sizeof(pb), "Playback##%s", nm);
+                    if (ImGui::Button(pb)) { dupelab_playback(nm); }
+                }
+                if (recording) {
+                    ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "RECORDING — perform the action now, then click STOP.");
+                    if (ImGui::Button("STOP RECORDING")) dupelab_record_stop();
+                }
+                ImGui::TextDisabled("Publish addr: %p | HoloMessengerModule instance: %p",
+                                    g_holoPublishAddr, g_holoMessengerInstance);
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "COMPONENT SPOOFS (temporary while lock held):");
+                ImGui::TextDisabled("Requires locked entity (click item in Items tab). HeavyFix1/2 in Player tab are the existing ones.");
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.9f, 1.0f), "NOTES ON DUPE MECHANISM (from LO's testing):");
+                ImGui::BulletText("Small items dupe: hand-brandish + interactables-list duplex + F-grab creates copy");
+                ImGui::BulletText("Big items don't fit the window: snatch animation exceeds check-in-hand timeout");
+                ImGui::BulletText("Materials (silver/food) never brandish -> never enter duplex -> current dupe misses them");
+                ImGui::BulletText("Real fix: capture the outbound HoloMessage the game sends when a place/pickup succeeds, replay it with different args");
+                ImGui::BulletText("Type-spoof to canned-food type = no 3D model = no render crash during brandish");
+                ImGui::EndTabItem();
+            }
+
             if (ImGui::BeginTabItem("Debug")) {
                 if (ImGui::Button("Clear")) ringlog::clear();
                 ImGui::SameLine();
