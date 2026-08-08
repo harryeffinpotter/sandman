@@ -1011,11 +1011,14 @@ static void create_stream_proof_overlay() {
     MARGINS margins = {-1, -1, -1, -1};
     DwmExtendFrameIntoClientArea(g_overlayHwnd, &margins);
 
-    // WDA_MONITOR (0x1): user sees the window normally; screen-capture APIs
-    // (OBS Game/Display Capture, PrintScreen, DXGI Desktop Duplication) get
-    // black where the window is. WDA_EXCLUDEFROMCAPTURE (0x11) can also hide
-    // from the user under some Win11 compositor states.
-    SetWindowDisplayAffinity(g_overlayHwnd, 0x00000001);
+    // WDA_EXCLUDEFROMCAPTURE (0x11) — modern flag (Win 10 2004+) that hides
+    // the window from ALL screen-capture APIs including Windows.Graphics.
+    // Capture (what modern OBS Game Capture uses). WDA_MONITOR (0x1) is
+    // the older flag that only blocks DXGI Desktop Duplication — doesn't
+    // block modern OBS. This was the root of every 'stream-proof half-
+    // works' state — the API we were using literally doesn't cover the
+    // capture path OBS actually takes.
+    SetWindowDisplayAffinity(g_overlayHwnd, 0x00000011);
 
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
@@ -2090,6 +2093,32 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled("Bypasses game's 7-step shutdown hell.");
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.6f, 1.0f, 1.0f, 1.0f), "REBINDABLE HOTKEYS:");
+                {
+                    // Per-feature rebind button. Click -> set capture request
+                    // -> worker thread watches next key press -> assigns to feature.
+                    struct HK { const char* label; std::atomic<int>* vk; int reqId; };
+                    HK kBinds[] = {
+                        {"Hard Kill",        &g_hotkeyHardKill,       1},
+                        {"Dupe Suspend",     &g_hotkeyDupeSuspend,    2},
+                        {"Dupe Master Off",  &g_hotkeyDupeMaster,     3},
+                        {"Playback First Recording", &g_hotkeyPlaybackFirst, 4},
+                    };
+                    int active = g_hotkeyCaptureRequest.load();
+                    for (auto& hk : kBinds) {
+                        int cur = hk.vk->load();
+                        ImGui::Text("%s: VK 0x%02X", hk.label, cur);
+                        ImGui::SameLine();
+                        char btn[64];
+                        snprintf(btn, sizeof(btn), "%s##rb%d",
+                                 active == hk.reqId ? "PRESS ANY KEY..." : "Rebind", hk.reqId);
+                        if (ImGui::Button(btn)) {
+                            g_hotkeyCaptureRequest.store(active == hk.reqId ? 0 : hk.reqId);
+                        }
+                    }
+                    ImGui::TextDisabled("Click Rebind then press any key. Escape to cancel.");
+                }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Component Indices:");
                 ImGui::Text("  FallDamageData:      %d", g_idx_fall_damage);

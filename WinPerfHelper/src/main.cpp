@@ -1999,16 +1999,60 @@ static DWORD WINAPI worker_thread(LPVOID) {
             // Hard-kill hotkey — F12 = instant TerminateProcess. Bypasses
             // the game's 7-step shutdown hell (Alt+F4 → End Task → Not
             // Responding → Force Close). One key, dead in 10ms.
-            if ((GetAsyncKeyState(VK_F12) & 0x8000) || g_hardKillRequested.load()) {
+            if ((GetAsyncKeyState(g_hotkeyHardKill.load()) & 0x8000) || g_hardKillRequested.load()) {
                 wlog("[worker] HARD KILL requested — TerminateProcess\n");
                 TerminateProcess(GetCurrentProcess(), 0);
+            }
+            // Hotkey rebind capture — UI sets g_hotkeyCaptureRequest to a
+            // feature id when user clicks "Bind". Worker watches for next
+            // key press and assigns it to the requested feature.
+            {
+                int req = g_hotkeyCaptureRequest.load();
+                if (req != 0) {
+                    for (int vk = 0x08; vk <= 0xFE; vk++) {
+                        if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON) continue;
+                        if (GetAsyncKeyState(vk) & 0x8000) {
+                            switch (req) {
+                                case 1: g_hotkeyHardKill.store(vk); break;
+                                case 2: g_hotkeyDupeSuspend.store(vk); break;
+                                case 3: g_hotkeyDupeMaster.store(vk); break;
+                                case 4: g_hotkeyPlaybackFirst.store(vk); break;
+                            }
+                            g_hotkeyCaptureRequest.store(0);
+                            wlog("[worker] Hotkey %d rebound to VK 0x%02X\n", req, vk);
+                            break;
+                        }
+                    }
+                }
+            }
+            // F7 = playback the FIRST recorded action in Dupe Lab. Fires from
+            // worker thread so game stays live (menu-triggered playback needs
+            // Esc which pauses game = server won't process message).
+            {
+                static bool s_f7WasDown = false;
+                bool nowDown = (GetAsyncKeyState(g_hotkeyPlaybackFirst.load()) & 0x8000) != 0;
+                if (nowDown && !s_f7WasDown) {
+                    // Try each named recording in priority order — playback the first non-empty
+                    static const char* kOrder[] = {
+                        "place-on-shelf", "place-in-box", "swap-box",
+                        "pickup-from-shelf", "pickup-from-box", "split-stack", "equip-item"
+                    };
+                    for (auto* n : kOrder) {
+                        if (dupelab_recording_count_cstr(n) > 0) {
+                            wlog("[worker] F7 playback -> %s (%zu msgs)\n", n, dupelab_recording_count_cstr(n));
+                            dupelab_playback_cstr(n);
+                            break;
+                        }
+                    }
+                }
+                s_f7WasDown = nowDown;
             }
             // F9 = toggle dupe-suspend. Pauses all dupe auto-actions so LO
             // can interact with the world normally, hit again to resume.
             // Debounced so one press = one toggle.
             {
                 static bool s_f9WasDown = false;
-                bool nowDown = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+                bool nowDown = (GetAsyncKeyState(g_hotkeyDupeSuspend.load()) & 0x8000) != 0;
                 if (nowDown && !s_f9WasDown) {
                     bool newState = !g_dupeSuspended.load();
                     g_dupeSuspended.store(newState);
@@ -2031,7 +2075,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 static int  s_savedLockedId = -1;
                 static uintptr_t s_savedLockedPtr = 0;
                 static bool s_dupeAllOff = false;
-                bool nowDown = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+                bool nowDown = (GetAsyncKeyState(g_hotkeyDupeMaster.load()) & 0x8000) != 0;
                 if (nowDown && !s_f10WasDown) {
                     if (!s_dupeAllOff) {
                         // Snapshot ALL dupe/lock state

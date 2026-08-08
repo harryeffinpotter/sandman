@@ -263,6 +263,11 @@ extern std::atomic<bool> g_dupeLabRecording;
 extern std::atomic<bool> g_showContainerContents;
 extern std::atomic<int>  g_dupeSpoofType;
 extern std::atomic<int>  g_dupeForceHandSlot;
+extern std::atomic<int>  g_hotkeyHardKill;
+extern std::atomic<int>  g_hotkeyDupeSuspend;
+extern std::atomic<int>  g_hotkeyDupeMaster;
+extern std::atomic<int>  g_hotkeyPlaybackFirst;
+extern std::atomic<int>  g_hotkeyCaptureRequest;
 // Dupe Lab actions that mutate the currently-locked entity's components.
 // All SEH-safe: silently no-op if lock is empty or components missing.
 void dupelab_spoof_type_on_locked(int typeValue);
@@ -279,6 +284,10 @@ void dupelab_record_start(const std::string& name);
 void dupelab_record_stop();
 size_t dupelab_recording_count(const std::string& name);
 void dupelab_playback(const std::string& name);
+// C-string wrappers so main.cpp hotkey handlers can call without triggering
+// C2712 (constructing std::string inside a function with __try scope).
+size_t dupelab_recording_count_cstr(const char* name);
+void dupelab_playback_cstr(const char* name);
 
 extern std::atomic<bool> g_dumpEntities;
 extern std::atomic<bool> g_probeContext;

@@ -102,7 +102,14 @@ static bool g_lastDupedNameInit = false;
 void ensure_last_duped_name_cs() {
     if (!g_lastDupedNameInit) { InitializeCriticalSection(&g_lastDupedNameCS); g_lastDupedNameInit = true; }
 }
-std::atomic<bool> g_dupeSuspended{false};   // F9 hotkey toggles this
+std::atomic<bool> g_dupeSuspended{false};   // F9 hotkey (rebindable) toggles this
+// User-rebindable hotkey bindings. Defaults match previous hardcoded F-keys.
+// Overlay UI has a "Bind hotkey" button per action; next key press assigns.
+std::atomic<int> g_hotkeyHardKill{VK_F12};
+std::atomic<int> g_hotkeyDupeSuspend{VK_F9};
+std::atomic<int> g_hotkeyDupeMaster{VK_F10};
+std::atomic<int> g_hotkeyPlaybackFirst{VK_F7};
+std::atomic<int> g_hotkeyCaptureRequest{0};  // set to feature index when UI asks user to press a key
 
 // ---------------------------------------------------------------------------
 // Steam API cache — GetFriendPersonaName resolves a SteamID64 to the real
@@ -392,6 +399,16 @@ size_t dupelab_recording_count(const std::string& name) {
     LeaveCriticalSection(&g_recCS);
     return r;
 }
+// C-string wrappers — delegate to std::string overloads. Callable from
+// hotkey handlers in main.cpp without C2712 (can't construct std::string
+// inside a function with __try scope).
+size_t dupelab_recording_count_cstr(const char* name) {
+    return dupelab_recording_count(std::string(name ? name : ""));
+}
+void dupelab_playback_cstr(const char* name) {
+    dupelab_playback(std::string(name ? name : ""));
+}
+
 // Replay: for each captured msg, allocate a new il2cpp object of the same
 // klass, memcpy the snapshot bytes over the instance data, dispatch via Publish.
 void dupelab_playback(const std::string& name) {
