@@ -416,6 +416,7 @@ struct ESP3DEntry {
     bool isReactor;
     bool isFinalExtract;
     BoneScreenPos bones[55];
+    float healthNorm;   // 0..1 or -1 if unknown
 };
 
 static const int SKELETON_CONNECTIONS[][2] = {
@@ -442,6 +443,7 @@ struct ESPSnapshot {
     bool isFinalExtract;
     int type;
     int lootTier;
+    float healthNorm;   // 0..1 or -1 if unknown
 };
 static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDist, volatile bool& csHeld) {
     if (!g_cameraGetMain || !g_cameraW2S || !g_getTransform || !g_getPosition) return;
@@ -487,6 +489,15 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         if (isPlayer && !g_espShowPlayers.load()) continue;
         if (isMob && !g_espShowMobs.load()) continue;
         if (isWalker && !g_espShowWalkers.load()) continue;
+        // Apply the right-click blacklist to ESP too (was only filtering Items list).
+        if (g_hiddenNames.count(item.name)) continue;
+        {
+            bool prefHidden = false;
+            for (auto& p : g_hiddenPrefixes) {
+                if (item.name.rfind(p, 0) == 0) { prefHidden = true; break; }
+            }
+            if (prefHidden) continue;
+        }
         if (isLoot) {
             if (item.lootTier == 1 && !g_espShowLootT1.load()) continue;
             if (item.lootTier == 2 && !g_espShowLootT2.load()) continue;
@@ -516,6 +527,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         snap.isExtraction = item.isExtraction;
         snap.isReactor = item.isReactor;
         snap.isFinalExtract = item.isFinalExtract;
+        snap.healthNorm = item.healthNorm;
         // Extraction / Reactor filters — hide if their toggle is off, but
         // let them always render if the toggle is on regardless of category.
         if (item.isExtraction && !g_espShowExtraction.load() && !isPlayer && !isMob) continue;
@@ -597,11 +609,17 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         e.isExtraction = snap.isExtraction;
         e.isReactor = snap.isReactor;
         e.isFinalExtract = snap.isFinalExtract;
+        e.healthNorm = snap.healthNorm;
         const char* prefix = "";
         if (snap.isFinalExtract) prefix = "[FINAL EXTRACT] ";
         else if (snap.isExtraction) prefix = "[EXTRACT] ";
         else if (snap.isReactor) prefix = "[SHIP] ";
-        snprintf(e.label, sizeof(e.label), "%s%s [%.0fm]", prefix, snap.displayName, e.dist);
+        char hpTag[24] = "";
+        if (g_espShowHealth.load() && e.healthNorm >= 0.0f && e.healthNorm <= 1.5f) {
+            int pct = (int)(e.healthNorm * 100.0f + 0.5f);
+            snprintf(hpTag, sizeof(hpTag), " [HP %d%%]", pct);
+        }
+        snprintf(e.label, sizeof(e.label), "%s%s [%.0fm]%s", prefix, snap.displayName, e.dist, hpTag);
 
         e.hasSkeleton = false;
         if (snap.type != 2 && snap.type != 3 && showSkeleton && snap.hasBones) {
@@ -1256,6 +1274,11 @@ static bool seh_present_init(IDXGISwapChain* pSwapChain) {
             IMGUI_CHECKVERSION();
             ImGui::CreateContext();
             ImGui::GetIO().IniFilename = nullptr;
+            // Disable ImGui's keyboard nav (Tab/arrows/etc) so game keys
+            // don't hijack menu focus. LO's Tab-hold-radial-menu was
+            // scrolling our UI wildly.
+            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
             ImGui::StyleColorsDark();
 
             load_settings();
@@ -1918,11 +1941,15 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         g_turretNoRecoil.store(noRecoil);
                 }
                 {
+                    ImGui::PushItemWidth(140);
                     float m = g_recoilMult.load();
-                    if (ImGui::SliderFloat("Recoil strength", &m, 0.0f, 1.0f, "%.2fx")) {
+                    if (ImGui::SliderFloat("Recoil strength##rec", &m, 0.0f, 1.0f, "%.2fx")) {
                         g_recoilMult.store(m);
                     }
-                    ImGui::TextDisabled("1.0 = normal (no writes), 0.0 = zero. Slider < 1.0 scales the recoil vector every tick.");
+                    ImGui::PopItemWidth();
+                    ImGui::TextDisabled("Cosmetic only right now — checkbox above does the actual work.");
+                    ImGui::TextDisabled("Scaling branch corrupted RecoilLookOffset pointer fields => CTD.");
+                    ImGui::TextDisabled("Field layout dump goes to log on first hit ([recoil-layout]).");
                 }
 
                 ImGui::Separator();
@@ -2252,10 +2279,67 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SliderFloat("Dist##lootT3", &g_espLootT3Dist, 50.0f, 2000.0f, "%.0f m");
                     ImGui::EndDisabled();
                 }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "Render style");
                 {
-                    bool showSkeleton = g_espShowSkeleton.load();
-                    if (ImGui::Checkbox("Show Skeleton", &showSkeleton))
-                        g_espShowSkeleton.store(showSkeleton);
+                    bool sb = g_espShowBox.load();
+                    if (ImGui::Checkbox("Box", &sb)) g_espShowBox.store(sb);
+                    ImGui::SameLine();
+                    bool ss = g_espShowSkeleton.load();
+                    if (ImGui::Checkbox("Skeleton", &ss)) g_espShowSkeleton.store(ss);
+                    ImGui::SameLine();
+                    bool sh = g_espShowHealth.load();
+                    if (ImGui::Checkbox("HP%", &sh)) g_espShowHealth.store(sh);
+                    ImGui::TextDisabled("Pick Box, Skeleton, both, or neither. HP appends [HP N%%] to labels when the entity has HealthNormalizedComponent.");
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "Filters (hide from ESP)");
+                {
+                    ImGui::TextDisabled("%d names, %d prefixes currently hidden. Right-click any item in the Items list to add.",
+                        (int)g_hiddenNames.size(), (int)g_hiddenPrefixes.size());
+                    // Direct-input add name
+                    static char s_addName[128] = "";
+                    ImGui::SetNextItemWidth(200);
+                    ImGui::InputText("##addName", s_addName, sizeof(s_addName));
+                    ImGui::SameLine();
+                    if (ImGui::Button("Hide Name") && s_addName[0]) { g_hiddenNames.insert(s_addName); s_addName[0] = 0; }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Hide Prefix") && s_addName[0]) {
+                        bool already = false;
+                        for (auto& p : g_hiddenPrefixes) if (p == s_addName) { already = true; break; }
+                        if (!already) g_hiddenPrefixes.push_back(s_addName);
+                        s_addName[0] = 0;
+                    }
+                    // Scrollable list of active hides w/ per-item remove
+                    if (ImGui::CollapsingHeader("Manage hidden list##filterMgr")) {
+                        ImGui::BeginChild("##hidelist", ImVec2(0, 140), true);
+                        std::vector<std::string> toRemoveNames;
+                        for (auto& n : g_hiddenNames) {
+                            ImGui::PushID(n.c_str());
+                            if (ImGui::SmallButton("X")) toRemoveNames.push_back(n);
+                            ImGui::SameLine();
+                            ImGui::Text("name: %s", n.c_str());
+                            ImGui::PopID();
+                        }
+                        for (auto& n : toRemoveNames) g_hiddenNames.erase(n);
+                        std::vector<size_t> toRemoveIdx;
+                        for (size_t i = 0; i < g_hiddenPrefixes.size(); i++) {
+                            ImGui::PushID((int)(1000 + i));
+                            if (ImGui::SmallButton("X")) toRemoveIdx.push_back(i);
+                            ImGui::SameLine();
+                            ImGui::Text("prefix: %s*", g_hiddenPrefixes[i].c_str());
+                            ImGui::PopID();
+                        }
+                        for (auto it = toRemoveIdx.rbegin(); it != toRemoveIdx.rend(); ++it)
+                            g_hiddenPrefixes.erase(g_hiddenPrefixes.begin() + *it);
+                        ImGui::EndChild();
+                        if (!g_hiddenNames.empty() || !g_hiddenPrefixes.empty()) {
+                            if (ImGui::Button("Clear ALL hidden##filterMgrClear")) {
+                                g_hiddenNames.clear();
+                                g_hiddenPrefixes.clear();
+                            }
+                        }
+                    }
                 }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Stream Protection");
@@ -2365,7 +2449,28 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (ImGui::Checkbox("Enable Radar", &esp))
                         g_espEnabled.store(esp);
                 }
+                ImGui::PushItemWidth(160);
                 ImGui::SliderFloat("Range##radar", &g_radarRange, 500.0f, 20000.0f, "%.0f m");
+                {
+                    float rot = g_radarRotationOffsetDeg.load();
+                    if (ImGui::SliderFloat("Rot offset##radar", &rot, -180.0f, 180.0f, "%.1f deg"))
+                        g_radarRotationOffsetDeg.store(rot);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("0##rotreset")) g_radarRotationOffsetDeg.store(0.0f);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("-30##rot30")) g_radarRotationOffsetDeg.store(-30.0f);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("+30##rotp30")) g_radarRotationOffsetDeg.store(30.0f);
+                    ImGui::TextDisabled("Tune until things you look at appear at 12 o'clock on radar.");
+                }
+                ImGui::PopItemWidth();
+                {
+                    bool sc = g_espShowStormCircles.load();
+                    if (ImGui::Checkbox("Storm Circles (amber=current, red=future)", &sc))
+                        g_espShowStormCircles.store(sc);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%d found)", g_stormCirclesFound.load());
+                }
 
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Visibility");
@@ -2467,14 +2572,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             }
 
             if (ImGui::BeginTabItem("Dupe Lab")) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "MESSAGE CAPTURE + REPLAY (server-side dupe experiments)");
+                ImGui::PushItemWidth(140);   // cap slider/input widget widths
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "MESSAGE CAPTURE + REPLAY");
                 ImGui::Separator();
                 // Countdown: LO clicks button in menu (Esc pauses game),
                 // waits N seconds, un-Escapes, action fires with game live.
                 {
                     int d = g_actionDelaySec.load();
-                    if (ImGui::SliderInt("Action delay (sec) — arms every button below to fire N sec after click", &d, 0, 15, "%d sec"))
+                    if (ImGui::SliderInt("Action delay##delay", &d, 0, 15, "%d sec"))
                         g_actionDelaySec.store(d);
+                    ImGui::TextDisabled("Arms every button below to fire N sec after click.");
                     int pendId = g_pendingActionId.load();
                     if (pendId != 0) {
                         unsigned long long dl = g_pendingActionDeadline.load();
@@ -2500,8 +2607,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     "pickup-from-shelf", "pickup-from-box", "split-stack", "equip-item"
                 };
                 for (auto* nm : kRecordings) {
-                    char btn[128]; snprintf(btn, sizeof(btn), "Record: %s (delayed)", nm);
-                    if (ImGui::Button(btn)) { dupelab_schedule(200, nm); }
+                    char btn[128]; snprintf(btn, sizeof(btn), "Arm: %s", nm);
+                    if (ImGui::Button(btn)) { dupelab_arm_record(nm); }
                     ImGui::SameLine();
                     size_t c = dupelab_recording_count(nm);
                     ImGui::TextDisabled("(%zu msgs)", c);
@@ -2520,23 +2627,23 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::TextDisabled("Click an item in the Items list first to lock. All buttons target that lock.");
                 {
                     int t = g_dupeSpoofType.load();
-                    ImGui::SliderInt("Spoof type value (2 guess = consumable)", &t, 0, 20);
+                    ImGui::SliderInt("Spoof type##st", &t, 0, 20);
                     g_dupeSpoofType.store(t);
-                    if (ImGui::Button("Type-Spoof (write ItemTypeData.type)")) {
+                    if (ImGui::Button("Type-Spoof")) {
                         dupelab_spoof_type_on_locked(g_dupeSpoofType.load());
                     }
                     ImGui::SameLine();
-                    ImGui::TextDisabled("Make target look like a canned food/consumable.");
+                    ImGui::TextDisabled("Write ItemTypeData.type (2 = consumable).");
                 }
                 {
                     int s = g_dupeForceHandSlot.load();
-                    ImGui::SliderInt("Force-slot value (0 guess = hand)", &s, 0, 9);
+                    ImGui::SliderInt("Force slot##fs", &s, 0, 9);
                     g_dupeForceHandSlot.store(s);
-                    if (ImGui::Button("Force-Into-Hand (write InventoryItemSlotIndex)")) {
+                    if (ImGui::Button("Force-Into-Hand")) {
                         dupelab_force_slot_on_locked(g_dupeForceHandSlot.load());
                     }
                     ImGui::SameLine();
-                    ImGui::TextDisabled("Force target into a specific slot (0 = usually hand).");
+                    ImGui::TextDisabled("InventoryItemSlotIndex (0 = usually hand).");
                 }
                 {
                     if (ImGui::Button("TROJAN COMBO (type=2 + slot=0)")) {
@@ -2635,6 +2742,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::BulletText("Materials (silver/food) never brandish -> never enter duplex -> current dupe misses them");
                 ImGui::BulletText("Real fix: capture the outbound HoloMessage the game sends when a place/pickup succeeds, replay it with different args");
                 ImGui::BulletText("Type-spoof to canned-food type = no 3D model = no render crash during brandish");
+                ImGui::PopItemWidth();       // match the PushItemWidth at Dupe Lab tab start
                 ImGui::EndTabItem();
             }
 
@@ -2772,14 +2880,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     textColor = IM_COL32(180, 230, 100, 255);
                 }
 
-                drawList->AddRectFilled(
-                    ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
-                    ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
-                    bgColor, 3.0f);
-                drawList->AddRect(
-                    ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
-                    ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
-                    borderColor, 3.0f);
+                if (g_espShowBox.load()) {
+                    drawList->AddRectFilled(
+                        ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
+                        ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
+                        bgColor, 3.0f);
+                    drawList->AddRect(
+                        ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
+                        ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
+                        borderColor, 3.0f);
+                }
                 drawList->AddText(
                     ImVec2(e.sx - textSize.x / 2, e.sy - textSize.y / 2),
                     textColor, e.label);
@@ -2875,6 +2985,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
         if (g_cameraGetMain && g_getTransform && g_getForward) {
             seh_get_camera_yaw(&cosYaw, &sinYaw);
         }
+        // User-tunable additional rotation offset (compose atop yaw)
+        {
+            float extraRad = g_radarRotationOffsetDeg.load() * 3.14159265f / 180.0f;
+            float c2 = cosf(extraRad), s2 = sinf(extraRad);
+            float nc = cosYaw * c2 - sinYaw * s2;
+            float ns = cosYaw * s2 + sinYaw * c2;
+            cosYaw = nc; sinYaw = ns;
+        }
 
         struct RadarSnap {
             WorldVector pos;
@@ -2946,6 +3064,30 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             else
                 snprintf(distLabel, sizeof(distLabel), "%.0fm", dist);
             drawList->AddText(ImVec2(rx + 6, ry - 6), IM_COL32(255, 255, 255, 200), distLabel);
+        }
+
+        // Storm circles overlay — draw AFTER dots so they layer on top.
+        if (g_espShowStormCircles.load()) {
+            EnterCriticalSection(&g_stormLock);
+            std::vector<StormCircle> stormCopy(g_stormCircles);
+            LeaveCriticalSection(&g_stormLock);
+            for (auto& sc : stormCopy) {
+                float sdx = sc.absX - playerAbsX;
+                float sdz = sc.absZ - playerAbsZ;
+                float srotX = sdx * cosYaw - sdz * sinYaw;
+                float srotZ = sdx * sinYaw + sdz * cosYaw;
+                float scx = radarCenter.x + srotX * scale;
+                float scy = radarCenter.y - srotZ * scale;
+                float sr  = sc.radius * scale;
+                ImU32 col = sc.isDestination
+                    ? IM_COL32(255, 100, 100, 220)   // red = destination (future)
+                    : IM_COL32(255, 200, 0, 200);    // amber = current
+                drawList->AddCircle(ImVec2(scx, scy), sr, col, 64, 2.0f);
+                drawList->AddCircleFilled(ImVec2(scx, scy), 3.0f, col);
+                char lbl[32];
+                snprintf(lbl, sizeof(lbl), sc.isDestination ? "->Storm#%d" : "Storm#%d", sc.phaseIdx);
+                drawList->AddText(ImVec2(scx + 4, scy + 4), col, lbl);
+            }
         }
 
         if (g_menuVisible) {

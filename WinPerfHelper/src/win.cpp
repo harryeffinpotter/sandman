@@ -71,6 +71,8 @@ int g_idx_anticheat = -1;                // AntiCheat component (idx 27 per LO's
 int g_idx_anticheat_noclip_ignore = -1;  // AntiCheatNoClipIgnore (idx 28)
 int g_idx_anticheat_speedcap = -1;       // AntiCheatSpeedCapData (idx 29)
 int g_idx_dont_destroy_in_storm = -1;    // DontDestroyInStorm (idx 134)
+int g_idx_sandstorm_data = -1;           // SandStormData (359)
+int g_idx_sandstorm_destination = -1;    // SandStormDestination (360)
 int g_idx_extraction_point = -1;         // ExtractionPointData (166)
 int g_idx_final_extraction = -1;         // FinalExtractionPointData (172)
 int g_idx_extraction_box = -1;           // ExtractionBox (163)
@@ -115,6 +117,11 @@ std::atomic<int> g_hotkeyCaptureRequest{0};  // set to feature index when UI ask
 // fire, so LO can click in menu then Esc-close and let the countdown fire
 // the action in-game with server live (Esc pauses game = server ignores).
 std::atomic<int>          g_actionDelaySec{3};      // default 3 seconds
+std::atomic<int>          g_recordDurationSec{5};   // (unused now)
+std::atomic<unsigned long long> g_recordAutoStopDeadline{0}; // (unused now)
+std::atomic<int>          g_hotkeyRecordToggle{VK_DELETE}; // toggle armed recording
+static std::string        g_armedRecordName;               // set by UI arm button
+std::atomic<float>        g_radarRotationOffsetDeg{0.0f};  // user-tunable radar alignment
 std::atomic<int>          g_pendingActionId{0};     // 0 = no pending action
 std::atomic<unsigned long long> g_pendingActionDeadline{0};
 // Game-render-thread heartbeat. Updated inside hooked_present. Worker
@@ -398,6 +405,48 @@ Hook g_farHook;
 Hook g_publishHook;
 void* g_holoPublishAddr = nullptr;
 void* g_holoMessengerInstance = nullptr;  // set on first Publish call — 'this' ptr from any hook fire
+// SendMoveSlot / SendSplitSlot hooks — inventory-slot operations use
+// ClientNetworkControllerModule extension methods instead of HoloMessenger.
+// Hooking these captures place-on-shelf, swap-slots, split-stack etc.
+Hook g_sendMoveSlotHook;
+Hook g_sendSplitSlotHook;
+Hook g_sendEquipHook;
+Hook g_sendDropHook;
+void* g_sendMoveSlotAddr  = nullptr;
+void* g_sendSplitSlotAddr = nullptr;
+void* g_sendEquipAddr     = nullptr;
+void* g_sendDropAddr      = nullptr;
+
+// SendMoveSlot(this, byte fromSlot, int fromParent, byte toSlot, int toParent, DateTime timestamp)
+typedef void (*fn_send_move_slot)(void* thisPtr, uint8_t fromSlot, int32_t fromParent, uint8_t toSlot, int32_t toParent, uint64_t timestamp);
+typedef void (*fn_send_split_slot)(void* thisPtr, uint8_t fromSlot, int32_t fromParent, uint8_t toSlot, int32_t toParent, uint16_t count, uint64_t timestamp);
+typedef void (*fn_send_equip)(void* thisPtr, uint8_t slotId, uint64_t timestamp);
+typedef void (*fn_send_drop)(void* thisPtr, int32_t entityId, uint8_t slotId, uint64_t timestamp, uint16_t count);
+
+void __fastcall hooked_send_move_slot(void* thisPtr, uint8_t fromSlot, int32_t fromParent, uint8_t toSlot, int32_t toParent, uint64_t timestamp) {
+    ringlog::push("[net-send] MoveSlot fs=%u fp=%d ts=%u tp=%d", fromSlot, fromParent, toSlot, toParent);
+    __try {
+        ((fn_send_move_slot)g_sendMoveSlotHook.trampoline_exec)(thisPtr, fromSlot, fromParent, toSlot, toParent, timestamp);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void __fastcall hooked_send_split_slot(void* thisPtr, uint8_t fromSlot, int32_t fromParent, uint8_t toSlot, int32_t toParent, uint16_t count, uint64_t timestamp) {
+    ringlog::push("[net-send] SplitSlot fs=%u fp=%d ts=%u tp=%d cnt=%u", fromSlot, fromParent, toSlot, toParent, count);
+    __try {
+        ((fn_send_split_slot)g_sendSplitSlotHook.trampoline_exec)(thisPtr, fromSlot, fromParent, toSlot, toParent, count, timestamp);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void __fastcall hooked_send_equip(void* thisPtr, uint8_t slotId, uint64_t timestamp) {
+    ringlog::push("[net-send] Equip slot=%u", slotId);
+    __try {
+        ((fn_send_equip)g_sendEquipHook.trampoline_exec)(thisPtr, slotId, timestamp);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void __fastcall hooked_send_drop(void* thisPtr, int32_t entityId, uint8_t slotId, uint64_t timestamp, uint16_t count) {
+    ringlog::push("[net-send] Drop eid=%d slot=%u cnt=%u", entityId, slotId, count);
+    __try {
+        ((fn_send_drop)g_sendDropHook.trampoline_exec)(thisPtr, entityId, slotId, timestamp, count);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
 std::atomic<bool> g_captureMessages{false};  // DEFAULT OFF. LO toggles from UI when actively capturing. On = every Publish call reads msg + writes to perf_capture.dat which can amplify AVs during instability.
 static FILE* g_captureFile = nullptr;
 static CRITICAL_SECTION g_captureCS;
@@ -454,6 +503,40 @@ void dupelab_record_stop() {
     EnterCriticalSection(&g_recCS);
     g_activeRecordingName.clear();
     LeaveCriticalSection(&g_recCS);
+}
+
+// Arm a recording name so LO can press hotkey (Del) to start it later.
+void dupelab_arm_record(const char* name) {
+    ensure_rec_cs();
+    EnterCriticalSection(&g_recCS);
+    g_armedRecordName = name ? std::string(name) : std::string();
+    LeaveCriticalSection(&g_recCS);
+    ringlog::push("[dupelab] armed record='%s' — press Del to start", name ? name : "");
+}
+
+// Hotkey handler: if not recording + armed = start. If recording = stop.
+void dupelab_record_hotkey_toggle() {
+    if (g_dupeLabRecording.load()) {
+        std::string wasName;
+        ensure_rec_cs();
+        EnterCriticalSection(&g_recCS);
+        wasName = g_activeRecordingName;
+        LeaveCriticalSection(&g_recCS);
+        dupelab_record_stop();
+        ringlog::push("[dupelab] STOP record '%s' (via hotkey)", wasName.c_str());
+    } else {
+        std::string arm;
+        ensure_rec_cs();
+        EnterCriticalSection(&g_recCS);
+        arm = g_armedRecordName;
+        LeaveCriticalSection(&g_recCS);
+        if (arm.empty()) {
+            ringlog::push("[dupelab] hotkey hit but no recording armed");
+            return;
+        }
+        dupelab_record_start(arm);
+        ringlog::push("[dupelab] START record '%s' (via hotkey)", arm.c_str());
+    }
 }
 size_t dupelab_recording_count(const std::string& name) {
     ensure_rec_cs();
@@ -774,7 +857,9 @@ fn_get_child g_getChild = nullptr;
 fn_get_name g_getName = nullptr;
 void* g_animatorType = nullptr;
 void* g_userNameType = nullptr;
-std::atomic<bool> g_espShowSkeleton{false};
+std::atomic<bool> g_espShowSkeleton{true};    // default ON — creature-fix build
+std::atomic<bool> g_espShowBox{true};          // per-entity outlined box
+std::atomic<bool> g_espShowHealth{true};       // append [HP N%] to labels
 std::atomic<bool> g_espShowLootT1{true};
 std::atomic<bool> g_espShowLootT2{true};
 std::atomic<bool> g_espShowLootT3{true};
@@ -1055,6 +1140,30 @@ std::string read_il2cpp_string(void* str) {
 // ---------------------------------------------------------------------------
 // DictionarySlim lookup (internal)
 // ---------------------------------------------------------------------------
+// Walk EVERY entry in an Entitas dict-slim components dict; return the first
+// non-null value whose vtable pointer matches `targetKlass`. Used to find
+// UserNameComponent on a UserEntity when we don't know the user-context
+// component slot index — the forum answer's step 3 done right (brute-scan
+// on flat entity fields was wrong because components live INSIDE the dict,
+// not as direct fields on the entity).
+static void* dict_slim_find_by_klass(void* dict, void* targetKlass) {
+    if (!is_readable(dict, 0x28) || !targetKlass) return nullptr;
+    void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
+    if (!is_readable(entries_arr, 0x28)) return nullptr;
+    size_t entry_count = *(size_t*)((uintptr_t)entries_arr + 0x18);
+    if (entry_count == 0 || entry_count > 500000) return nullptr;
+    size_t entries_data_size = 0x20 + entry_count * 24;
+    if (!is_readable(entries_arr, entries_data_size)) return nullptr;
+    uint8_t* entries = (uint8_t*)((uintptr_t)entries_arr + 0x20);
+    for (size_t i = 0; i < entry_count; i++) {
+        void* e_val = *(void**)(entries + i * 24 + 8);
+        if (!is_readable(e_val, 0x8)) continue;
+        void* e_klass = *(void**)e_val;
+        if (e_klass == targetKlass) return e_val;
+    }
+    return nullptr;
+}
+
 static void* dict_slim_lookup(void* dict, int key) {
     if (!is_readable(dict, 0x28)) return nullptr;
 
@@ -1260,6 +1369,8 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "AntiCheatNoClipIgnore") == 0)   g_idx_anticheat_noclip_ignore = i;
         else if (strcmp(narrow, "AntiCheatSpeedCapData") == 0)   g_idx_anticheat_speedcap = i;
         else if (strcmp(narrow, "DontDestroyInStorm") == 0)      g_idx_dont_destroy_in_storm = i;
+        else if (strcmp(narrow, "SandStormData") == 0)           g_idx_sandstorm_data = i;
+        else if (strcmp(narrow, "SandStormDestination") == 0)    g_idx_sandstorm_destination = i;
         else if (strcmp(narrow, "ExtractionPointData") == 0)     g_idx_extraction_point = i;
         else if (strcmp(narrow, "FinalExtractionPointData") == 0)g_idx_final_extraction = i;
         else if (strcmp(narrow, "ExtractionBox") == 0)           g_idx_extraction_box = i;
@@ -1361,25 +1472,33 @@ static void seh_apply_turret_single(void* entity, int* found, int* applied,
             }
         }
 
-        // Recoil scaling: checkbox = force-zero, slider = mult (0..1).
-        // When slider is 1.0 AND checkbox is off, skip entirely so the
-        // game's own recoil accumulation runs unmodified — this is what
-        // fixes recoil not restoring after toggling no-recoil off.
+        // Recoil kill: ONLY when checkbox is on. The slider is UI-only for
+        // now (opsec on stream — the presence of the slider makes the
+        // window look like a "settings" panel not a switch). Scaling the
+        // 12 bytes-as-floats branch was corrupting pointer fields in
+        // RecoilLookOffset that IL2CPP interleaves with the float triplet,
+        // and once corrupted, the game followed a garbage pointer → CTD
+        // to desktop, kicking both us and any friend on the same session.
+        // DO NOT re-enable the scaling branch until we've dumped the
+        // component's true field layout — see [recoil-layout] log below.
         bool  norec = g_turretNoRecoil.load();
-        float mult  = g_recoilMult.load();
-        if ((norec || mult < 0.999f) && g_idx_recoil_look >= 0) {
+        if (norec && g_idx_recoil_look >= 0) {
             void* rl = get_component(entity, g_idx_recoil_look);
             if (rl) {
-                if (norec || mult <= 0.001f) {
-                    // Full kill — zero the 12-float vector.
-                    memset((void*)((uintptr_t)rl + 0x10), 0, 48);
-                } else {
-                    // Partial: scale each float. 12 floats = pitch/yaw/roll
-                    // triplets over time. Doing this every tick keeps the
-                    // scaled magnitude bounded even if the game re-accumulates.
-                    float* v = (float*)((uintptr_t)rl + 0x10);
-                    for (int i = 0; i < 12; i++) v[i] *= mult;
+                // One-shot layout dump: first hit gets its bytes logged
+                // so we can RE the actual field types before scaling.
+                static volatile long s_recoilLayoutDumped = 0;
+                if (_InterlockedCompareExchange(&s_recoilLayoutDumped, 1, 0) == 0) {
+                    __try {
+                        uint8_t* p = (uint8_t*)rl;
+                        char hex[300]; int off = 0;
+                        for (int i = 0; i < 64 && off < 280; i++)
+                            off += snprintf(hex + off, sizeof(hex) - off, "%02X ", p[i]);
+                        ringlog::push("[recoil-layout] RecoilLookOffset @%p bytes: %s", rl, hex);
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 }
+                // Original 8/7 memset behavior — worked all week.
+                memset((void*)((uintptr_t)rl + 0x10), 0, 48);
                 g_cachedRecoilEntity.store((uintptr_t)entity);
                 (*applied)++;
             }
@@ -1442,6 +1561,139 @@ void apply_turret_mods() {
     g_dbgHasStationaryAuto.store(cntStationaryAuto);
     g_dbgHasRecoilLook.store(cntRecoilLook);
     g_dbgHasOverheated.store(cntOverheated);
+}
+
+// ---------------------------------------------------------------------------
+// Storm circle scanner
+// ---------------------------------------------------------------------------
+CRITICAL_SECTION g_stormLock;
+static bool g_stormLockInit = false;
+std::vector<StormCircle> g_stormCircles;
+std::atomic<bool> g_espShowStormCircles{true};
+std::atomic<int>  g_stormCirclesFound{0};
+
+void ensure_storm_lock() {
+    if (!g_stormLockInit) { InitializeCriticalSection(&g_stormLock); g_stormLockInit = true; }
+}
+
+// One-shot layout dump: first entity with SandStormDestination gets its
+// component memory dumped so we can confirm stormPosition/stormRadius offsets.
+static volatile long g_stormLayoutDumped = 0;
+
+static void seh_read_storm_component(void* comp, bool isDestination, int phaseIdx,
+                                     std::vector<StormCircle>* out) {
+    __try {
+        if (!is_readable(comp, 0x40)) return;
+        // One-shot layout dump: raw 64-byte hex + guess-decoded fields.
+        if (isDestination && _InterlockedCompareExchange(&g_stormLayoutDumped, 1, 0) == 0) {
+            uint8_t* p = (uint8_t*)comp;
+            char hex[200]; int off = 0;
+            for (int i = 0; i < 64 && off < 180; i++)
+                off += snprintf(hex + off, sizeof(hex) - off, "%02X ", p[i]);
+            ringlog::push("[storm-layout] SandStormDestination @%p bytes: %s", comp, hex);
+            // Guess: +0x10 WorldVector (fx,fy,fz,cx,cy=20B), +0x24 float radius (packed)
+            float* fp = (float*)(p + 0x10);
+            int*   ip = (int*)(p + 0x1C);
+            float radAt24 = *(float*)(p + 0x24);
+            float radAt28 = *(float*)(p + 0x28);
+            ringlog::push("[storm-layout] guess: pos=(%.1f,%.1f,%.1f) chunk=(%d,%d) radAt24=%.1f radAt28=%.1f",
+                fp[0], fp[1], fp[2], ip[0], ip[1], radAt24, radAt28);
+        }
+        // Field extraction — WorldVector at +0x10, radius at +0x24 (packed layout)
+        float fx = *(float*)((uintptr_t)comp + 0x10);
+        float fy = *(float*)((uintptr_t)comp + 0x14);
+        float fz = *(float*)((uintptr_t)comp + 0x18);
+        int   cx = *(int  *)((uintptr_t)comp + 0x1C);
+        int   cy = *(int  *)((uintptr_t)comp + 0x20);
+        float radius = *(float*)((uintptr_t)comp + 0x24);
+        (void)fy;
+        // Sanity clamp — reject nonsense radii
+        if (radius <= 0.0f || radius > 200000.0f) return;
+        // If chunk indices look like 4-byte-later layout (0x18/0x1C ints, radius at 0x28),
+        // fall back and try that too.
+        if (cx < -1000 || cx > 1000 || cy < -1000 || cy > 1000) {
+            // Try 8-byte-aligned layout: WorldVector floats + ints at 0x18..
+            cx = *(int*)((uintptr_t)comp + 0x18);
+            cy = *(int*)((uintptr_t)comp + 0x1C);
+            radius = *(float*)((uintptr_t)comp + 0x20);
+        }
+        const float CHUNK_SIZE = 256.0f;
+        float absX = cx * CHUNK_SIZE + fx;
+        float absZ = cy * CHUNK_SIZE + fz;
+        StormCircle sc;
+        sc.absX = absX; sc.absZ = absZ; sc.radius = radius;
+        sc.phaseIdx = phaseIdx; sc.isDestination = isDestination;
+        out->push_back(sc);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ringlog::push("[seh_read_storm_component] SEH: 0x%08lX", GetExceptionCode());
+    }
+}
+
+static void seh_scan_storm_entity(void* entity, std::vector<StormCircle>* out, int* phaseCounter) {
+    __try {
+        if (!entity) return;
+        if (!*(bool*)((uintptr_t)entity + 0x4C)) return;
+        if (g_idx_sandstorm_destination >= 0) {
+            void* c = get_component(entity, g_idx_sandstorm_destination);
+            if (c) { seh_read_storm_component(c, true, (*phaseCounter)++, out); }
+        }
+        if (g_idx_sandstorm_data >= 0) {
+            void* c = get_component(entity, g_idx_sandstorm_data);
+            if (c) { seh_read_storm_component(c, false, (*phaseCounter)++, out); }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ringlog::push("[seh_scan_storm_entity] SEH: 0x%08lX", GetExceptionCode());
+    }
+}
+
+void scan_storm_entities(void* gameContextModule) {
+    ensure_storm_lock();
+    if (!gameContextModule) return;
+    if (g_idx_sandstorm_data < 0 && g_idx_sandstorm_destination < 0) return;
+
+    void* context = nullptr;
+    if (!safe_read_ptr((void*)((uintptr_t)gameContextModule + 0x10), &context)) return;
+    if (!is_readable(context, 0xA0)) return;
+
+    void** entityPtrs = nullptr;
+    int entityCount = 0;
+    static std::vector<void*> stormTempEntities;
+
+    void* cache = *(void**)((uintptr_t)context + 0x98);
+    if (is_readable(cache, 0x20)) {
+        entityCount = (int)*(size_t*)((uintptr_t)cache + 0x18);
+        entityPtrs = (void**)((uintptr_t)cache + 0x20);
+    } else {
+        void* hashSet = *(void**)((uintptr_t)context + 0x58);
+        if (!is_readable(hashSet, 0x30)) return;
+        void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
+        int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
+        if (!slots_arr || lastIndex <= 0) return;
+        size_t slots_len = *(size_t*)((uintptr_t)slots_arr + 0x18);
+        uint8_t* slots = (uint8_t*)((uintptr_t)slots_arr + 0x20);
+        stormTempEntities.clear();
+        int limit = (lastIndex < (int)slots_len) ? lastIndex : (int)slots_len;
+        for (int s = 0; s < limit; s++) {
+            int hc = *(int*)(slots + s * 16);
+            if (hc < 0) continue;
+            void* ent = *(void**)(slots + s * 16 + 8);
+            if (ent) stormTempEntities.push_back(ent);
+        }
+        entityPtrs = stormTempEntities.data();
+        entityCount = (int)stormTempEntities.size();
+    }
+
+    std::vector<StormCircle> local;
+    local.reserve(4);
+    int phaseCounter = 0;
+    for (int i = 0; i < entityCount; i++) {
+        seh_scan_storm_entity(entityPtrs[i], &local, &phaseCounter);
+    }
+
+    EnterCriticalSection(&g_stormLock);
+    g_stormCircles.swap(local);
+    LeaveCriticalSection(&g_stormLock);
+    g_stormCirclesFound.store((int)g_stormCircles.size());
 }
 
 static void seh_apply_weapon_single(void* entity, bool noDrop, bool noBloom, float velMult) {
@@ -2006,6 +2258,17 @@ static void process_one_entity(
     }
     info.hasBones = false;
     info.isCreature = false;
+    info.healthNorm = -1.0f;
+    // Health readout: HealthNormalizedComponent stores a float 0..1 at +0x10
+    // per the forum answer. Not every entity has it — items, static props,
+    // etc will just show as unknown (label omits the HP tag).
+    if (g_idx_health_normalized >= 0) {
+        void* hc = get_component(entity, g_idx_health_normalized);
+        if (is_readable(hc, 0x14)) {
+            float h = *(float*)((uintptr_t)hc + 0x10);
+            if (h >= 0.0f && h <= 1.5f) info.healthNorm = h;
+        }
+    }
     info.lootTier = 0;
     info.isWeapon = false;
     if (g_idx_item_type >= 0) {
@@ -2383,10 +2646,36 @@ static void process_one_entity(
             info.lootTier = 2;
         else if (name.find("_t1_") != std::string::npos || name.find("_T1_") != std::string::npos)
             info.lootTier = 1;
-        if (name.rfind("Mob", 0) == 0 || name.rfind("mob_", 0) == 0
-            || name.rfind("Ai", 0) == 0 || name.rfind("Sentinel", 0) == 0
-            || name.rfind("Trampler", 0) == 0) {
+        // Creature detection: PREFER component presence over name matching.
+        // The old name-prefix filter (case-sensitive "Mob"/"Sentinel"/etc)
+        // missed real blueprint names like "ghoul", "sentinel" (lowercase),
+        // "mob2bxd" (no underscore) → isCreature=false → bone resolver
+        // never ran → ESP skeleton draw silent for every mob. Aimbot still
+        // worked because it targets entity center, not bones.
+        bool hasMobComp =
+            (g_idx_mob_state    >= 0 && get_component(entity, g_idx_mob_state))    ||
+            (g_idx_mob_ghoul    >= 0 && get_component(entity, g_idx_mob_ghoul))    ||
+            (g_idx_mob_ls       >= 0 && get_component(entity, g_idx_mob_ls))       ||
+            (g_idx_mob_ls_jr    >= 0 && get_component(entity, g_idx_mob_ls_jr))    ||
+            (g_idx_ai_agent     >= 0 && get_component(entity, g_idx_ai_agent));
+        if (hasMobComp) {
             info.isCreature = true;
+        } else {
+            // Name fallback — case-insensitive, substring match on common
+            // creature tokens. Belt + suspenders for anything without
+            // component data (rare, but keep drawing over guessing wrong).
+            std::string lower = name;
+            for (auto& c : lower) if (c >= 'A' && c <= 'Z') c = c + 32;
+            if (lower.find("ghoul")     != std::string::npos ||
+                lower.find("mob")       != std::string::npos ||
+                lower.find("sentinel")  != std::string::npos ||
+                lower.find("trampler")  != std::string::npos ||
+                lower.find("uprior")    != std::string::npos ||
+                lower.find("creature")  != std::string::npos ||
+                lower.find("npc")       != std::string::npos ||
+                lower.rfind("ai_", 0)   == 0) {
+                info.isCreature = true;
+            }
         }
     }
 
@@ -3779,25 +4068,51 @@ static bool seh_resolve_username_via_usercontext(void* entity, char* outBuf, int
         }
         void* userEnt = g_getUserEntityByAcctId(g_userContextModuleInstance, aid, nullptr);
         g_vehInnerActive = false;
-        if (!is_readable(userEnt, 0x100)) return false;
+        if (!is_readable(userEnt, 0x58)) return false;
 
-        int nameOff = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
-        for (int off = 0x08; off <= 0xF8; off += 0x08) {
-            void* p = *(void**)((uintptr_t)userEnt + off);
-            if (!is_readable(p, 0x18)) continue;
-            void* klass = *(void**)p;
-            if (klass != g_userNameKlass) continue;
-            void* np = *(void**)((uintptr_t)p + nameOff);
-            if (!is_readable(np, 0x14)) continue;
-            int len = *(int*)((uintptr_t)np + 0x10);
-            if (len <= 0 || len >= bufSize) continue;
-            wchar_t* wchars = (wchar_t*)((uintptr_t)np + 0x14);
-            if (!is_readable(wchars, len * 2)) continue;
-            for (int c = 0; c < len; c++) outBuf[c] = (char)wchars[c];
-            outBuf[len] = 0;
-            return true;
+        // STEP 3 done right (per forum answer): walk the entity's component
+        // dict, don't brute-scan flat entity fields. Entitas stores components
+        // in a Dictionary at entity+0x50, not as inline entity fields.
+        void* dict = *(void**)((uintptr_t)userEnt + 0x50);
+        void* nameComp = dict_slim_find_by_klass(dict, g_userNameKlass);
+        if (!nameComp) {
+            // One-shot diagnostic dump so we can see what klasses ARE in
+            // the user entity's dict, if UserName's klass didn't match.
+            static volatile long s_userDictDumped = 0;
+            if (_InterlockedCompareExchange(&s_userDictDumped, 1, 0) == 0) {
+                __try {
+                    if (is_readable(dict, 0x28)) {
+                        void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
+                        if (is_readable(entries_arr, 0x28)) {
+                            size_t ec = *(size_t*)((uintptr_t)entries_arr + 0x18);
+                            ringlog::push("[username-dict] aid=%llu userEnt=%p dict=%p entries=%zu targetKlass=%p — no match",
+                                (unsigned long long)aid, userEnt, dict, ec, g_userNameKlass);
+                            uint8_t* entries = (uint8_t*)((uintptr_t)entries_arr + 0x20);
+                            for (size_t i = 0; i < ec && i < 40; i++) {
+                                int key = *(int*)(entries + i * 24 + 4);
+                                void* val = *(void**)(entries + i * 24 + 8);
+                                void* klass = (is_readable(val, 0x8)) ? *(void**)val : nullptr;
+                                ringlog::push("[username-dict]   slot=%d val=%p klass=%p", key, val, klass);
+                            }
+                        }
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            }
+            return false;
         }
-        return false;
+        // STEP 4 + 5: name field at component+g_userNameFieldOffset (default
+        // 0x10 if IL2CPP FieldInfo resolution failed); reads a System.String
+        // whose length is at +0x10 and utf-16 chars at +0x14.
+        int nameOff = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
+        void* np = *(void**)((uintptr_t)nameComp + nameOff);
+        if (!is_readable(np, 0x14)) return false;
+        int len = *(int*)((uintptr_t)np + 0x10);
+        if (len <= 0 || len >= bufSize) return false;
+        wchar_t* wchars = (wchar_t*)((uintptr_t)np + 0x14);
+        if (!is_readable(wchars, len * 2)) return false;
+        for (int c = 0; c < len; c++) outBuf[c] = (char)wchars[c];
+        outBuf[len] = 0;
+        return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         g_vehInnerActive = false;
         g_workerVehActive = true;

@@ -119,6 +119,7 @@ struct ItemInfo {
     bool isFinalExtract; // has FinalExtractionPointData
     int  parentEntityId; // immediate parent id (0 if none)
     bool isInOthersInv;  // parent chain ends at a non-us entity — potential remote-inv target
+    float healthNorm;    // 0..1 normalized health from HealthNormalizedComponent+0x10; -1 = unknown
 };
 
 struct Hook {
@@ -256,7 +257,15 @@ extern Hook g_executeHook;
 extern fn_execute g_original_execute;
 extern Hook g_farHook;
 extern Hook g_publishHook;
+extern Hook g_sendMoveSlotHook;
+extern Hook g_sendSplitSlotHook;
+extern Hook g_sendEquipHook;
+extern Hook g_sendDropHook;
 extern void* g_holoPublishAddr;
+extern void* g_sendMoveSlotAddr;
+extern void* g_sendSplitSlotAddr;
+extern void* g_sendEquipAddr;
+extern void* g_sendDropAddr;
 extern void* g_holoMessengerInstance;
 extern std::atomic<bool> g_captureMessages;
 extern std::atomic<bool> g_dupeLabRecording;
@@ -269,6 +278,9 @@ extern std::atomic<int>  g_hotkeyDupeMaster;
 extern std::atomic<int>  g_hotkeyPlaybackFirst;
 extern std::atomic<int>  g_hotkeyCaptureRequest;
 extern std::atomic<int>  g_actionDelaySec;
+extern std::atomic<int>  g_hotkeyRecordToggle;
+void dupelab_arm_record(const char* name);
+void dupelab_record_hotkey_toggle();
 extern std::atomic<int>  g_pendingActionId;
 extern std::atomic<unsigned long long> g_pendingActionDeadline;
 extern std::atomic<unsigned long long> g_lastPresentTick;  // updated by game render thread in hooked_present
@@ -286,6 +298,10 @@ void dupelab_dispatch_drop_slot(int slotId);
 void dupelab_dispatch_split(int fromSlot, int fromParent, int toSlot, int toParent, int count);
 void dupelab_dispatch_move(int fromSlot, int fromParent, int toSlot, int toParent);
 void __fastcall hooked_publish(void* thisPtr, void* msg);
+void __fastcall hooked_send_move_slot(void* thisPtr, uint8_t fromSlot, int32_t fromParent, uint8_t toSlot, int32_t toParent, uint64_t timestamp);
+void __fastcall hooked_send_split_slot(void* thisPtr, uint8_t fromSlot, int32_t fromParent, uint8_t toSlot, int32_t toParent, uint16_t count, uint64_t timestamp);
+void __fastcall hooked_send_equip(void* thisPtr, uint8_t slotId, uint64_t timestamp);
+void __fastcall hooked_send_drop(void* thisPtr, int32_t entityId, uint8_t slotId, uint64_t timestamp, uint16_t count);
 void dupelab_record_start(const std::string& name);
 void dupelab_record_stop();
 size_t dupelab_recording_count(const std::string& name);
@@ -334,6 +350,8 @@ extern fn_get_child g_getChild;
 extern fn_get_name g_getName;
 extern void* g_animatorType;
 extern std::atomic<bool> g_espShowSkeleton;
+extern std::atomic<bool> g_espShowBox;
+extern std::atomic<bool> g_espShowHealth;
 extern std::atomic<bool> g_espShowLootT1;
 extern std::atomic<bool> g_espShowLootT2;
 extern std::atomic<bool> g_espShowLootT3;
@@ -441,6 +459,21 @@ extern int g_idx_anticheat;
 extern int g_idx_anticheat_noclip_ignore;
 extern int g_idx_anticheat_speedcap;
 extern int g_idx_dont_destroy_in_storm;
+extern int g_idx_sandstorm_data;
+extern int g_idx_sandstorm_destination;
+extern std::atomic<float> g_radarRotationOffsetDeg;
+
+// Storm circle snapshot — populated by scan, read by radar draw.
+// Up to 8 storm circles (current + future phases). Positions are ABSOLUTE
+// world (chunk-adjusted). Radius in world units. Access under g_stormLock.
+struct StormCircle { float absX, absZ, radius; int phaseIdx; bool isDestination; };
+extern CRITICAL_SECTION g_stormLock;
+extern std::vector<StormCircle> g_stormCircles;
+extern std::atomic<bool> g_espShowStormCircles;
+extern std::atomic<int>  g_stormCirclesFound;
+void ensure_storm_lock();
+void scan_storm_entities(void* gameContextModule);
+
 extern int g_idx_extraction_point;
 extern int g_idx_final_extraction;
 extern int g_idx_extraction_box;

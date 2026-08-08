@@ -506,6 +506,11 @@ static void safe_scan_tick(int scanCounter) {
             wlog("[worker] SEH in apply_world_mods: 0x%08lX\n", GetExceptionCode());
             g_todInstance = 0;  // dead — never try again this session
         }
+        // Storm circle scan — read-only, no writes; every 5th scan is fine.
+        __try { scan_storm_entities((void*)g_gameContextModule); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            wlog("[worker] SEH in scan_storm_entities: 0x%08lX\n", GetExceptionCode());
+        }
         g_workerVehActive = prev;
     }
 
@@ -1940,6 +1945,63 @@ static DWORD WINAPI worker_thread(LPVOID) {
             wlog("[worker] HoloMessengerModule klass NOT found in any assembly\n");
         }
     }
+
+    // Hook ClientNetworkControllerModule.Send* extension methods — these
+    // are the actual outbound network senders for inventory operations
+    // (MoveSlot / SplitSlot / Equip / Drop). place-on-shelf uses SendMoveSlot,
+    // NOT HoloMessengerModule.Publish, which is why recording missed it.
+    if (api.il2cpp_class_from_name && api.il2cpp_class_get_methods && api.il2cpp_method_get_name) {
+        void* extKlass = nullptr;
+        size_t asmCountS = 0;
+        void** assembliesS = api.il2cpp_domain_get_assemblies(api.il2cpp_domain_get(), &asmCountS);
+        // Search all assemblies for a class containing our target methods
+        for (size_t i = 0; i < asmCountS && !extKlass; i++) {
+            void* img = api.il2cpp_assembly_get_image(assembliesS[i]);
+            if (!img) continue;
+            size_t classCount = api.il2cpp_image_get_class_count(img);
+            for (size_t j = 0; j < classCount; j++) {
+                void* klass = api.il2cpp_image_get_class(img, j);
+                if (!klass) continue;
+                const char* cn = api.il2cpp_class_get_name(klass);
+                if (!cn) continue;
+                // Extension-method containers typically end in "Extensions"
+                if (!strstr(cn, "Extensions")) continue;
+                // Peek methods for SendMoveSlot
+                void* mIter = nullptr;
+                void* method;
+                bool has = false;
+                while ((method = api.il2cpp_class_get_methods(klass, &mIter)) != nullptr) {
+                    const char* mn = api.il2cpp_method_get_name(method);
+                    if (mn && strcmp(mn, "SendMoveSlot") == 0) { has = true; break; }
+                }
+                if (has) { extKlass = klass; break; }
+            }
+        }
+        if (extKlass) {
+            const char* ns2 = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(extKlass) : "";
+            const char* cn2 = api.il2cpp_class_get_name(extKlass);
+            wlog("[worker] found network Extensions klass: %s.%s\n", ns2 ? ns2 : "", cn2 ? cn2 : "?");
+            void* mIter = nullptr;
+            void* method;
+            while ((method = api.il2cpp_class_get_methods(extKlass, &mIter)) != nullptr) {
+                const char* mn = api.il2cpp_method_get_name(method);
+                if (!mn) continue;
+                void* addr = *(void**)method;
+                if      (strcmp(mn, "SendMoveSlot")  == 0) g_sendMoveSlotAddr  = addr;
+                else if (strcmp(mn, "SendSplitSlot") == 0) g_sendSplitSlotAddr = addr;
+                else if (strcmp(mn, "SendEquip")     == 0) g_sendEquipAddr     = addr;
+                else if (strcmp(mn, "SendDrop")      == 0) g_sendDropAddr      = addr;
+            }
+            wlog("[worker] Send addresses: Move=%p Split=%p Equip=%p Drop=%p\n",
+                 g_sendMoveSlotAddr, g_sendSplitSlotAddr, g_sendEquipAddr, g_sendDropAddr);
+            if (g_sendMoveSlotAddr)  install_hook(g_sendMoveSlotHook,  g_sendMoveSlotAddr,  (void*)hooked_send_move_slot);
+            if (g_sendSplitSlotAddr) install_hook(g_sendSplitSlotHook, g_sendSplitSlotAddr, (void*)hooked_send_split_slot);
+            if (g_sendEquipAddr)     install_hook(g_sendEquipHook,     g_sendEquipAddr,     (void*)hooked_send_equip);
+            if (g_sendDropAddr)      install_hook(g_sendDropHook,      g_sendDropAddr,      (void*)hooked_send_drop);
+        } else {
+            wlog("[worker] network Extensions klass NOT found (place-on-shelf recording will still miss)\n");
+        }
+    }
     {
         int scanCounter = 0;
         while (g_running.load()) {
@@ -2005,6 +2067,17 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
             // Fire any scheduled Dupe Lab action whose countdown expired.
             dupelab_check_pending();
+            // Record toggle hotkey (default Del) — arm-then-key model.
+            // Arm a name via UI button, press hotkey to start capture,
+            // press again to stop. No menu-open Esc noise polluting.
+            {
+                static bool s_recHotkeyDown = false;
+                bool nowDown = (GetAsyncKeyState(g_hotkeyRecordToggle.load()) & 0x8000) != 0;
+                if (nowDown && !s_recHotkeyDown) {
+                    dupelab_record_hotkey_toggle();
+                }
+                s_recHotkeyDown = nowDown;
+            }
             // Hotkey rebind capture — UI sets g_hotkeyCaptureRequest to a
             // feature id when user clicks "Bind". Worker watches for next
             // key press and assigns it to the requested feature.
