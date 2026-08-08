@@ -95,6 +95,14 @@ int g_idx_inventory_item_count = -1;     // InventoryItemCount (222)
 int g_idx_inventory_item_slot_index = -1;// InventoryItemSlotIndex (224)
 int g_idx_recently_updated_slot = -1;    // RecentlyUpdatedInventorySlot (345)
 int g_idx_reactor_slot = -1;             // ReactorSlot (340)
+std::atomic<bool> g_autoRelockDupe{true};// re-lock same item name when it re-appears
+std::string g_lastDupedName;             // remembered across relocks
+CRITICAL_SECTION g_lastDupedNameCS;
+static bool g_lastDupedNameInit = false;
+void ensure_last_duped_name_cs() {
+    if (!g_lastDupedNameInit) { InitializeCriticalSection(&g_lastDupedNameCS); g_lastDupedNameInit = true; }
+}
+std::atomic<bool> g_dupeSuspended{false};   // F9 hotkey toggles this
 
 // ---------------------------------------------------------------------------
 // Steam API cache — GetFriendPersonaName resolves a SteamID64 to the real
@@ -2836,6 +2844,46 @@ void scan_entities() {
                     }
                 }
                 LeaveCriticalSection(&g_itemsLock);
+            }
+        }
+
+        // Dupe auto-relock: when in dupe mode and our locked entity ptr
+        // has gone stale (item disappeared from the list mid-cycle then
+        // reappeared with a new entityId/serverId), find any item whose
+        // name matches g_lastDupedName and re-lock it. That's what LO does
+        // manually — waits half a sec, item comes back to top, re-clicks.
+        // Now automatic.
+        if (g_dupeMode.load() && g_autoRelockDupe.load() && g_permaLockActive.load()) {
+            uintptr_t curPtr = g_lockedEntityPtr.load();
+            bool needRelock = (curPtr == 0);
+            // Also relock if the stored ptr is stale (not present in items)
+            if (!needRelock) {
+                bool stillPresent = false;
+                EnterCriticalSection(&g_itemsLock);
+                for (auto& it : g_items) {
+                    if ((uintptr_t)it.entityPtr == curPtr) { stillPresent = true; break; }
+                }
+                LeaveCriticalSection(&g_itemsLock);
+                if (!stillPresent) needRelock = true;
+            }
+            if (needRelock) {
+                std::string wantName;
+                ensure_last_duped_name_cs();
+                EnterCriticalSection(&g_lastDupedNameCS);
+                wantName = g_lastDupedName;
+                LeaveCriticalSection(&g_lastDupedNameCS);
+                if (!wantName.empty()) {
+                    EnterCriticalSection(&g_itemsLock);
+                    for (auto& it : g_items) {
+                        if (it.name == wantName) {
+                            int lockId = (it.serverId > 0) ? it.serverId : it.entityId;
+                            g_lockedEntityId.store(lockId);
+                            g_lockedEntityPtr.store((uintptr_t)it.entityPtr);
+                            break;
+                        }
+                    }
+                    LeaveCriticalSection(&g_itemsLock);
+                }
             }
         }
     }

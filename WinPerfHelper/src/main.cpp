@@ -1964,6 +1964,73 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 wlog("[worker] HARD KILL requested — TerminateProcess\n");
                 TerminateProcess(GetCurrentProcess(), 0);
             }
+            // F9 = toggle dupe-suspend. Pauses all dupe auto-actions so LO
+            // can interact with the world normally, hit again to resume.
+            // Debounced so one press = one toggle.
+            {
+                static bool s_f9WasDown = false;
+                bool nowDown = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+                if (nowDown && !s_f9WasDown) {
+                    bool newState = !g_dupeSuspended.load();
+                    g_dupeSuspended.store(newState);
+                    wlog("[worker] F9 dupe-suspend toggled -> %s\n", newState ? "SUSPENDED" : "ACTIVE");
+                }
+                s_f9WasDown = nowDown;
+            }
+            // F10 = master dupe kill / restore — turns off ALL dupe-related
+            // state so LO gets full world-interact back (auto-reequip,
+            // dupeMode, heavyBypass, heavyFix2, permaLock, stickyLock).
+            // Hit again to restore EVERYTHING to what was on before.
+            {
+                static bool s_f10WasDown = false;
+                static bool s_savedAutoRe = false;
+                static bool s_savedDupe = false;
+                static bool s_savedHeavy1 = false;
+                static bool s_savedHeavy2 = false;
+                static bool s_savedPerma = false;
+                static bool s_savedSticky = false;
+                static int  s_savedLockedId = -1;
+                static uintptr_t s_savedLockedPtr = 0;
+                static bool s_dupeAllOff = false;
+                bool nowDown = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+                if (nowDown && !s_f10WasDown) {
+                    if (!s_dupeAllOff) {
+                        // Snapshot ALL dupe/lock state
+                        s_savedAutoRe    = g_autoReequip.load();
+                        s_savedDupe      = g_dupeMode.load();
+                        s_savedHeavy1    = g_heavyBypass.load();
+                        s_savedHeavy2    = g_heavyFix2.load();
+                        s_savedPerma     = g_permaLockActive.load();
+                        s_savedSticky    = g_stickyLock.load();
+                        s_savedLockedId  = g_lockedEntityId.load();
+                        s_savedLockedPtr = g_lockedEntityPtr.load();
+                        // Kill everything → full world interact returns
+                        g_autoReequip.store(false);
+                        g_dupeMode.store(false);
+                        g_heavyBypass.store(false);
+                        g_heavyFix2.store(false);
+                        g_permaLockActive.store(false);
+                        g_stickyLock.store(false);
+                        g_lockedEntityId.store(-1);
+                        g_lockedEntityPtr.store(0);
+                        s_dupeAllOff = true;
+                        wlog("[worker] F10 DUPE-ALL OFF (world interact restored)\n");
+                    } else {
+                        // Full restore — back to whatever we were doing
+                        g_autoReequip.store(s_savedAutoRe);
+                        g_dupeMode.store(s_savedDupe);
+                        g_heavyBypass.store(s_savedHeavy1);
+                        g_heavyFix2.store(s_savedHeavy2);
+                        g_permaLockActive.store(s_savedPerma);
+                        g_stickyLock.store(s_savedSticky);
+                        g_lockedEntityId.store(s_savedLockedId);
+                        g_lockedEntityPtr.store(s_savedLockedPtr);
+                        s_dupeAllOff = false;
+                        wlog("[worker] F10 DUPE-ALL RESTORED\n");
+                    }
+                }
+                s_f10WasDown = nowDown;
+            }
             // Jittered scan cadence — [80, 160)ms per iteration so the
             // syscall rhythm never lines up as a clean sine wave for AC
             // pattern matchers watching over minutes.

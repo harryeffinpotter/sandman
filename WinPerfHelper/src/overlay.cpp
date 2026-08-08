@@ -2,6 +2,7 @@
 #include "win.h"
 #include "debug_log.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include <d3d11.h>
@@ -242,6 +243,10 @@ static void send_scroll(int wheelDelta) {
 
 static void auto_reequip_tick() {
     if (!g_autoReequip.load() || !g_dupeMode.load()) return;
+    // Suspend hotkey (F9) — temporarily pauses re-equip so LO can interact
+    // with the world normally without losing the locked item. Toggle again
+    // to resume.
+    if (g_dupeSuspended.load()) return;
     // Only fire when the game window is foreground so we don't spam keys
     // into other apps if LO Alt-Tabs.
     if (GetForegroundWindow() != g_gameHwnd) return;
@@ -1480,6 +1485,12 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(dupe non-weapons w/o manual swap)");
                     if (are) {
                         ImGui::Indent();
+                        {
+                            bool ar = g_autoRelockDupe.load();
+                            if (ImGui::Checkbox("Auto-relock same item when it reappears (top-of-list)", &ar))
+                                g_autoRelockDupe.store(ar);
+                            ImGui::TextDisabled("Remembers last-locked item name. When it disappears + reappears mid-dupe-cycle, re-locks automatically. No need to click again.");
+                        }
                         // Always-visible: how long between full rounds
                         ImGui::SliderInt("Time between rounds (ms)", &g_reequipRoundPauseMs, 100, 5000, "%d ms");
                         // Double-pump: 2 quick re-equips per round instead of 1
@@ -1706,6 +1717,19 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                                 int lockId = (item.serverId > 0) ? item.serverId : item.entityId;
                                 g_lockedEntityId.store(lockId);
                                 g_lockedEntityPtr.store((uintptr_t)item.entityPtr);
+                                // Remember for auto-relock: when this item name
+                                // re-appears in items after dupe cycles, we
+                                // auto-relock without needing another click.
+                                ensure_last_duped_name_cs();
+                                EnterCriticalSection(&g_lastDupedNameCS);
+                                g_lastDupedName = item.name;
+                                LeaveCriticalSection(&g_lastDupedNameCS);
+                                // Kill focus on ANY currently-focused text input
+                                // (e.g. the Search box) so subsequent keystrokes
+                                // don't get typed into it. Was LO's #1 UI gripe.
+                                ImGui::SetWindowFocus(nullptr);
+                                ImGuiContext& gc = *ImGui::GetCurrentContext();
+                                if (gc.ActiveId != 0) ImGui::ClearActiveID();
                                 // NOTE: don't auto-disable g_dupeMode here — it
                                 // would kill the auto-scroll-reequip since that
                                 // gates on (autoReequip && dupeMode). Let LO
