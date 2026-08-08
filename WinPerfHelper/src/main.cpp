@@ -514,6 +514,12 @@ static void safe_scan_tick(int scanCounter) {
         g_workerVehActive = prev;
     }
 
+    // Noclip: run every worker iteration (NOT gated by %5) for smoother motion.
+    __try { apply_noclip_step(); }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[worker] SEH in apply_noclip_step: 0x%08lX\n", GetExceptionCode());
+    }
+
     if (g_dumpEntities.load()) {
         __try { dump_entities_to_file(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
@@ -2134,6 +2140,18 @@ static DWORD WINAPI worker_thread(LPVOID) {
                     wlog("[worker] F9 dupe-suspend toggled -> %s\n", newState ? "SUSPENDED" : "ACTIVE");
                 }
                 s_f9WasDown = nowDown;
+            }
+            // Noclip toggle-key: edge-detect and flip g_noClipActive.
+            {
+                static bool s_noclipWasDown = false;
+                int tkey = g_hotkeyNoClipToggle.load();
+                bool nowDown = (tkey != 0) && ((GetAsyncKeyState(tkey) & 0x8000) != 0);
+                if (nowDown && !s_noclipWasDown) {
+                    bool newState = !g_noClipActive.load();
+                    g_noClipActive.store(newState);
+                    wlog("[worker] noclip toggled -> %s\n", newState ? "ACTIVE" : "off");
+                }
+                s_noclipWasDown = nowDown;
             }
             // F10 = master dupe kill / restore — turns off ALL dupe-related
             // state so LO gets full world-interact back (auto-reequip,

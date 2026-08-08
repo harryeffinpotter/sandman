@@ -120,6 +120,7 @@ struct ItemInfo {
     int  parentEntityId; // immediate parent id (0 if none)
     bool isInOthersInv;  // parent chain ends at a non-us entity — potential remote-inv target
     float healthNorm;    // 0..1 normalized health from HealthNormalizedComponent+0x10; -1 = unknown
+    bool  isAlly;        // reactor/walker parent chain resolves to our player entity
 };
 
 struct Hook {
@@ -395,6 +396,7 @@ struct AimbotProfile {
     bool centerPullRandomize = false;
     float centerPullRandomAmt = 0.1f;
     float smooth = 5.0f;
+    int   targetBoneId = 0;   // BoneId enum 0..21 (0=Head). Overrides "head" attractor.
 
     float rt_magOff = 0; DWORD rt_magT = 0;
     float rt_bwOff = 0; DWORD rt_bwT = 0;
@@ -411,9 +413,24 @@ extern float g_aimbotMaxDist;
 extern std::atomic<bool> g_aimbotDrawFOV;
 extern std::atomic<bool> g_aimbotTargetPlayers;
 extern std::atomic<bool> g_aimbotTargetMobs;
+extern std::atomic<bool> g_aimbotTargetReactors;
+extern std::atomic<bool> g_aimbotReactorPriority;
 extern int g_aimbotActivationKey;
 extern AimbotProfile g_aimPlayer;
 extern AimbotProfile g_aimMob;
+
+// Noclip
+extern std::atomic<bool>  g_noClipEnabled;
+extern std::atomic<bool>  g_noClipActive;
+extern std::atomic<float> g_noClipSpeed;
+extern std::atomic<int>   g_hotkeyNoClipHold;
+extern std::atomic<int>   g_hotkeyNoClipToggle;
+extern std::atomic<uintptr_t> g_playerEntityPtr;
+void apply_noclip_step();
+
+// Custom per-item ESP colors
+#include <unordered_map>
+extern std::unordered_map<std::string, uint32_t> g_customEspColors;
 extern bool g_mobAimbotSame;
 
 // ---------------------------------------------------------------------------

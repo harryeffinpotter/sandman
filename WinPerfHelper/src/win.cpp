@@ -877,10 +877,23 @@ float g_aimbotMaxDist = 500.0f;
 std::atomic<bool> g_aimbotDrawFOV{true};
 std::atomic<bool> g_aimbotTargetPlayers{true};
 std::atomic<bool> g_aimbotTargetMobs{false};
+std::atomic<bool> g_aimbotTargetReactors{false};   // include enemy reactors in candidate pool
+std::atomic<bool> g_aimbotReactorPriority{false};  // reactors preempt players/mobs when in FOV
 int g_aimbotActivationKey = VK_XBUTTON2;
 AimbotProfile g_aimPlayer;
 AimbotProfile g_aimMob;
 bool g_mobAimbotSame = true;
+
+// Noclip — Position writes at every worker iteration. Cap at 30m/s hard.
+std::atomic<bool>  g_noClipEnabled{false};       // UI master
+std::atomic<bool>  g_noClipActive{false};        // set true when key held/toggled
+std::atomic<float> g_noClipSpeed{10.0f};         // m/s
+std::atomic<int>   g_hotkeyNoClipHold{VK_RBUTTON};    // hold-key (0 = disabled)
+std::atomic<int>   g_hotkeyNoClipToggle{0};      // toggle-key rising edge (0 = disabled)
+std::atomic<uintptr_t> g_playerEntityPtr{0};     // cached alongside g_playerEntityId for per-frame noclip
+
+// Custom per-item ESP colors (name -> IM_COL32). Render-thread only.
+std::unordered_map<std::string, uint32_t> g_customEspColors;
 
 static bool g_keyStates[256] = {};
 
@@ -1564,6 +1577,48 @@ void apply_turret_mods() {
 }
 
 // ---------------------------------------------------------------------------
+// Noclip — writes PositionComponent+0x10 (WorldVector) each worker tick.
+// KCC re-runs on snapshot so release = normal physics resumes automatically.
+// Hard-cap the per-frame delta so we can't blast past AntiCheatSpeedCap.
+// ---------------------------------------------------------------------------
+static DWORD g_noclipLastTick = 0;
+void apply_noclip_step() {
+    if (!g_noClipEnabled.load()) return;
+    // Activation: hold-key OR toggle-key latched by main loop into g_noClipActive.
+    int holdKey = g_hotkeyNoClipHold.load();
+    bool holding = (holdKey != 0) && (GetAsyncKeyState(holdKey) & 0x8000);
+    bool toggled = g_noClipActive.load();
+    if (!holding && !toggled) { g_noclipLastTick = 0; return; }
+
+    uintptr_t pe = g_playerEntityPtr.load();
+    if (!pe) return;
+    __try {
+        if (!is_readable((void*)pe, 0x68)) return;
+        if (g_idx_position < 0) return;
+        void* pos = get_component((void*)pe, g_idx_position);
+        if (!is_readable(pos, 0x30)) return;
+
+        WorldVector v = *(WorldVector*)((uintptr_t)pos + 0x10);
+        DWORD now = GetTickCount();
+        DWORD last = g_noclipLastTick;
+        float dt = last == 0 ? 0.016f : (now - last) / 1000.0f;
+        if (dt > 0.1f) dt = 0.1f;   // clamp so stalls don't teleport
+        g_noclipLastTick = now;
+
+        float speed = g_noClipSpeed.load();
+        if (speed > 30.0f) speed = 30.0f;   // hard cap under AntiCheatSpeedCap
+        float step = speed * dt;
+
+        if (GetAsyncKeyState('W') & 0x8000) v.y += step;
+        if (GetAsyncKeyState('S') & 0x8000) v.y -= step;
+
+        *(WorldVector*)((uintptr_t)pos + 0x10) = v;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ringlog::push("[apply_noclip_step] SEH: 0x%08lX", GetExceptionCode());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Storm circle scanner
 // ---------------------------------------------------------------------------
 CRITICAL_SECTION g_stormLock;
@@ -2226,7 +2281,11 @@ static void process_one_entity(
     if (name.rfind("Ground", 0) == 0) return;
     if (name.rfind("prop_", 0) == 0) return;
     if (name.rfind("cde_", 0) == 0) return;
-    if (name.rfind("walker_", 0) == 0) return;
+    // Reactor entities carry walker_ prefixes but ARE targetable weak points.
+    // Spare them from the general walker_ drop so reactor ESP + aimbot work.
+    if (name.rfind("walker_", 0) == 0
+        && name.rfind("walker_reactor", 0) != 0
+        && name.rfind("walker_compReactor", 0) != 0) return;
     if (name == "Sun") return;
     if (name.rfind("LandingCutScene", 0) == 0) return;
     if (name.rfind("Shot Projectile", 0) == 0) return;
@@ -2259,6 +2318,7 @@ static void process_one_entity(
     info.hasBones = false;
     info.isCreature = false;
     info.healthNorm = -1.0f;
+    info.isAlly = false;   // set below if parent chain resolves to player entity
     // Health readout: HealthNormalizedComponent stores a float 0..1 at +0x10
     // per the forum answer. Not every entity has it — items, static props,
     // etc will just show as unknown (label omits the HP tag).
@@ -2604,6 +2664,7 @@ static void process_one_entity(
             }
         }
 
+        if (ownerAvatar && ownerEid == playerEntityId) info.isAlly = true;
         if (!ownerAvatar) {
             info.displayName = "Enemy Trampler";
         } else if (ownerEid == playerEntityId) {
@@ -3222,6 +3283,7 @@ void scan_entities() {
                         if (is_readable(pe, 0x68)) {
                             playerEntityId = *(int*)((uintptr_t)pe + 0x48);
                             g_playerEntityId.store(playerEntityId);
+                            g_playerEntityPtr.store((uintptr_t)pe);
                             void* posComp = get_component(pe, g_idx_position);
                             if (is_readable(posComp, 0x30)) {
                                 playerPos = *(WorldVector*)((uintptr_t)posComp + 0x10);

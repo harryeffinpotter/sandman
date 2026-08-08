@@ -417,6 +417,26 @@ struct ESP3DEntry {
     bool isFinalExtract;
     BoneScreenPos bones[55];
     float healthNorm;   // 0..1 or -1 if unknown
+    bool  isAlly;
+    bool  hasCustomColor;
+    ImU32 customColor;
+};
+
+// Canonical forum BoneId (0..21) → our internal Unity HumanBodyBones slot (0..54).
+// Our e.bones[] uses Unity HumanBodyBones layout (Head=10, UpperChest=54, etc).
+static const int kBoneIdToSlot[22] = {
+    10,  9,  8, 54,  7,  0,   // Head, Neck, Chest, Spine2(UpperChest), Spine1(Spine), Hips
+    11, 13, 15, 17,           // L_Clavicle, L_Shoulder, L_Elbow, L_Hand
+    12, 14, 16, 18,           // R_Clavicle, R_Shoulder, R_Elbow, R_Hand
+     1,  3,  5, 19,           // L_Femur, L_Knee, L_Ankle, L_Toe
+     2,  4,  6, 20            // R_Femur, R_Knee, R_Ankle, R_Toe
+};
+static const char* kBoneIdNames[22] = {
+    "Head","Neck","Chest","Spine2","Spine1","Hips",
+    "L Clavicle","L Shoulder","L Elbow","L Hand",
+    "R Clavicle","R Shoulder","R Elbow","R Hand",
+    "L Femur","L Knee","L Ankle","L Toe",
+    "R Femur","R Knee","R Ankle","R Toe"
 };
 
 static const int SKELETON_CONNECTIONS[][2] = {
@@ -444,6 +464,9 @@ struct ESPSnapshot {
     int type;
     int lootTier;
     float healthNorm;   // 0..1 or -1 if unknown
+    bool  isAlly;
+    bool  hasCustomColor;
+    ImU32 customColor;
 };
 static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDist, volatile bool& csHeld) {
     if (!g_cameraGetMain || !g_cameraW2S || !g_getTransform || !g_getPosition) return;
@@ -528,6 +551,13 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         snap.isReactor = item.isReactor;
         snap.isFinalExtract = item.isFinalExtract;
         snap.healthNorm = item.healthNorm;
+        snap.isAlly = item.isAlly;
+        snap.hasCustomColor = false;
+        auto ccit = g_customEspColors.find(item.name);
+        if (ccit != g_customEspColors.end()) {
+            snap.hasCustomColor = true;
+            snap.customColor = (ImU32)ccit->second;
+        }
         // Extraction / Reactor filters — hide if their toggle is off, but
         // let them always render if the toggle is on regardless of category.
         if (item.isExtraction && !g_espShowExtraction.load() && !isPlayer && !isMob) continue;
@@ -610,10 +640,13 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         e.isReactor = snap.isReactor;
         e.isFinalExtract = snap.isFinalExtract;
         e.healthNorm = snap.healthNorm;
+        e.isAlly = snap.isAlly;
+        e.hasCustomColor = snap.hasCustomColor;
+        e.customColor = snap.customColor;
         const char* prefix = "";
         if (snap.isFinalExtract) prefix = "[FINAL EXTRACT] ";
         else if (snap.isExtraction) prefix = "[EXTRACT] ";
-        else if (snap.isReactor) prefix = "[SHIP] ";
+        else if (snap.isReactor) prefix = snap.isAlly ? "[OUR REACTOR] " : "[REACTOR] ";
         char hpTag[24] = "";
         if (g_espShowHealth.load() && e.healthNorm >= 0.0f && e.healthNorm <= 1.5f) {
             int pct = (int)(e.healthNorm * 100.0f + 0.5f);
@@ -699,17 +732,35 @@ static void apply_aimbot(const std::vector<ESP3DEntry>& entries) {
     float bestScreenDist = fovRadius;
     const ESP3DEntry* bestTarget = nullptr;
 
-    for (auto& e : entries) {
-        if (e.type == 0 && !targetPlayers) continue;
-        if (e.type == 1 && !targetMobs) continue;
-        if (e.type == 2) continue;
-        if (e.dist > maxDist) continue;
-        float dx = e.sx - centerX;
-        float dy = e.sy - centerY;
-        float screenDist = sqrtf(dx * dx + dy * dy);
-        if (screenDist < bestScreenDist) {
-            bestScreenDist = screenDist;
-            bestTarget = &e;
+    // Reactor priority pass — if enabled and an enemy reactor is in FOV,
+    // it wins over players/mobs.
+    bool reactorPri = g_aimbotReactorPriority.load();
+    bool targetReactors = g_aimbotTargetReactors.load();
+    if (reactorPri || targetReactors) {
+        float bestR = fovRadius;
+        const ESP3DEntry* bestReactor = nullptr;
+        for (auto& e : entries) {
+            if (!e.isReactor || e.isAlly) continue;
+            if (e.dist > maxDist) continue;
+            float dx = e.sx - centerX, dy = e.sy - centerY;
+            float sd = sqrtf(dx*dx + dy*dy);
+            if (sd < bestR) { bestR = sd; bestReactor = &e; }
+        }
+        if (bestReactor) { bestTarget = bestReactor; bestScreenDist = bestR; }
+    }
+    if (!bestTarget) {
+        for (auto& e : entries) {
+            if (e.type == 0 && !targetPlayers) continue;
+            if (e.type == 1 && !targetMobs) continue;
+            if (e.type == 2) continue;
+            if (e.dist > maxDist) continue;
+            float dx = e.sx - centerX;
+            float dy = e.sy - centerY;
+            float screenDist = sqrtf(dx * dx + dy * dy);
+            if (screenDist < bestScreenDist) {
+                bestScreenDist = screenDist;
+                bestTarget = &e;
+            }
         }
     }
     if (!bestTarget) return;
@@ -718,8 +769,20 @@ static void apply_aimbot(const std::vector<ESP3DEntry>& entries) {
 
     float torsoSX = bestTarget->sx;
     float torsoSY = bestTarget->sy;
-    float headSX = bestTarget->hasHead ? bestTarget->headSX : torsoSX;
-    float headSY = bestTarget->hasHead ? bestTarget->headSY : (torsoSY - 30.0f);
+    // Per-bone selection: BoneId (0..21) → internal Unity slot via kBoneIdToSlot.
+    // The selected bone replaces "head" attractor in reality-aim/weights so the
+    // rest of the pipeline (feather, center-pull, closest-bone) keeps working.
+    int _bid = (prof.targetBoneId >= 0 && prof.targetBoneId < 22) ? prof.targetBoneId : 0;
+    int _slot = kBoneIdToSlot[_bid];
+    bool _boneOk = (_slot >= 0 && _slot < 55 && bestTarget->bones[_slot].valid);
+    float headSX, headSY;
+    if (_boneOk) {
+        headSX = bestTarget->bones[_slot].x;
+        headSY = bestTarget->bones[_slot].y;
+    } else {
+        headSX = bestTarget->hasHead ? bestTarget->headSX : torsoSX;
+        headSY = bestTarget->hasHead ? bestTarget->headSY : (torsoSY - 30.0f);
+    }
 
     DWORD now = GetTickCount();
 
@@ -908,6 +971,11 @@ static void render_aimbot_profile(AimbotProfile& p, const char* suffix) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1.0f), p.realityAim ? "(zone-based)" : "(traditional)");
     }
+    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Aim Target Bone");
+    ImGui::PushItemWidth(140);
+    ImGui::Combo("##tbone", &p.targetBoneId, kBoneIdNames, 22);
+    ImGui::PopItemWidth();
+    ImGui::TextDisabled("Selected bone replaces head attractor. Missing bone → torso fallback.");
 
     ImGui::Separator();
     if (p.realityAim) {
@@ -1755,13 +1823,17 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (!showChildren && looksLikeInvChild) continue;
                     if (nlen > 0) {
                         bool found = false;
-                        const char* haystack = item.name.c_str();
-                        size_t hlen = item.name.size();
-                        if (nlen <= hlen) {
+                        // Match against BOTH raw name AND displayName so searches like
+                        // "canned food" hit the nice-name, and "PlayerAvatar" still works.
+                        const std::string* haystacks[2] = { &item.name, &item.displayName };
+                        for (int h = 0; h < 2 && !found; h++) {
+                            const char* hay = haystacks[h]->c_str();
+                            size_t hlen = haystacks[h]->size();
+                            if (nlen > hlen) continue;
                             for (size_t s = 0; s <= hlen - nlen; s++) {
                                 bool match = true;
                                 for (size_t c = 0; c < nlen; c++) {
-                                    if (tolower((unsigned char)haystack[s+c]) != tolower((unsigned char)searchBuf[c])) {
+                                    if (tolower((unsigned char)hay[s+c]) != tolower((unsigned char)searchBuf[c])) {
                                         match = false;
                                         break;
                                     }
@@ -1886,6 +1958,27 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                                 }
                                 if (ImGui::MenuItem("Copy name to clipboard")) {
                                     ImGui::SetClipboardText(item.name.c_str());
+                                }
+                                // Custom ESP color — inline ColorEdit4 in the popup.
+                                ImGui::Separator();
+                                {
+                                    ImU32 cur = IM_COL32(255,255,255,255);
+                                    auto cit = g_customEspColors.find(item.name);
+                                    if (cit != g_customEspColors.end()) cur = (ImU32)cit->second;
+                                    float col[4] = {
+                                        ((cur >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
+                                        ((cur >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
+                                        ((cur >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
+                                        ((cur >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f,
+                                    };
+                                    if (ImGui::ColorEdit4("ESP color", col, ImGuiColorEditFlags_NoInputs)) {
+                                        g_customEspColors[item.name] = (uint32_t)IM_COL32(
+                                            (int)(col[0]*255), (int)(col[1]*255),
+                                            (int)(col[2]*255), (int)(col[3]*255));
+                                    }
+                                    if (cit != g_customEspColors.end() && ImGui::MenuItem("Remove custom color")) {
+                                        g_customEspColors.erase(item.name);
+                                    }
                                 }
                                 ImGui::EndPopup();
                             }
@@ -2038,6 +2131,47 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (ImGui::Checkbox("Walker fly (in-vehicle)", &v)) g_walkerFly.store(v);
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(writes CheatWalkerFly+0x10 = true)");
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "NOCLIP (Position writes — server-observed, capped at 30 m/s)");
+                {
+                    bool e = g_noClipEnabled.load();
+                    if (ImGui::Checkbox("Enable noclip (W = up, S = down)", &e)) g_noClipEnabled.store(e);
+                }
+                {
+                    float s = g_noClipSpeed.load();
+                    ImGui::PushItemWidth(160);
+                    if (ImGui::SliderFloat("Speed##noclip", &s, 3.0f, 30.0f, "%.1f m/s"))
+                        g_noClipSpeed.store(s);
+                    ImGui::PopItemWidth();
+                }
+                {
+                    // Activation-key selector (hold/toggle)
+                    const char* nmodes[] = { "Hold RMB", "Hold Mouse5", "Hold V", "Toggle Mouse5", "Toggle V", "Toggle F" };
+                    static int nmodeIdx = 0;
+                    // Restore selector from current binding
+                    int cur = 0;
+                    if (g_hotkeyNoClipToggle.load() == VK_XBUTTON2) cur = 3;
+                    else if (g_hotkeyNoClipToggle.load() == 'V')    cur = 4;
+                    else if (g_hotkeyNoClipToggle.load() == 'F')    cur = 5;
+                    else if (g_hotkeyNoClipHold.load() == VK_XBUTTON2) cur = 1;
+                    else if (g_hotkeyNoClipHold.load() == 'V')       cur = 2;
+                    else cur = 0;
+                    nmodeIdx = cur;
+                    if (ImGui::Combo("Activation##noclip", &nmodeIdx, nmodes, 6)) {
+                        g_hotkeyNoClipHold.store(0);
+                        g_hotkeyNoClipToggle.store(0);
+                        g_noClipActive.store(false);
+                        switch (nmodeIdx) {
+                            case 0: g_hotkeyNoClipHold.store(VK_RBUTTON); break;
+                            case 1: g_hotkeyNoClipHold.store(VK_XBUTTON2); break;
+                            case 2: g_hotkeyNoClipHold.store('V'); break;
+                            case 3: g_hotkeyNoClipToggle.store(VK_XBUTTON2); break;
+                            case 4: g_hotkeyNoClipToggle.store('V'); break;
+                            case 5: g_hotkeyNoClipToggle.store('F'); break;
+                        }
+                    }
+                    ImGui::TextDisabled("RMB doubles as ADS — game still fires ADS. Toggle keys don't conflict.");
                 }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "World mods");
@@ -2521,6 +2655,17 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     if (ImGui::Checkbox("Target Mobs", &tm))
                         g_aimbotTargetMobs.store(tm);
                 }
+                ImGui::SameLine();
+                {
+                    bool tr = g_aimbotTargetReactors.load();
+                    if (ImGui::Checkbox("Target Reactors", &tr))
+                        g_aimbotTargetReactors.store(tr);
+                }
+                {
+                    bool rp = g_aimbotReactorPriority.load();
+                    if (ImGui::Checkbox("Reactor Priority (override best target + bullseye)", &rp))
+                        g_aimbotReactorPriority.store(rp);
+                }
 
                 const char* keyNames[] = { "Mouse 5 (Side)", "Mouse 4 (Side)", "Right Click", "Left Alt", "Left Shift" };
                 int keyValues[] = { VK_XBUTTON2, VK_XBUTTON1, VK_RBUTTON, VK_LMENU, VK_LSHIFT };
@@ -2835,7 +2980,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 float boxH = textSize.y + 6;
 
                 ImU32 bgColor, borderColor, textColor;
-                if (e.isFinalExtract) {
+                if (e.hasCustomColor) {
+                    int r = (e.customColor >> IM_COL32_R_SHIFT) & 0xFF;
+                    int g = (e.customColor >> IM_COL32_G_SHIFT) & 0xFF;
+                    int b = (e.customColor >> IM_COL32_B_SHIFT) & 0xFF;
+                    bgColor     = IM_COL32(r/3, g/3, b/3, 180);
+                    borderColor = IM_COL32(r, g, b, 240);
+                    textColor   = IM_COL32(r, g, b, 255);
+                } else if (e.isFinalExtract) {
                     // Bright magenta — final extraction is the most valuable location
                     bgColor = IM_COL32(80, 0, 60, 200);
                     borderColor = IM_COL32(255, 50, 200, 240);
@@ -2897,6 +3049,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImVec2(e.sx, e.sy + boxH / 2),
                     ImVec2(e.sx, e.sy + boxH / 2 + 12),
                     borderColor, 1.5f);
+                // Reactor bullseye when priority mode is on and target is enemy.
+                if (e.isReactor && !e.isAlly && g_aimbotReactorPriority.load()) {
+                    ImU32 bull = IM_COL32(255, 40, 40, 240);
+                    drawList->AddCircle(ImVec2(e.sx, e.sy), 14.0f, bull, 24, 2.0f);
+                    drawList->AddCircle(ImVec2(e.sx, e.sy),  6.0f, bull, 12, 1.5f);
+                    drawList->AddLine(ImVec2(e.sx-18, e.sy), ImVec2(e.sx+18, e.sy), bull, 1.0f);
+                    drawList->AddLine(ImVec2(e.sx, e.sy-18), ImVec2(e.sx, e.sy+18), bull, 1.0f);
+                }
             }
             for (auto& e : espEntries) {
                 if (!e.hasSkeleton) continue;
@@ -2971,6 +3131,11 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
         if (g_espShowSelf.load()) {
             drawList->AddCircleFilled(radarCenter, 4.0f, IM_COL32(0, 255, 0, 255));
+            // Facing arrow — radar is view-locked so player forward = screen up.
+            ImVec2 apex (radarCenter.x,        radarCenter.y - 18.0f);
+            ImVec2 baseL(radarCenter.x - 3.0f, radarCenter.y -  8.0f);
+            ImVec2 baseR(radarCenter.x + 3.0f, radarCenter.y -  8.0f);
+            drawList->AddTriangleFilled(apex, baseR, baseL, IM_COL32(120, 255, 120, 255));
         }
 
         float playerAbsX = g_playerPos.cx * CHUNK_SIZE + g_playerPos.x;
