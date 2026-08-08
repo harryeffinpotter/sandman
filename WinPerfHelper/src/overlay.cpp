@@ -3117,33 +3117,55 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImVec2(e.sx, e.sy + boxH / 2 + 12),
                     borderColor, 1.5f);
                 // Sentinel detection radius — draw a red ring on the sand
-                // (world-space, projected). 32 points around the circle at
-                // the sentinel's ground height.
-                if (e.isSentinel && g_espShowSentinels.load()) {
+                // (world-space, projected). Skip entirely if you're INSIDE
+                // the ring (already inside danger zone, ring is huge & useless
+                // AND was producing giant lines from off-screen projections
+                // stalling the render thread → rubberband). Also cap segments
+                // to 24 and viewport-clip each vertex so no line spans the
+                // whole screen when the ring wraps behind the camera.
+                if (e.isSentinel && g_espShowSentinels.load() && camera) {
                     float r = g_sentinelRadius.load();
-                    const int SEGMENTS = 48;
-                    Vec3 prevScreen{0,0,0}; bool havePrev = false;
-                    for (int seg = 0; seg <= SEGMENTS; seg++) {
-                        float ang = (float)seg / (float)SEGMENTS * 6.28318531f;
-                        Vec3 wp;
-                        wp.x = e.sentinelWorld.x + cosf(ang) * r;
-                        wp.y = e.sentinelWorld.y;
-                        wp.z = e.sentinelWorld.z + sinf(ang) * r;
-                        Vec3 sp;
-                        g_cameraW2S(&sp, camera, &wp, nullptr);
-                        if (sp.z <= 0 || std::isnan(sp.x) || std::isnan(sp.y)) {
-                            havePrev = false; continue;
+                    // e.dist is the distance from the player to the sentinel.
+                    // If we're inside the ring, skip drawing it.
+                    if (e.dist > 0.0f && e.dist < r) {
+                        // Inside — draw a small ⚠ marker at the entity pos
+                        // instead, so LO knows the danger zone is active.
+                        drawList->AddText(
+                            ImVec2(e.sx - 8, e.sy - 20),
+                            IM_COL32(255, 40, 40, 240), "!IN RANGE!");
+                    } else {
+                        const int SEGMENTS = 24;
+                        // Viewport clip padding — allow up to 2x screen width
+                        // off-screen so the line stub still points toward
+                        // where the arc goes but doesn't paint edge-to-edge.
+                        float clipMinX = -displaySize.x, clipMaxX = displaySize.x * 2;
+                        float clipMinY = -displaySize.y, clipMaxY = displaySize.y * 2;
+                        Vec3 prevScreen{0,0,0}; bool havePrev = false;
+                        for (int seg = 0; seg <= SEGMENTS; seg++) {
+                            float ang = (float)seg / (float)SEGMENTS * 6.28318531f;
+                            Vec3 wp;
+                            wp.x = e.sentinelWorld.x + cosf(ang) * r;
+                            wp.y = e.sentinelWorld.y;
+                            wp.z = e.sentinelWorld.z + sinf(ang) * r;
+                            Vec3 sp;
+                            g_cameraW2S(&sp, camera, &wp, nullptr);
+                            if (sp.z <= 0 || std::isnan(sp.x) || std::isnan(sp.y)) {
+                                havePrev = false; continue;
+                            }
+                            float sx = sp.x;
+                            float sy = displaySize.y - sp.y;
+                            bool onscreen = (sx > clipMinX && sx < clipMaxX &&
+                                             sy > clipMinY && sy < clipMaxY);
+                            if (!onscreen) { havePrev = false; continue; }
+                            if (havePrev) {
+                                drawList->AddLine(
+                                    ImVec2(prevScreen.x, prevScreen.y),
+                                    ImVec2(sx, sy),
+                                    IM_COL32(255, 40, 40, 220), 2.0f);
+                            }
+                            prevScreen = Vec3{sx, sy, 0};
+                            havePrev = true;
                         }
-                        float sx = sp.x;
-                        float sy = displaySize.y - sp.y;
-                        if (havePrev) {
-                            drawList->AddLine(
-                                ImVec2(prevScreen.x, prevScreen.y),
-                                ImVec2(sx, sy),
-                                IM_COL32(255, 40, 40, 220), 2.0f);
-                        }
-                        prevScreen = Vec3{sx, sy, 0};
-                        havePrev = true;
                     }
                 }
                 // Reactor bullseye when priority mode is on and target is enemy.

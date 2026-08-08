@@ -472,10 +472,14 @@ static void safe_scan_tick(int scanCounter) {
     __try {
         scan_entities();
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        wlog("[worker] SEH in scan_entities tick %d: 0x%08lX -- backing off 3s\n",
+        // No cooldown — per-entity SEH (seh_process_one_entity) catches AVs
+        // individually. Any outer wait here just froze the ESP for the whole
+        // wait interval per crash. LO 2026-08-08: kill all Sleeps in the
+        // worker path, yield instead.
+        wlog("[worker] SEH in scan_entities tick %d: 0x%08lX (no backoff, continuing)\n",
              scanCounter, GetExceptionCode());
         g_entityCount.store(0);
-        s_cooldownUntil = GetTickCount() + 3000;
+        SwitchToThread();
     }
 
     // Each apply_* runs in its OWN __try. Disable VEH catching around each
@@ -2029,7 +2033,7 @@ static DWORD WINAPI worker_thread(LPVOID) {
             void* gcm = (void*)g_gameContextModule;
             if (!is_readable(gcm, 0x18)) {
                 g_entityCount.store(0);
-                Sleep(500);
+                // No sleep — main loop pacing at bottom handles CPU throttle.
                 continue;
             }
 
@@ -2050,7 +2054,11 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 }
                 g_entityCount.store(0);
                 scanCounter++;
-                Sleep(3000);
+                // Was 3000 — that Sleep froze the worker for 3s per VEH
+                // recovery, making ESP labels rubber-band as g_items stayed
+                // stale. Per-entity SEH catches AVs in-flight now, so this
+                // outer recovery only yields briefly to avoid a tight loop.
+                Sleep(200);
                 continue;
             }
 
@@ -2207,10 +2215,12 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 }
                 s_f10WasDown = nowDown;
             }
-            // Jittered scan cadence — [80, 160)ms per iteration so the
-            // syscall rhythm never lines up as a clean sine wave for AC
-            // pattern matchers watching over minutes.
-            Sleep(80 + (rand() % 80));
+            // Jittered scan cadence — [30, 50)ms per iteration. LO 2026-08-08
+            // capped this at 50ms max ("50ms async non-blocking, no more").
+            // Was 80-160ms which made ESP visibly rubber-band at 6-12 fps.
+            // At 30-50ms ESP updates 20-33 fps — smooth. Still jittered so
+            // the syscall cadence isn't a clean sine wave for AC observers.
+            Sleep(30 + (rand() % 20));
         }
     }
 
