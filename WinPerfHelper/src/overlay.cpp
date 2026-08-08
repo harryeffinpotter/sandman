@@ -212,13 +212,16 @@ static IDXGISwapChain* g_initSwapChain = nullptr;
 bool g_menuVisible = true;
 std::atomic<bool> g_forceWindowed{false};
 
-// Auto re-equip for dupe mode. When on, DLL sends key A then key B via
-// SendInput on a timer so the game's held-item entity is re-spawned each
-// tick, letting dupe mode grab a fresh copy.
+// Auto re-equip for dupe mode. Burst pattern: N quick scroll-bounces in a
+// row (with intra-burst gap), then a longer pause between bursts. Mimics
+// human input pattern better than pure interval spam.
 std::atomic<bool> g_autoReequip{false};
-int g_reequipKey1 = 0x31;   // '1'
-int g_reequipKey2 = 0x32;   // '2'
-int g_reequipIntervalMs = 500;  // default matches game's ~5s equip animation
+int g_reequipKey1 = 0x31;   // '1' (legacy)
+int g_reequipKey2 = 0x32;   // '2' (legacy)
+int g_reequipIntervalMs = 500;   // (legacy — pause between rounds)
+int g_reequipBurstCount = 2;     // how many rapid selects per round
+int g_reequipBurstGapMs = 50;    // gap between the rapid selects
+int g_reequipRoundPauseMs = 500; // gap between rounds
 
 static void send_key(int vk, bool down) {
     INPUT in = {};
@@ -242,17 +245,33 @@ static void auto_reequip_tick() {
     // Only fire when the game window is foreground so we don't spam keys
     // into other apps if LO Alt-Tabs.
     if (GetForegroundWindow() != g_gameHwnd) return;
-    static ULONGLONG s_last = 0;
+    // Burst pattern: fire N rapid selects with small gap between them,
+    // then a longer pause before the next burst. Mimics human input
+    // pattern better than pure interval spam.
+    static ULONGLONG s_burstStart = 0;
+    static ULONGLONG s_lastFire = 0;
+    static int s_firedThisBurst = 0;
     ULONGLONG now = GetTickCount64();
-    if (now - s_last < (ULONGLONG)g_reequipIntervalMs) return;
-    s_last = now;
-    // Scroll wheel bounce — cycles one slot away and back so the game
-    // re-equips whatever slot we're currently on (medkit, core, whatever)
-    // without needing to know which slot number it is. Ends on the ORIGINAL
-    // slot so we don't drift.
-    send_scroll(120);         // wheel up = slot -1
-    Sleep(30);
-    send_scroll(-120);        // wheel down = slot +1 = back to original
+    int burstCount = g_reequipBurstCount > 0 ? g_reequipBurstCount : 1;
+    ULONGLONG burstGap = (ULONGLONG)(g_reequipBurstGapMs > 0 ? g_reequipBurstGapMs : 30);
+    ULONGLONG roundPause = (ULONGLONG)(g_reequipRoundPauseMs > 0 ? g_reequipRoundPauseMs : 500);
+
+    if (s_firedThisBurst >= burstCount) {
+        // Waiting for next round
+        if (now - s_burstStart < roundPause) return;
+        s_burstStart = now;
+        s_firedThisBurst = 0;
+        s_lastFire = 0;
+    }
+    if (s_lastFire != 0 && now - s_lastFire < burstGap) return;
+    if (s_firedThisBurst == 0) s_burstStart = now;
+
+    // One scroll-bounce = one re-equip of current slot.
+    send_scroll(120);
+    Sleep(15);
+    send_scroll(-120);
+    s_firedThisBurst++;
+    s_lastFire = now;
 }
 
 
@@ -1461,9 +1480,11 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(dupe non-weapons w/o manual swap)");
                     if (are) {
                         int i = g_reequipIntervalMs;
-                        ImGui::SliderInt("Interval ms", &i, 100, 2000);
-                        g_reequipIntervalMs = i;
-                        ImGui::TextDisabled("Scroll bounce: wheel up + wheel down. Re-equips current slot regardless of what's on it.");
+                        // Lower = more re-equips per second = more dupe attempts.
+                        // 500ms default = 2/sec. 100ms = 10/sec (aggressive).
+                        if (ImGui::SliderInt("Delay between re-equips (ms)", &i, 100, 2000, "%d ms (lower = faster)"))
+                            g_reequipIntervalMs = i;
+                        ImGui::TextDisabled("Scroll bounce (wheel up + wheel down) — re-equips whatever's currently in hand. Requires 'Dupe Mode' also enabled.");
                     }
                 }
                 {
@@ -1673,7 +1694,10 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                                 int lockId = (item.serverId > 0) ? item.serverId : item.entityId;
                                 g_lockedEntityId.store(lockId);
                                 g_lockedEntityPtr.store((uintptr_t)item.entityPtr);
-                                g_dupeMode.store(false);
+                                // NOTE: don't auto-disable g_dupeMode here — it
+                                // would kill the auto-scroll-reequip since that
+                                // gates on (autoReequip && dupeMode). Let LO
+                                // toggle dupe explicitly.
                             }
 
                             // Right-click context menu — quick blacklist actions

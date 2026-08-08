@@ -84,6 +84,17 @@ int g_idx_reactor_state = -1;            // ReactorState (342)
 int g_idx_reactor_turbo = -1;            // ReactorTurboState (343)
 int g_idx_health_normalized = -1;        // HealthNormalizedComponent
 int g_idx_in_eye_of_storm = -1;          // InEyeOfStorm
+int g_idx_switchable_radial = -1;        // SwitchableRadialViewBehaviour (569)
+int g_idx_current_slot_id = -1;          // CurrentSlotId (99) — what slot player has selected
+int g_idx_previous_slot_id = -1;         // PreviousSlotId (317)
+int g_idx_inventory_data = -1;           // InventoryData (219)
+int g_idx_inventory_entity_id = -1;      // InventoryEntityId (220)
+int g_idx_inventory_slot_data = -1;      // InventorySlotData (225)
+int g_idx_inventory_item_id = -1;        // InventoryItemId (223)
+int g_idx_inventory_item_count = -1;     // InventoryItemCount (222)
+int g_idx_inventory_item_slot_index = -1;// InventoryItemSlotIndex (224)
+int g_idx_recently_updated_slot = -1;    // RecentlyUpdatedInventorySlot (345)
+int g_idx_reactor_slot = -1;             // ReactorSlot (340)
 
 // ---------------------------------------------------------------------------
 // Steam API cache — GetFriendPersonaName resolves a SteamID64 to the real
@@ -816,6 +827,17 @@ bool discover_component_indices(void* gameContextModule) {
         else if (strcmp(narrow, "ReactorTurboState") == 0)       g_idx_reactor_turbo = i;
         else if (strcmp(narrow, "HealthNormalizedComponent") == 0) g_idx_health_normalized = i;
         else if (strcmp(narrow, "InEyeOfStorm") == 0)            g_idx_in_eye_of_storm = i;
+        else if (strcmp(narrow, "SwitchableRadialViewBehaviour") == 0) g_idx_switchable_radial = i;
+        else if (strcmp(narrow, "CurrentSlotId") == 0)           g_idx_current_slot_id = i;
+        else if (strcmp(narrow, "PreviousSlotId") == 0)          g_idx_previous_slot_id = i;
+        else if (strcmp(narrow, "InventoryData") == 0)           g_idx_inventory_data = i;
+        else if (strcmp(narrow, "InventoryEntityId") == 0)       g_idx_inventory_entity_id = i;
+        else if (strcmp(narrow, "InventorySlotData") == 0)       g_idx_inventory_slot_data = i;
+        else if (strcmp(narrow, "InventoryItemId") == 0)         g_idx_inventory_item_id = i;
+        else if (strcmp(narrow, "InventoryItemCount") == 0)      g_idx_inventory_item_count = i;
+        else if (strcmp(narrow, "InventoryItemSlotIndex") == 0)  g_idx_inventory_item_slot_index = i;
+        else if (strcmp(narrow, "RecentlyUpdatedInventorySlot") == 0) g_idx_recently_updated_slot = i;
+        else if (strcmp(narrow, "ReactorSlot") == 0)             g_idx_reactor_slot = i;
         else if (strcmp(narrow, "View") == 0)                g_idx_view = i;
         else if (strcmp(narrow, "ViewPosition") == 0) g_idx_view_position = i;
         else if (strcmp(narrow, "ViewData") == 0)      g_idx_view_data = i;
