@@ -117,6 +117,8 @@ struct ItemInfo {
     bool isExtraction;   // has ExtractionPointData / ExtractionBox / etc
     bool isReactor;      // has ReactorData (= ship)
     bool isFinalExtract; // has FinalExtractionPointData
+    int  parentEntityId; // immediate parent id (0 if none)
+    bool isInOthersInv;  // parent chain ends at a non-us entity — potential remote-inv target
 };
 
 struct Hook {

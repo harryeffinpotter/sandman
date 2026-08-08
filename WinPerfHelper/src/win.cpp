@@ -1754,8 +1754,16 @@ static void process_one_entity(
     }
     info.isHeavy = (g_idx_large_item >= 0) && (get_component(entity, g_idx_large_item) != nullptr);
     info.isHeldByPlayer = false;
+    info.parentEntityId = 0;
+    info.isInOthersInv = false;
     if (hasParent && g_idx_parent >= 0) {
         void* curEntity = entity;
+        int hopCount = 0;
+        // Capture immediate parent id for filtering
+        {
+            void* pc0 = get_component(entity, g_idx_parent);
+            if (is_readable(pc0, 0x18)) info.parentEntityId = *(int*)((uintptr_t)pc0 + 0x10);
+        }
         // Cap at 5 hops - deep chains are almost certainly circular refs on corrupt data.
         for (int depth = 0; depth < 5; ++depth) {
             void* parComp = get_component(curEntity, g_idx_parent);
@@ -1770,6 +1778,12 @@ static void process_one_entity(
             if (pit == idToEntity.end()) break;
             curEntity = pit->second;
             if (!is_readable(curEntity, 0x68)) break;
+            hopCount++;
+        }
+        // If parent chain ended at a non-us entity, it's in someone else's
+        // container/inventory — a dupe target under the master theory.
+        if (info.parentEntityId != 0 && !info.isHeldByPlayer) {
+            info.isInOthersInv = true;
         }
     }
     if (info.isHeldByPlayer) (*pHeldCount)++;
@@ -2884,6 +2898,30 @@ void scan_entities() {
                         dbgReadable, dbgValidObj, dbgEnabled, dbgHasBP, dbgNameOK, dbgPassFilter, dbgHasPosParent, entitiesPushed);
         if (doLog) wlog("[scan] heldItems=%d resolvedParents=%d idToEntitySize=%d\n",
                         heldCount, resolvedParentCount, (int)idToEntity.size());
+
+        // Diagnostic: how many pushed items are child-entities (in some
+        // container/inventory) vs standalone world entities. LO's dupe
+        // theory hinges on this — if children are in the scan we can lock
+        // them, if not the game only stores them as data records inside
+        // container components and we need a different path.
+        if (doLog) {
+            int childCount = 0, othersInvCount = 0, ownInvCount = 0, invItemCount = 0;
+            for (auto& it : items) {
+                if (it.parentEntityId != 0) childCount++;
+                if (it.isInOthersInv) othersInvCount++;
+                if (it.isHeldByPlayer) ownInvCount++;
+            }
+            if (g_idx_inventory_item_id >= 0) {
+                // count from the raw entity list, not items — items is filtered
+                for (int ei = 0; ei < entityCount; ++ei) {
+                    void* e0 = entityPtrs[ei];
+                    if (!is_readable(e0, 0x58)) continue;
+                    if (get_component(e0, g_idx_inventory_item_id)) invItemCount++;
+                }
+            }
+            wlog("[scan] childEntities=%d ownInv=%d othersInv=%d entitiesWithInventoryItemId=%d\n",
+                 childCount, ownInvCount, othersInvCount, invItemCount);
+        }
 
         // One-shot diagnostic: dump unique blueprint-name prefixes in items
         // so we can see what player/mob entities are actually named. Fires
