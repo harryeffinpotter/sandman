@@ -1479,12 +1479,24 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(dupe non-weapons w/o manual swap)");
                     if (are) {
-                        int i = g_reequipIntervalMs;
-                        // Lower = more re-equips per second = more dupe attempts.
-                        // 500ms default = 2/sec. 100ms = 10/sec (aggressive).
-                        if (ImGui::SliderInt("Delay between re-equips (ms)", &i, 100, 2000, "%d ms (lower = faster)"))
-                            g_reequipIntervalMs = i;
-                        ImGui::TextDisabled("Scroll bounce (wheel up + wheel down) — re-equips whatever's currently in hand. Requires 'Dupe Mode' also enabled.");
+                        ImGui::Indent();
+                        // Always-visible: how long between full rounds
+                        ImGui::SliderInt("Time between rounds (ms)", &g_reequipRoundPauseMs, 100, 5000, "%d ms");
+                        // Double-pump: 2 quick re-equips per round instead of 1
+                        static bool s_doublePump = (g_reequipBurstCount == 2);
+                        // Keep the checkbox in sync if code somewhere else changed burst count
+                        if (g_reequipBurstCount == 2) s_doublePump = true;
+                        else if (g_reequipBurstCount == 1) s_doublePump = false;
+                        if (ImGui::Checkbox("Equip 2x per round", &s_doublePump)) {
+                            g_reequipBurstCount = s_doublePump ? 2 : 1;
+                        }
+                        if (s_doublePump) {
+                            ImGui::Indent();
+                            ImGui::SliderInt("Time between the 2 equips (ms)", &g_reequipBurstGapMs, 10, 500, "%d ms");
+                            ImGui::Unindent();
+                        }
+                        ImGui::TextDisabled("Requires 'Dupe Mode' also enabled. Scroll bounce re-equips whatever's in hand.");
+                        ImGui::Unindent();
                     }
                 }
                 {
