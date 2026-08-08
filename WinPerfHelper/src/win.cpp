@@ -2282,6 +2282,20 @@ static void process_one_entity(
     if ((isPlayer || info.isCreature) && g_espShowSkeleton.load()) {
         memset(info.bonePositions, 0, sizeof(info.bonePositions));
         info.hasBones = seh_resolve_bones(entity, info.bonePositions);
+        // Throttled bone diag — every ~5 sec for the first 10 PlayerAvatars log
+        // whether the walker actually filled slots. Rules out "toggle off"
+        // and "walker returns nothing" quickly.
+        static DWORD s_boneTickLog = 0;
+        static int s_bonePlayersLogged = 0;
+        DWORD nowT = GetTickCount();
+        if (isPlayer && s_bonePlayersLogged < 10 && (nowT - s_boneTickLog) > 200) {
+            s_boneTickLog = nowT;
+            int validCount = 0;
+            for (int b = 0; b < 55; b++) if (info.bonePositions[b].valid) validCount++;
+            ringlog::push("[bone-diag] PlayerAvatar eid=%d hasBones=%d validSlots=%d/55 skele-toggle=1",
+                          info.entityId, info.hasBones ? 1 : 0, validCount);
+            s_bonePlayersLogged++;
+        }
     }
 
     (*pEntitiesPushed)++;

@@ -605,10 +605,13 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
 
         e.hasSkeleton = false;
         if (snap.type != 2 && snap.type != 3 && showSkeleton && snap.hasBones) {
-            static const int USED_BONES[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,54};
+            // Project EVERY valid bone slot 0-54, not just the 20 named
+            // indices — otherwise raw-fallback point-cloud mode is invisible
+            // because slots 19-53 never get screen-projected. Named-match
+            // fills specific indices; raw fills sequentially. Cover both.
             bool anyBone = false;
-            for (int ub = 0; ub < 20; ub++) {
-                int bi = USED_BONES[ub];
+            int projectedCount = 0;
+            for (int bi = 0; bi < 55; bi++) {
                 e.bones[bi].valid = false;
                 if (!snap.bonePositions[bi].valid) continue;
                 Vec3 boneWorldPos = snap.bonePositions[bi].pos;
@@ -619,6 +622,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
                     e.bones[bi].y = displaySize.y - boneScreen.y;
                     e.bones[bi].valid = true;
                     anyBone = true;
+                    projectedCount++;
                 }
             }
             e.hasSkeleton = anyBone;
@@ -626,6 +630,17 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
                 e.headSX = e.bones[10].x;
                 e.headSY = e.bones[10].y;
                 e.hasHead = true;
+            }
+            // Throttled diag — every 2s log projection stats so LO can see
+            // whether bones are being lost at world->screen or actually drawn.
+            static ULONGLONG s_boneProjLog = 0;
+            ULONGLONG nt = GetTickCount64();
+            if (nt - s_boneProjLog > 2000) {
+                s_boneProjLog = nt;
+                int inSlots = 0;
+                for (int b = 0; b < 55; b++) if (snap.bonePositions[b].valid) inSlots++;
+                ringlog::push("[bone-render] type=%d snap=%d/55 projected=%d/55 hasSkeleton=%d",
+                              snap.type, inSlots, projectedCount, anyBone?1:0);
             }
         }
 
