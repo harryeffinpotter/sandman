@@ -861,6 +861,8 @@ std::atomic<bool> g_espShowSkeleton{true};    // default ON — creature-fix bui
 std::atomic<bool> g_espShowBox{true};          // per-entity outlined box
 std::atomic<bool> g_espShowHealth{true};       // append [HP N%] to labels
 std::atomic<bool> g_espShowHealthBar{true};    // draw a colored bar above the box
+std::atomic<bool>  g_espShowSentinels{true};
+std::atomic<float> g_sentinelRadius{408.0f};    // detection radius, meters
 std::atomic<bool> g_espShowLootT1{true};
 std::atomic<bool> g_espShowLootT2{true};
 std::atomic<bool> g_espShowLootT3{true};
@@ -2287,6 +2289,18 @@ static void process_one_entity(
     if (name.rfind("walker_", 0) == 0
         && name.rfind("walker_reactor", 0) != 0
         && name.rfind("walker_compReactor", 0) != 0) return;
+    // Sentinel ambush spawners are decoration entities we normally drop, but
+    // we want them on the radar as danger circles — so let them through here
+    // and classify below. The huge broken transform hierarchy that used to
+    // cause 40s stalls is now skipped by the bone-resolver decoration guard.
+    {
+        std::string _sn = name;
+        for (auto& c : _sn) if (c >= 'A' && c <= 'Z') c = c + 32;
+        if (_sn.find("sentinel") != std::string::npos &&
+            _sn.find("spawner")  != std::string::npos) {
+            // Will get classified as sentinel + short-label below; fall through.
+        }
+    }
     if (name == "Sun") return;
     if (name.rfind("LandingCutScene", 0) == 0) return;
     if (name.rfind("Shot Projectile", 0) == 0) return;
@@ -2320,6 +2334,7 @@ static void process_one_entity(
     info.isCreature = false;
     info.healthNorm = -1.0f;
     info.isAlly = false;   // set below if parent chain resolves to player entity
+    info.isSentinel = false;
     // Health readout: HealthNormalizedComponent stores a float 0..1 at +0x10
     // per the forum answer. Not every entity has it — items, static props,
     // etc will just show as unknown (label omits the HP tag).
@@ -2702,6 +2717,16 @@ static void process_one_entity(
             }
         }
         info.displayName = !niceName.empty() ? niceName : get_display_name(name);
+        // Sentinel spawner classification — short label, flag for radar/world circle.
+        {
+            std::string _lower = name;
+            for (auto& c : _lower) if (c >= 'A' && c <= 'Z') c = c + 32;
+            if (_lower.find("sentinel") != std::string::npos &&
+                _lower.find("spawner")  != std::string::npos) {
+                info.isSentinel = true;
+                info.displayName = "Sentinel";
+            }
+        }
         if (name.find("_t3_") != std::string::npos || name.find("_T3_") != std::string::npos)
             info.lootTier = 3;
         else if (name.find("_t2_") != std::string::npos || name.find("_T2_") != std::string::npos)

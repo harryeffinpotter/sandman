@@ -420,6 +420,8 @@ struct ESP3DEntry {
     bool  isAlly;
     bool  hasCustomColor;
     ImU32 customColor;
+    bool  isSentinel;
+    Vec3  sentinelWorld;   // world pos for in-world ring
 };
 
 // Canonical forum BoneId (0..21) → our internal Unity HumanBodyBones slot (0..54).
@@ -467,6 +469,8 @@ struct ESPSnapshot {
     bool  isAlly;
     bool  hasCustomColor;
     ImU32 customColor;
+    bool  isSentinel;
+    WorldVector sentinelWorldVec;   // for in-world circle projection
 };
 static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDist, volatile bool& csHeld) {
     if (!g_cameraGetMain || !g_cameraW2S || !g_getTransform || !g_getPosition) return;
@@ -515,9 +519,14 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         bool isItem   = (!isPlayer && !isMob && !isWalker);
         bool isLoot = (item.lootTier > 0);
 
-        if (isPlayer && !g_espShowPlayers.load()) continue;
-        if (isMob && !g_espShowMobs.load()) continue;
-        if (isWalker && !g_espShowWalkers.load()) continue;
+        if (item.isSentinel) {
+            // Sentinels bypass the isItem filter — they get their own toggle.
+            if (!g_espShowSentinels.load()) continue;
+        } else {
+            if (isPlayer && !g_espShowPlayers.load()) continue;
+            if (isMob && !g_espShowMobs.load()) continue;
+            if (isWalker && !g_espShowWalkers.load()) continue;
+        }
         // Apply the right-click blacklist to ESP too (was only filtering Items list).
         if (g_hiddenNames.count(item.name)) continue;
         {
@@ -531,7 +540,7 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
             if (item.lootTier == 1 && !g_espShowLootT1.load()) continue;
             if (item.lootTier == 2 && !g_espShowLootT2.load()) continue;
             if (item.lootTier == 3 && !g_espShowLootT3.load()) continue;
-        } else if (isItem && !g_espShowItems.load()) continue;
+        } else if (isItem && !item.isSentinel && !g_espShowItems.load()) continue;
 
         float catDist;
         if (isPlayer) catDist = g_espPlayerDist;
@@ -564,6 +573,8 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
             snap.hasCustomColor = true;
             snap.customColor = (ImU32)ccit->second;
         }
+        snap.isSentinel = item.isSentinel;
+        snap.sentinelWorldVec = item.pos;
         // Extraction / Reactor filters — hide if their toggle is off, but
         // let them always render if the toggle is on regardless of category.
         if (item.isExtraction && !g_espShowExtraction.load() && !isPlayer && !isMob) continue;
@@ -649,6 +660,11 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         e.isAlly = snap.isAlly;
         e.hasCustomColor = snap.hasCustomColor;
         e.customColor = snap.customColor;
+        e.isSentinel = snap.isSentinel;
+        // Extract world XYZ (chunk-adjusted) for in-world ring drawing.
+        e.sentinelWorld.x = snap.sentinelWorldVec.cx * CHUNK_SIZE + snap.sentinelWorldVec.x;
+        e.sentinelWorld.y = snap.sentinelWorldVec.y;
+        e.sentinelWorld.z = snap.sentinelWorldVec.cy * CHUNK_SIZE + snap.sentinelWorldVec.z;
         const char* prefix = "";
         if (snap.isFinalExtract) prefix = "[FINAL EXTRACT] ";
         else if (snap.isExtraction) prefix = "[EXTRACT] ";
@@ -2614,6 +2630,17 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SameLine();
                     ImGui::TextDisabled("(%d found)", g_stormCirclesFound.load());
                 }
+                {
+                    bool ss = g_espShowSentinels.load();
+                    if (ImGui::Checkbox("Sentinel detection rings", &ss))
+                        g_espShowSentinels.store(ss);
+                    ImGui::PushItemWidth(160);
+                    float sr = g_sentinelRadius.load();
+                    if (ImGui::SliderFloat("Sentinel radius##sen", &sr, 100.0f, 800.0f, "%.0f m"))
+                        g_sentinelRadius.store(sr);
+                    ImGui::PopItemWidth();
+                    ImGui::TextDisabled("Red ring on radar around sentinel + red ring drawn on the sand in-world.");
+                }
 
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Visibility");
@@ -2983,6 +3010,9 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
         if (g_esp3DEnabled.load() && !espEntries.empty()) {
             ImDrawList* drawList = ImGui::GetForegroundDrawList();
+            // For in-world circle projection (sentinel radius, future features).
+            void* camera = g_cameraGetMain ? g_cameraGetMain(nullptr) : nullptr;
+            ImVec2 displaySize = ImGui::GetIO().DisplaySize;
             for (auto& e : espEntries) {
                 ImVec2 textSize = ImGui::CalcTextSize(e.label);
                 float boxW = textSize.x + 10;
@@ -3041,7 +3071,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     textColor = IM_COL32(180, 230, 100, 255);
                 }
 
-                if (g_espShowBox.load()) {
+                if (g_espShowBox.load() && !e.isSentinel) {
+                    // Sentinels: no bounding box (per LO — label + ground ring only).
                     drawList->AddRectFilled(
                         ImVec2(e.sx - boxW / 2, e.sy - boxH / 2),
                         ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
@@ -3085,6 +3116,36 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImVec2(e.sx, e.sy + boxH / 2),
                     ImVec2(e.sx, e.sy + boxH / 2 + 12),
                     borderColor, 1.5f);
+                // Sentinel detection radius — draw a red ring on the sand
+                // (world-space, projected). 32 points around the circle at
+                // the sentinel's ground height.
+                if (e.isSentinel && g_espShowSentinels.load()) {
+                    float r = g_sentinelRadius.load();
+                    const int SEGMENTS = 48;
+                    Vec3 prevScreen{0,0,0}; bool havePrev = false;
+                    for (int seg = 0; seg <= SEGMENTS; seg++) {
+                        float ang = (float)seg / (float)SEGMENTS * 6.28318531f;
+                        Vec3 wp;
+                        wp.x = e.sentinelWorld.x + cosf(ang) * r;
+                        wp.y = e.sentinelWorld.y;
+                        wp.z = e.sentinelWorld.z + sinf(ang) * r;
+                        Vec3 sp;
+                        g_cameraW2S(&sp, camera, &wp, nullptr);
+                        if (sp.z <= 0 || std::isnan(sp.x) || std::isnan(sp.y)) {
+                            havePrev = false; continue;
+                        }
+                        float sx = sp.x;
+                        float sy = displaySize.y - sp.y;
+                        if (havePrev) {
+                            drawList->AddLine(
+                                ImVec2(prevScreen.x, prevScreen.y),
+                                ImVec2(sx, sy),
+                                IM_COL32(255, 40, 40, 220), 2.0f);
+                        }
+                        prevScreen = Vec3{sx, sy, 0};
+                        havePrev = true;
+                    }
+                }
                 // Reactor bullseye when priority mode is on and target is enemy.
                 if (e.isReactor && !e.isAlly && g_aimbotReactorPriority.load()) {
                     ImU32 bull = IM_COL32(255, 40, 40, 240);
@@ -3208,17 +3269,30 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             bool isPlayer;
             bool isMob;
             bool isWalker;
+            bool isSentinel;
         };
         static std::vector<RadarSnap> radarSnaps;
         radarSnaps.clear();
         bool showItems = g_espShowItems.load();
+        bool showSentinels = g_espShowSentinels.load();
 
         EnterCriticalSection(&g_itemsLock);
         radarSnaps.reserve(g_items.size());
         for (auto& item : g_items) {
+            // Sentinels bypass all other category filters — dedicated toggle.
+            if (item.isSentinel) {
+                if (!showSentinels) continue;
+                RadarSnap rs;
+                rs.pos = item.pos;
+                rs.displayName = item.displayName;
+                rs.isPlayer = false; rs.isMob = false; rs.isWalker = false;
+                rs.isSentinel = true;
+                radarSnaps.push_back(std::move(rs));
+                continue;
+            }
             bool isPlayer = (item.name.rfind("PlayerAvatar", 0) == 0);
-            bool isMob = item.isCreature;
-            bool isWalker = (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
+            bool isWalker = !isPlayer && (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
+            bool isMob = !isPlayer && !isWalker && item.isCreature;
             bool isItem = (!isPlayer && !isMob && !isWalker);
             if (isPlayer && !showPlayers) continue;
             if (isMob && !showMobs) continue;
@@ -3231,6 +3305,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             rs.isPlayer = isPlayer;
             rs.isMob = isMob;
             rs.isWalker = isWalker;
+            rs.isSentinel = false;
             radarSnaps.push_back(std::move(rs));
         }
         LeaveCriticalSection(&g_itemsLock);
@@ -3260,14 +3335,24 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
             ImU32 dotColor;
             float dotSize;
-            if (item.isWalker) { dotColor = IM_COL32(0, 200, 255, 255); dotSize = 5.0f; }
+            if (item.isSentinel) { dotColor = IM_COL32(255, 40, 40, 255); dotSize = 4.0f; }
+            else if (item.isWalker) { dotColor = IM_COL32(0, 200, 255, 255); dotSize = 5.0f; }
             else if (item.isPlayer) { dotColor = IM_COL32(255, 50, 50, 255); dotSize = 4.0f; }
             else if (item.isMob) { dotColor = IM_COL32(255, 165, 0, 255); dotSize = 3.0f; }
             else { dotColor = IM_COL32(140, 200, 60, 200); dotSize = 2.5f; }
             drawList->AddCircleFilled(ImVec2(rx, ry), dotSize, dotColor);
 
+            // Sentinel detection ring on the radar — scale detection radius
+            // to radar pixels the same way entity distances are scaled.
+            if (item.isSentinel) {
+                float sensR = g_sentinelRadius.load() * scale;
+                drawList->AddCircle(ImVec2(rx, ry), sensR, IM_COL32(255, 40, 40, 220), 48, 1.5f);
+            }
+
             char distLabel[64];
-            if (item.isPlayer && !item.displayName.empty())
+            if (item.isSentinel)
+                snprintf(distLabel, sizeof(distLabel), "Sentinel %.0fm", dist);
+            else if (item.isPlayer && !item.displayName.empty())
                 snprintf(distLabel, sizeof(distLabel), "%s %.0fm", item.displayName.c_str(), dist);
             else
                 snprintf(distLabel, sizeof(distLabel), "%.0fm", dist);

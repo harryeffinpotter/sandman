@@ -121,7 +121,11 @@ struct ItemInfo {
     bool isInOthersInv;  // parent chain ends at a non-us entity — potential remote-inv target
     float healthNorm;    // 0..1 normalized health from HealthNormalizedComponent+0x10; -1 = unknown
     bool  isAlly;        // reactor/walker parent chain resolves to our player entity
+    bool  isSentinel;    // sentinel spawner / ambush decoration — draw detection radius
 };
+
+extern std::atomic<bool>  g_espShowSentinels;
+extern std::atomic<float> g_sentinelRadius;   // meters, default 400
 
 struct Hook {
     uint8_t original_bytes[32];
