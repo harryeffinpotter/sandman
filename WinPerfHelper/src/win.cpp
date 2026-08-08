@@ -179,10 +179,14 @@ std::string get_steam_name(unsigned long long steamId) {
     if (seh_steam_call_get_name(steamId, nameBuf, sizeof(nameBuf))) {
         result = nameBuf;
     }
-    // Cache both hits and misses so we don't hammer the API every scan tick.
-    EnterCriticalSection(&g_steamNameCacheCS);
-    g_steamNameCache[steamId] = result;
-    LeaveCriticalSection(&g_steamNameCacheCS);
+    // Cache HITS only. Empty results (Steam hasn't cached this player's
+    // persona yet — common right after they join the lobby) shouldn't
+    // become permanent misses. Retry on next scan.
+    if (!result.empty()) {
+        EnterCriticalSection(&g_steamNameCacheCS);
+        g_steamNameCache[steamId] = result;
+        LeaveCriticalSection(&g_steamNameCacheCS);
+    }
     return result;
 }
 int g_idx_cheat_walker_speed = -1;
