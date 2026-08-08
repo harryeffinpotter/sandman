@@ -1344,6 +1344,35 @@ static void seh_handle_streamproof_swap() {
     }
 }
 
+// Wrapped ImGui NewFrame calls — catch the C-runtime assert that fires
+// when the backend was init'd with a null hwnd (stream-proof partial init
+// failure). Assert = MessageBox + abort; we can't stop the MessageBox from
+// imgui itself, but we CAN catch the abort SEH so the game keeps running.
+// Returns true if NewFrames succeeded, false if we should abort this frame.
+static bool seh_imgui_newframes() {
+    __try {
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        dbglog("[imgui] SEH 0x%08lX in NewFrame — reverting backend to game hwnd\n", GetExceptionCode());
+        // Attempt to salvage: reinit backends against game hwnd/device
+        __try { ImGui_ImplDX11_Shutdown(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try { ImGui_ImplWin32_Shutdown(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try {
+            if (g_gameHwnd && g_pd3dDevice && g_pd3dDeviceContext) {
+                ImGui_ImplWin32_Init(g_gameHwnd);
+                ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+                g_overlayImguiInit = false;
+                g_streamProof.store(false);
+                destroy_stream_proof_overlay();
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return false;
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     static bool s_logged = false;
     if (!s_logged) { dbglog("[hooked_present] FIRST CALL swapchain=%p\n", pSwapChain); s_logged = true; }
@@ -1457,12 +1486,13 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
 
     seh_handle_streamproof_swap();
 
-    ImGui_ImplDX11_NewFrame();
-    if (s_frameCount < 5) { dbglog("[frame %d] dx11 newframe ok\n", s_frameCount); }
-    ImGui_ImplWin32_NewFrame();
-    if (s_frameCount < 5) { dbglog("[frame %d] win32 newframe ok\n", s_frameCount); }
-    ImGui::NewFrame();
-    if (s_frameCount < 5) { dbglog("[frame %d] imgui newframe ok\n", s_frameCount); }
+    if (!seh_imgui_newframes()) {
+        // NewFrame failed (e.g. imgui assert during stream-proof partial init).
+        // Skip rendering this frame; backend was salvaged inside the helper.
+        HRESULT hr2 = g_originalPresent(pSwapChain, SyncInterval, Flags);
+        return hr2;
+    }
+    if (s_frameCount < 5) { dbglog("[frame %d] all newframes ok\n", s_frameCount); }
 
     if (g_menuVisible) {
         std::string lockedName;
@@ -1682,10 +1712,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 for (size_t i = 0; i < g_items.size(); i++) {
                     const ItemInfo& item = g_items[i];
                     if (wf && !item.isWeapon) continue;
-                    // Hide container-children by default (they clutter the
-                    // world-item list). Toggle in Items panel to expose them
-                    // for dupe research.
-                    if (!showChildren && item.parentEntityId != 0 && !item.isHeldByPlayer) continue;
+                    // Hide container-INVENTORY-children by default. PlayerAvatars
+                    // + mobs have Parent set too (for session/spawn tracking)
+                    // so pure parent!=0 check was too broad and made players
+                    // vanish from ESP list (repeat regression, task 6-ish).
+                    // Now: only hide items whose NAME starts with "item_" —
+                    // that's actual inventory clutter. PlayerAvatars/mobs/
+                    // walkers stay visible regardless.
+                    bool looksLikeInvChild = item.parentEntityId != 0 && !item.isHeldByPlayer
+                                             && item.name.rfind("item_", 0) == 0;
+                    if (!showChildren && looksLikeInvChild) continue;
                     if (nlen > 0) {
                         bool found = false;
                         const char* haystack = item.name.c_str();
