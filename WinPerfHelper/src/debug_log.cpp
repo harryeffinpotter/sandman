@@ -9,9 +9,41 @@
 namespace {
 struct Line {
     char text[ringlog::LINE_MAX + 1];
+    char normKey[ringlog::LINE_MAX + 1];  // dedup key with variable data masked
     int  count;
 };
 Line g_ring[ringlog::RING_CAP];
+
+// Normalize a log line for fuzzy dedupe: mask sequences of hex/digit chars.
+// "AV at 0x1234 eid=999 (skipped 47)" -> "AV at 0x# eid=# (skipped #)"
+// So different addresses / entity IDs / counts collapse to the same key.
+void normalize_line(const char* src, char* dst, size_t dstCap) {
+    if (!src || !dst || dstCap == 0) { if (dst && dstCap) dst[0] = 0; return; }
+    size_t di = 0;
+    for (size_t si = 0; src[si] && di + 1 < dstCap; ++si) {
+        char c = src[si];
+        bool isNum = (c >= '0' && c <= '9');
+        // Treat 0x-prefixed runs as one hex blob
+        if (c == '0' && src[si+1] == 'x') {
+            if (di + 3 >= dstCap) break;
+            dst[di++] = '0'; dst[di++] = 'x'; dst[di++] = '#';
+            si += 2;
+            while (src[si] && ((src[si] >= '0' && src[si] <= '9') ||
+                               (src[si] >= 'a' && src[si] <= 'f') ||
+                               (src[si] >= 'A' && src[si] <= 'F'))) si++;
+            si--;
+            continue;
+        }
+        if (isNum) {
+            if (di == 0 || dst[di-1] != '#') dst[di++] = '#';
+            while (src[si] && src[si] >= '0' && src[si] <= '9') si++;
+            si--;
+            continue;
+        }
+        dst[di++] = c;
+    }
+    dst[di] = 0;
+}
 size_t g_head = 0;
 size_t g_size = 0;
 CRITICAL_SECTION g_lock;
@@ -79,24 +111,38 @@ void push(const char* fmt, ...) {
     size_t tlen = strlen(tmp);
     while (tlen > 0 && (tmp[tlen - 1] == '\n' || tmp[tlen - 1] == '\r')) tmp[--tlen] = 0;
 
+    // Fuzzy dedup key — masks addresses/eids/counts so
+    // "AV at 0x1234 eid=999" and "AV at 0x5678 eid=42" collapse.
+    char normKey[LINE_MAX + 1];
+    normalize_line(tmp, normKey, sizeof(normKey));
+
     EnterCriticalSection(&g_lock);
 
-    // Ring dedup: if same as the most recent ring entry, just bump its count.
+    // Ring dedup: check last 16 entries (not just most recent) for a
+    // normalized-key match. Human text stays the same when only variable
+    // data (addresses, IDs) changes -> collapse into a single entry with
+    // a running count. Keeps the live log readable during stall storms.
+    bool merged = false;
     if (g_size > 0) {
-        size_t lastIdx = (g_head + RING_CAP - 1) % RING_CAP;
-        if (strcmp(g_ring[lastIdx].text, tmp) == 0) {
-            g_ring[lastIdx].count++;
-        } else {
-            memcpy(g_ring[g_head].text, tmp, tlen + 1);
-            g_ring[g_head].count = 1;
-            g_head = (g_head + 1) % RING_CAP;
-            if (g_size < RING_CAP) ++g_size;
+        size_t back = g_size < 16 ? g_size : 16;
+        for (size_t off = 1; off <= back; ++off) {
+            size_t idx = (g_head + RING_CAP - off) % RING_CAP;
+            if (strcmp(g_ring[idx].normKey, normKey) == 0) {
+                g_ring[idx].count++;
+                // Refresh the visible text to the latest concrete instance
+                // so LO always sees a real example, not a stale one.
+                memcpy(g_ring[idx].text, tmp, tlen + 1);
+                merged = true;
+                break;
+            }
         }
-    } else {
+    }
+    if (!merged) {
         memcpy(g_ring[g_head].text, tmp, tlen + 1);
+        memcpy(g_ring[g_head].normKey, normKey, strlen(normKey) + 1);
         g_ring[g_head].count = 1;
         g_head = (g_head + 1) % RING_CAP;
-        g_size = 1;
+        if (g_size < RING_CAP) ++g_size;
     }
 
     ensure_disk_open();
