@@ -1372,11 +1372,16 @@ static bool seh_imgui_newframes() {
                 destroy_stream_proof_overlay();
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        // Ensure menu re-appears on next frame — otherwise assert cascade
+        // leaves g_menuVisible false and LO thinks it's fully gone.
+        g_menuVisible = true;
         return false;
     }
 }
 
 static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
+    // Update render-thread heartbeat FIRST — worker checks gap for freeze detect.
+    g_lastPresentTick.store(GetTickCount64());
     static bool s_logged = false;
     if (!s_logged) { dbglog("[hooked_present] FIRST CALL swapchain=%p\n", pSwapChain); s_logged = true; }
 
@@ -2464,6 +2469,24 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
             if (ImGui::BeginTabItem("Dupe Lab")) {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "MESSAGE CAPTURE + REPLAY (server-side dupe experiments)");
                 ImGui::Separator();
+                // Countdown: LO clicks button in menu (Esc pauses game),
+                // waits N seconds, un-Escapes, action fires with game live.
+                {
+                    int d = g_actionDelaySec.load();
+                    if (ImGui::SliderInt("Action delay (sec) — arms every button below to fire N sec after click", &d, 0, 15, "%d sec"))
+                        g_actionDelaySec.store(d);
+                    int pendId = g_pendingActionId.load();
+                    if (pendId != 0) {
+                        unsigned long long dl = g_pendingActionDeadline.load();
+                        unsigned long long now = GetTickCount64();
+                        int remainMs = (dl > now) ? (int)(dl - now) : 0;
+                        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1),
+                            "PENDING action id=%d — fires in %.1f sec", pendId, remainMs / 1000.0f);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel Pending")) g_pendingActionId.store(0);
+                    }
+                }
+                ImGui::Separator();
                 {
                     bool cap = g_captureMessages.load();
                     if (ImGui::Checkbox("Capture-to-file (perf_capture.dat)", &cap)) g_captureMessages.store(cap);
@@ -2477,14 +2500,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     "pickup-from-shelf", "pickup-from-box", "split-stack", "equip-item"
                 };
                 for (auto* nm : kRecordings) {
-                    char btn[128]; snprintf(btn, sizeof(btn), "Record: %s", nm);
-                    if (ImGui::Button(btn)) { dupelab_record_start(nm); }
+                    char btn[128]; snprintf(btn, sizeof(btn), "Record: %s (delayed)", nm);
+                    if (ImGui::Button(btn)) { dupelab_schedule(200, nm); }
                     ImGui::SameLine();
                     size_t c = dupelab_recording_count(nm);
                     ImGui::TextDisabled("(%zu msgs)", c);
                     ImGui::SameLine();
                     char pb[128]; snprintf(pb, sizeof(pb), "Playback##%s", nm);
-                    if (ImGui::Button(pb)) { dupelab_playback(nm); }
+                    if (ImGui::Button(pb)) { dupelab_schedule(100, nm); }
                 }
                 if (recording) {
                     ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "RECORDING — perform the action now, then click STOP.");

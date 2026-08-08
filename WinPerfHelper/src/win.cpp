@@ -111,6 +111,69 @@ std::atomic<int> g_hotkeyDupeMaster{VK_F10};
 std::atomic<int> g_hotkeyPlaybackFirst{VK_F7};
 std::atomic<int> g_hotkeyCaptureRequest{0};  // set to feature index when UI asks user to press a key
 
+// Countdown scheduler — every Dupe Lab button can be "armed" for delayed
+// fire, so LO can click in menu then Esc-close and let the countdown fire
+// the action in-game with server live (Esc pauses game = server ignores).
+std::atomic<int>          g_actionDelaySec{3};      // default 3 seconds
+std::atomic<int>          g_pendingActionId{0};     // 0 = no pending action
+std::atomic<unsigned long long> g_pendingActionDeadline{0};
+// Game-render-thread heartbeat. Updated inside hooked_present. Worker
+// thread checks it — if gap > 5s = game render thread frozen. Old
+// heartbeat was on OUR worker thread so it stayed 'alive' during freezes.
+std::atomic<unsigned long long> g_lastPresentTick{0};
+// Recorded name for pending playback (only for id == 100 = playback-by-name)
+static char g_pendingActionArg[64] = {0};
+static CRITICAL_SECTION g_pendingActionCS;
+static bool g_pendingActionCSInit = false;
+static void ensure_pending_cs() {
+    if (!g_pendingActionCSInit) { InitializeCriticalSection(&g_pendingActionCS); g_pendingActionCSInit = true; }
+}
+
+// Schedule action id to fire after g_actionDelaySec seconds. arg is optional
+// (only used for playback which needs the recording name). Called from UI.
+void dupelab_schedule(int actionId, const char* arg) {
+    ensure_pending_cs();
+    EnterCriticalSection(&g_pendingActionCS);
+    if (arg) strncpy_s(g_pendingActionArg, sizeof(g_pendingActionArg), arg, _TRUNCATE);
+    else g_pendingActionArg[0] = 0;
+    LeaveCriticalSection(&g_pendingActionCS);
+    int delayMs = g_actionDelaySec.load() * 1000;
+    g_pendingActionDeadline.store(GetTickCount64() + (unsigned long long)delayMs);
+    g_pendingActionId.store(actionId);
+    wlog("[dupelab] scheduled action id=%d arg='%s' fire in %d sec\n",
+         actionId, arg ? arg : "", g_actionDelaySec.load());
+}
+
+// Called from worker thread every scan. Fires the pending action if deadline
+// reached. IDs map to specific dupelab_* functions.
+void dupelab_check_pending() {
+    int id = g_pendingActionId.load();
+    if (id == 0) return;
+    unsigned long long now = GetTickCount64();
+    unsigned long long deadline = g_pendingActionDeadline.load();
+    if (now < deadline) return;
+    g_pendingActionId.store(0);
+    char arg[64] = {0};
+    ensure_pending_cs();
+    EnterCriticalSection(&g_pendingActionCS);
+    strncpy_s(arg, sizeof(arg), g_pendingActionArg, _TRUNCATE);
+    LeaveCriticalSection(&g_pendingActionCS);
+    wlog("[dupelab] firing scheduled action id=%d arg='%s'\n", id, arg);
+    switch (id) {
+        case 1:  dupelab_spoof_type_on_locked(g_dupeSpoofType.load()); break;
+        case 2:  dupelab_force_slot_on_locked(g_dupeForceHandSlot.load()); break;
+        case 3:  dupelab_strip_interactible_not_active_on_locked(); break;
+        case 4:  dupelab_spoof_type_on_locked(g_dupeSpoofType.load());
+                 dupelab_force_slot_on_locked(g_dupeForceHandSlot.load()); break;
+        case 5:  dupelab_spoof_type_on_locked(g_dupeSpoofType.load());
+                 dupelab_force_slot_on_locked(g_dupeForceHandSlot.load());
+                 dupelab_strip_interactible_not_active_on_locked(); break;
+        case 100: if (arg[0]) dupelab_playback_cstr(arg); break;
+        case 200: if (arg[0]) { dupelab_record_start(std::string(arg)); } break;  // delayed record start
+        // more can be added as needed
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Steam API cache — GetFriendPersonaName resolves a SteamID64 to the real
 // platform display name ("JimmyBob"). Loaded at boot from steam_api64.dll.
@@ -422,9 +485,20 @@ void dupelab_playback(const std::string& name) {
     if (g_recordings.count(name)) local = g_recordings[name].msgs;
     LeaveCriticalSection(&g_recCS);
     wlog("[dupelab] playback '%s' — dispatching %zu messages\n", name.c_str(), local.size());
+    ringlog::push("[playback:%s] dispatching %zu messages", name.c_str(), local.size());
+    IL2CPP_API* api2 = get_il2cpp_api();
+    int idx = 0;
     for (auto& cm : local) {
+        char kn[128] = "?";
+        if (api2 && api2->il2cpp_class_get_name && cm.klass) {
+            const char* n = api2->il2cpp_class_get_name(cm.klass);
+            if (n) strncpy_s(kn, sizeof(kn), n, _TRUNCATE);
+        }
+        ringlog::push("[playback:%s] [%d/%zu] dispatching %s", name.c_str(), idx + 1, local.size(), kn);
         seh_dispatch_captured(&cm);
+        idx++;
     }
+    ringlog::push("[playback:%s] done", name.c_str());
 }
 
 // Dupe Lab scenario actions — one-shot writes to the currently-locked
@@ -587,6 +661,16 @@ void __fastcall hooked_publish(void* thisPtr, void* msg) {
                     cm.byteLen = 0x80;
                     cm.tick = GetTickCount();
                     g_recordings[g_activeRecordingName].msgs.push_back(cm);
+                    // Log live so LO sees each captured action as it happens.
+                    char kn[128] = "?";
+                    IL2CPP_API* api = get_il2cpp_api();
+                    if (api && api->il2cpp_class_get_name && is_readable(cm.klass, 0x40)) {
+                        const char* n = api->il2cpp_class_get_name(cm.klass);
+                        if (n) strncpy_s(kn, sizeof(kn), n, _TRUNCATE);
+                    }
+                    ringlog::push("[record:%s] captured msg=%s (total=%zu)",
+                                  g_activeRecordingName.c_str(), kn,
+                                  g_recordings[g_activeRecordingName].msgs.size());
                 }
                 LeaveCriticalSection(&g_recCS);
             }

@@ -2003,6 +2003,8 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 wlog("[worker] HARD KILL requested — TerminateProcess\n");
                 TerminateProcess(GetCurrentProcess(), 0);
             }
+            // Fire any scheduled Dupe Lab action whose countdown expired.
+            dupelab_check_pending();
             // Hotkey rebind capture — UI sets g_hotkeyCaptureRequest to a
             // feature id when user clicks "Bind". Worker watches for next
             // key press and assigns it to the requested feature.

@@ -268,6 +268,12 @@ extern std::atomic<int>  g_hotkeyDupeSuspend;
 extern std::atomic<int>  g_hotkeyDupeMaster;
 extern std::atomic<int>  g_hotkeyPlaybackFirst;
 extern std::atomic<int>  g_hotkeyCaptureRequest;
+extern std::atomic<int>  g_actionDelaySec;
+extern std::atomic<int>  g_pendingActionId;
+extern std::atomic<unsigned long long> g_pendingActionDeadline;
+extern std::atomic<unsigned long long> g_lastPresentTick;  // updated by game render thread in hooked_present
+void dupelab_schedule(int actionId, const char* arg);
+void dupelab_check_pending();
 // Dupe Lab actions that mutate the currently-locked entity's components.
 // All SEH-safe: silently no-op if lock is empty or components missing.
 void dupelab_spoof_type_on_locked(int typeValue);
