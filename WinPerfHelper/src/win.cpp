@@ -3784,34 +3784,38 @@ static void hunt_bone_transforms_once(void* viewBehaviour);
 // hunt_bone_transforms_once section).
 static const char* extract_il2cpp_string_ascii(void* strObj, char* buf, int bufSize);
 
-// Name→bone-index map for the Transform-walk resolver. Same layout the
-// overlay renderer expects (0=Head, 1=Neck, 2=Chest, 3/4=Spine2/Spine1,
-// 5=Hips, 6-9 left arm chain, 10-13 right arm chain, 14-17 left leg chain,
-// 18-21 right leg chain). Fuzzy: uses substring match ordered so more
-// specific names win.
+// Name→bone-index map for the Transform-walk fallback resolver. Uses Unity
+// HumanBodyBones numbering so it agrees with the animator-path resolver and
+// the overlay's SKELETON_CONNECTIONS array. Slot 10 = Head, 54 = UpperChest,
+// 0 = Hips (Unity's canonical layout).
+//   Hips=0, LUpperLeg=1, RUpperLeg=2, LLowerLeg=3, RLowerLeg=4, LFoot=5,
+//   RFoot=6, Spine=7, Chest=8, Neck=9, Head=10, LShoulder=11, RShoulder=12,
+//   LUpperArm=13, RUpperArm=14, LLowerArm=15, RLowerArm=16, LHand=17,
+//   RHand=18, LToes=19, RToes=20, UpperChest=54.
+// Substring match, ordered so more-specific names win first.
 struct BoneNameMap { const char* substr; int idx; };
 static const BoneNameMap kBoneMap[] = {
-    // Order matters — more specific first so "LeftHand" doesn't hit before "LeftHandThumb"
-    { "Head",         0 }, { "Neck",         1 },
-    { "Chest",        2 }, { "UpperChest",   2 },
-    { "Spine2",       3 }, { "Spine1",       4 }, { "Spine",   3 },
-    { "Hips",         5 }, { "Pelvis",       5 },
-    { "LeftShoulder", 6 }, { "L_Shoulder",   6 }, { "LeftClavicle", 6 },
-    { "LeftUpperArm", 7 }, { "L_UpperArm",   7 }, { "LeftArm", 7 },
-    { "LeftLowerArm", 8 }, { "L_LowerArm",   8 }, { "LeftForeArm", 8 }, { "LeftElbow", 8 },
-    { "LeftHand",     9 }, { "L_Hand",       9 },
-    { "RightShoulder",10 },{ "R_Shoulder",  10 }, { "RightClavicle",10 },
-    { "RightUpperArm",11 },{ "R_UpperArm",  11 }, { "RightArm",   11 },
-    { "RightLowerArm",12 },{ "R_LowerArm",  12 }, { "RightForeArm",12 }, { "RightElbow", 12 },
-    { "RightHand",    13 },{ "R_Hand",      13 },
-    { "LeftUpperLeg", 14 },{ "L_UpperLeg",  14 }, { "LeftThigh",  14 }, { "L_Femur", 14 },
-    { "LeftLowerLeg", 15 },{ "L_LowerLeg",  15 }, { "LeftKnee",   15 }, { "LeftCalf", 15 },
-    { "LeftFoot",     16 },{ "L_Foot",      16 }, { "LeftAnkle",  16 },
-    { "LeftToe",      17 },{ "L_Toe",       17 },
-    { "RightUpperLeg",18 },{ "R_UpperLeg",  18 }, { "RightThigh", 18 }, { "R_Femur", 18 },
-    { "RightLowerLeg",19 },{ "R_LowerLeg",  19 }, { "RightKnee",  19 }, { "RightCalf",19 },
-    { "RightFoot",    20 },{ "R_Foot",      20 }, { "RightAnkle", 20 },
-    { "RightToe",     21 },{ "R_Toe",       21 },
+    { "UpperChest",   54 },
+    { "Head",         10 }, { "Neck",         9 },
+    { "Chest",        8  },
+    { "Spine2",       8  }, { "Spine1",       7 }, { "Spine",   7 },
+    { "Hips",         0  }, { "Pelvis",       0 },
+    { "LeftShoulder", 11 }, { "L_Shoulder",   11 }, { "LeftClavicle", 11 },
+    { "LeftUpperArm", 13 }, { "L_UpperArm",   13 }, { "LeftArm",      13 },
+    { "LeftLowerArm", 15 }, { "L_LowerArm",   15 }, { "LeftForeArm",  15 }, { "LeftElbow", 15 },
+    { "LeftHand",     17 }, { "L_Hand",       17 },
+    { "RightShoulder",12 }, { "R_Shoulder",   12 }, { "RightClavicle",12 },
+    { "RightUpperArm",14 }, { "R_UpperArm",   14 }, { "RightArm",     14 },
+    { "RightLowerArm",16 }, { "R_LowerArm",   16 }, { "RightForeArm", 16 }, { "RightElbow", 16 },
+    { "RightHand",    18 }, { "R_Hand",       18 },
+    { "LeftUpperLeg", 1  }, { "L_UpperLeg",   1 }, { "LeftThigh", 1 }, { "L_Femur", 1 },
+    { "LeftLowerLeg", 3  }, { "L_LowerLeg",   3 }, { "LeftKnee",  3 }, { "LeftCalf", 3 },
+    { "LeftFoot",     5  }, { "L_Foot",       5 }, { "LeftAnkle", 5 },
+    { "LeftToe",      19 }, { "L_Toe",        19 },
+    { "RightUpperLeg",2  }, { "R_UpperLeg",   2 }, { "RightThigh",2 }, { "R_Femur", 2 },
+    { "RightLowerLeg",4  }, { "R_LowerLeg",   4 }, { "RightKnee", 4 }, { "RightCalf",4 },
+    { "RightFoot",    6  }, { "R_Foot",       6 }, { "RightAnkle",6 },
+    { "RightToe",     20 }, { "R_Toe",        20 },
 };
 
 static int bone_name_to_index(const char* name) {
