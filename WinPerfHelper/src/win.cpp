@@ -297,7 +297,7 @@ fn_execute g_original_execute = nullptr;
 Hook g_farHook;
 Hook g_publishHook;
 void* g_holoPublishAddr = nullptr;
-std::atomic<bool> g_captureMessages{true};   // logs every published HoloMessage to perf_capture.dat
+std::atomic<bool> g_captureMessages{false};  // DEFAULT OFF. LO toggles from UI when actively capturing. On = every Publish call reads msg + writes to perf_capture.dat which can amplify AVs during instability.
 static FILE* g_captureFile = nullptr;
 static CRITICAL_SECTION g_captureCS;
 static bool g_captureCSInit = false;
