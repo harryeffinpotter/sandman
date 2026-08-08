@@ -860,6 +860,7 @@ void* g_userNameType = nullptr;
 std::atomic<bool> g_espShowSkeleton{true};    // default ON — creature-fix build
 std::atomic<bool> g_espShowBox{true};          // per-entity outlined box
 std::atomic<bool> g_espShowHealth{true};       // append [HP N%] to labels
+std::atomic<bool> g_espShowHealthBar{true};    // draw a colored bar above the box
 std::atomic<bool> g_espShowLootT1{true};
 std::atomic<bool> g_espShowLootT2{true};
 std::atomic<bool> g_espShowLootT3{true};

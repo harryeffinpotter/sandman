@@ -353,6 +353,7 @@ extern void* g_animatorType;
 extern std::atomic<bool> g_espShowSkeleton;
 extern std::atomic<bool> g_espShowBox;
 extern std::atomic<bool> g_espShowHealth;
+extern std::atomic<bool> g_espShowHealthBar;
 extern std::atomic<bool> g_espShowLootT1;
 extern std::atomic<bool> g_espShowLootT2;
 extern std::atomic<bool> g_espShowLootT3;

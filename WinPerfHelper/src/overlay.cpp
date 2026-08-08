@@ -503,10 +503,16 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
     playerAbsZ = g_playerPos.cy * CHUNK_SIZE + g_playerPos.z;
 
     for (auto& item : g_items) {
+        // MUTUALLY EXCLUSIVE — PlayerAvatar never counted as mob/walker even
+        // if it carries AiAgentData or similar mob-signaling components. This
+        // was the cause of "players not showing" after switching isCreature
+        // to component-based detection: an AiAgent-carrying PlayerAvatar was
+        // isPlayer=T AND isMob=T, then hidden by the isMob filter when
+        // ShowMobs was off (even with ShowPlayers on).
         bool isPlayer = (item.name.rfind("PlayerAvatar", 0) == 0);
-        bool isMob = item.isCreature;
-        bool isWalker = (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
-        bool isItem = (!isPlayer && !isMob && !isWalker);
+        bool isWalker = !isPlayer && (item.name.rfind("EXPEDITION_WALKER", 0) == 0);
+        bool isMob    = !isPlayer && !isWalker && item.isCreature;
+        bool isItem   = (!isPlayer && !isMob && !isWalker);
         bool isLoot = (item.lootTier > 0);
 
         if (isPlayer && !g_espShowPlayers.load()) continue;
@@ -2424,7 +2430,10 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::SameLine();
                     bool sh = g_espShowHealth.load();
                     if (ImGui::Checkbox("HP%", &sh)) g_espShowHealth.store(sh);
-                    ImGui::TextDisabled("Pick Box, Skeleton, both, or neither. HP appends [HP N%%] to labels when the entity has HealthNormalizedComponent.");
+                    ImGui::SameLine();
+                    bool shb = g_espShowHealthBar.load();
+                    if (ImGui::Checkbox("HP Bar", &shb)) g_espShowHealthBar.store(shb);
+                    ImGui::TextDisabled("HP appends [HP N%%] text. HP Bar draws a colored bar above the box (green >=50%%, orange 20-50%%, red <20%%).");
                 }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "Filters (hide from ESP)");
@@ -3042,6 +3051,33 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         ImVec2(e.sx + boxW / 2, e.sy + boxH / 2),
                         borderColor, 3.0f);
                 }
+                // Health bar — draw ABOVE the box (or above the entity center
+                // if box is disabled) so it's always visible. Green >=50%,
+                // orange 20-50%, red <20%.
+                if (g_espShowHealthBar.load() && e.healthNorm >= 0.0f && e.healthNorm <= 1.5f) {
+                    float hn = e.healthNorm;
+                    if (hn > 1.0f) hn = 1.0f;
+                    float bx0 = e.sx - boxW / 2;
+                    float bx1 = e.sx + boxW / 2;
+                    float by  = e.sy - boxH / 2 - 8.0f;   // 8px above box top
+                    float bh  = 4.0f;
+                    ImU32 hpCol;
+                    if (hn >= 0.5f)      hpCol = IM_COL32(60, 220, 60, 240);   // green
+                    else if (hn >= 0.2f) hpCol = IM_COL32(255, 165, 40, 240);  // orange
+                    else                 hpCol = IM_COL32(230, 40, 40, 240);   // red
+                    drawList->AddRectFilled(
+                        ImVec2(bx0, by),
+                        ImVec2(bx1, by + bh),
+                        IM_COL32(20, 20, 20, 200));                        // dark bg
+                    drawList->AddRectFilled(
+                        ImVec2(bx0, by),
+                        ImVec2(bx0 + (bx1 - bx0) * hn, by + bh),
+                        hpCol);                                            // fill
+                    drawList->AddRect(
+                        ImVec2(bx0, by),
+                        ImVec2(bx1, by + bh),
+                        IM_COL32(0, 0, 0, 200));                           // outline
+                }
                 drawList->AddText(
                     ImVec2(e.sx - textSize.x / 2, e.sy - textSize.y / 2),
                     textColor, e.label);
@@ -3064,6 +3100,13 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     int from = SKELETON_CONNECTIONS[ci][0];
                     int to = SKELETON_CONNECTIONS[ci][1];
                     if (!e.bones[from].valid || !e.bones[to].valid) continue;
+                    // Sanity: skip lines between bones whose screen positions
+                    // are absurdly far apart (weird non-humanoid rigs like
+                    // sentinel spawners produce >1000px lines across the whole
+                    // screen). Adjacent humanoid bones are always <200px apart.
+                    float _dx = e.bones[from].x - e.bones[to].x;
+                    float _dy = e.bones[from].y - e.bones[to].y;
+                    if (_dx*_dx + _dy*_dy > 250.0f*250.0f) continue;
                     ImU32 boneColor = (e.type == 0)
                         ? IM_COL32(255, 255, 255, 200)
                         : IM_COL32(255, 200, 100, 200);
