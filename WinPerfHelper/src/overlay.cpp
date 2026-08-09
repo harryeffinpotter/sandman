@@ -1882,6 +1882,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bool isHeldByPlayer;
                     bool isInOthersInv;
                     int  parentEntityId;
+                    float healthNorm;   // -1 = unknown
                 };
                 static std::vector<ItemRowSnap> rowSnaps;
                 rowSnaps.clear();
@@ -1959,11 +1960,12 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     rs.isHeldByPlayer = item.isHeldByPlayer;
                     rs.isInOthersInv = item.isInOthersInv;
                     rs.parentEntityId = item.parentEntityId;
+                    rs.healthNorm = item.healthNorm;
                     rowSnaps.push_back(std::move(rs));
                 }
                 LeaveCriticalSection(&g_itemsLock);
 
-                if (ImGui::BeginTable("Items", 6,
+                if (ImGui::BeginTable("Items", 7,
                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter |
                     ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable)) {
 
@@ -1971,6 +1973,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30.0f);
                     ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableSetupColumn("Dist", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                    ImGui::TableSetupColumn("HP",   ImGuiTableColumnFlags_WidthFixed, 50.0f);
                     ImGui::TableSetupColumn("Src", ImGuiTableColumnFlags_WidthFixed, 45.0f);
                     ImGui::TableSetupColumn("Tag", ImGuiTableColumnFlags_WidthFixed, 40.0f);
                     ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 60.0f);
@@ -2093,12 +2096,26 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                                 ImGui::TextUnformatted("---");
 
                             ImGui::TableSetColumnIndex(3);
-                            ImGui::TextUnformatted(item.isHeldByPlayer ? "PAR" : "WRLD");
+                            if (item.healthNorm >= 0.0f && item.healthNorm <= 1.5f) {
+                                int pct = (int)(item.healthNorm * 100.0f + 0.5f);
+                                // Color-code: green >=50, orange 20-50, red <20
+                                ImVec4 hpCol = (item.healthNorm >= 0.5f)
+                                    ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                                    : (item.healthNorm >= 0.2f)
+                                    ? ImVec4(1.0f, 0.65f, 0.15f, 1.0f)
+                                    : ImVec4(0.95f, 0.25f, 0.25f, 1.0f);
+                                ImGui::TextColored(hpCol, "%d%%", pct);
+                            } else {
+                                ImGui::TextUnformatted("---");
+                            }
 
                             ImGui::TableSetColumnIndex(4);
-                            ImGui::TextUnformatted(item.isHeavy ? "HVY" : (item.isWeapon ? "WPN" : ""));
+                            ImGui::TextUnformatted(item.isHeldByPlayer ? "PAR" : "WRLD");
 
                             ImGui::TableSetColumnIndex(5);
+                            ImGui::TextUnformatted(item.isHeavy ? "HVY" : (item.isWeapon ? "WPN" : ""));
+
+                            ImGui::TableSetColumnIndex(6);
                             ImGui::Text("%d", item.entityId);
 
                             ImGui::PopStyleColor();
