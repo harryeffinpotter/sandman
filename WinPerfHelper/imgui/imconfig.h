@@ -15,13 +15,14 @@
 #pragma once
 
 //---- Define assertion handler. Defaults to calling assert().
-// WinPerfHelper: we're injected into a game — an ImGui assertion popping
-// the MSVC dialog kills the host process. Redirect to a log-only handler
-// (silently continue with the bad state instead of crashing the game).
-// LO 2026-08-09 hit ImVector out-of-bounds at imgui.h:2262 which took the
-// game down while playing. Log and press on.
+// WinPerfHelper: injected DLL build routes to ringlog. External
+// PerfMonSvc.exe doesn't link ringlog — leaves imgui's default assert
+// there so it uses standard assert(). WINPERFHELPER_DLL_BUILD is
+// defined via /D by the DLL's build.ps1 only.
+#ifdef WINPERFHELPER_DLL_BUILD
 namespace ringlog { void push(const char*, ...); }
 #define IM_ASSERT(_EXPR) do { if (!(_EXPR)) ringlog::push("[imgui-assert] " #_EXPR " @ %s:%d", __FILE__, __LINE__); } while(0)
+#endif
 
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
