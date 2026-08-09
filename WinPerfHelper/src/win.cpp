@@ -2470,7 +2470,11 @@ static void process_one_entity(
             if (!is_readable(parComp, 0x18)) break;
             int parentId = *(int*)((uintptr_t)parComp + 0x10);
             if (parentId <= 0) break;
-            if (parentId == playerEntityId) {
+            // Match by ID if we know playerEntityId, OR by blueprint name
+            // being 'PlayerAvatar'. Falling back to name means held items
+            // still get flagged even when player discovery hasn't landed
+            // yet — which fixes the 'held item vanished' Items-panel bug.
+            if (playerEntityId > 0 && parentId == playerEntityId) {
                 info.isHeldByPlayer = true;
                 break;
             }
@@ -2478,6 +2482,18 @@ static void process_one_entity(
             if (pit == idToEntity.end()) break;
             curEntity = pit->second;
             if (!is_readable(curEntity, 0x68)) break;
+            // Name-based fallback: is this parent entity a PlayerAvatar?
+            if (g_idx_blueprint >= 0) {
+                void* pbp = get_component(curEntity, g_idx_blueprint);
+                if (is_readable(pbp, 0x18)) {
+                    void* pns = *(void**)((uintptr_t)pbp + 0x10);
+                    std::string pname = read_il2cpp_string(pns);
+                    if (pname.rfind("PlayerAvatar", 0) == 0) {
+                        info.isHeldByPlayer = true;
+                        break;
+                    }
+                }
+            }
             hopCount++;
         }
         // If parent chain ended at a non-us entity, it's in someone else's
