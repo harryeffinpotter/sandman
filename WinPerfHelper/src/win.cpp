@@ -877,6 +877,8 @@ std::atomic<float> g_sentinelMountHeight{25.0f}; // mount pillar height (m) — 
 std::atomic<bool>  g_espHideOwnWalkerParts{true}; // suppress walker_* entities that are children of YOUR trampler
 std::atomic<int>   g_reequipSlotA{0};   // dupe swap slot A (usually your locked item slot)
 std::atomic<int>   g_reequipSlotB{1};   // dupe swap slot B (any other slot to bounce to)
+std::atomic<bool>  g_autoInteract{false};  // spam F key after each equip to complete pickup
+std::atomic<int>   g_autoInteractKey{'F'}; // default F, user-configurable
 std::atomic<float> g_espLabelScale{1.0f};        // 0.5..2.0 label text size
 std::atomic<int>   g_espLabelPos{0};             // 0=center, 1=above, 2=below
 std::atomic<bool>  g_espShowDistance{true};      // append " [Nm]" to labels

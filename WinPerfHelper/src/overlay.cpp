@@ -296,6 +296,20 @@ static void auto_reequip_tick() {
     s_toggle ^= 1;
     s_firedThisBurst++;
     s_lastFire = now;
+
+    // Full-auto pickup: fire the interact key (F) right after equip dispatch.
+    // The game listens for F to trigger 'take item' on whatever the client's
+    // ClientInputState.interactTargetId currently points to. Combined with
+    // our lock-target and the equip race, this closes the dupe loop with
+    // zero manual input.
+    if (g_autoInteract.load()) {
+        INPUT ki = {};
+        ki.type = INPUT_KEYBOARD;
+        ki.ki.wVk = (WORD)g_autoInteractKey.load();
+        SendInput(1, &ki, sizeof(ki));
+        ki.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &ki, sizeof(ki));
+    }
 }
 
 
@@ -1737,6 +1751,13 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         if (ImGui::InputInt("Slot B##reb", &b)) g_reequipSlotB.store(b);
                         ImGui::PopItemWidth();
                         ImGui::TextDisabled("Alternates equip between A and B via internal message dispatch.");
+                        // Full-auto: spam F (or user-picked key) after each equip.
+                        bool ai = g_autoInteract.load();
+                        if (ImGui::Checkbox("Auto-press F (complete pickup)", &ai))
+                            g_autoInteract.store(ai);
+                        if (ai) {
+                            ImGui::TextDisabled("Sends the interact key after every equip. Closes the dupe loop, no manual F needed.");
+                        }
                     }
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(dupe non-weapons w/o manual swap)");
