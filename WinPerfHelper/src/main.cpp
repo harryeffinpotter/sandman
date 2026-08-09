@@ -459,39 +459,23 @@ static void on_abort_signal(int) {
     _exit(1);
 }
 
-// [perf-warn] instrumentation — any labeled section taking > threshold
-// ms logs its wall time. Used to hunt the 30-second freeze — whichever
-// op logs a matching duration IS the culprit.
-struct PerfProbe {
-    const char* label;
-    LARGE_INTEGER t0;
-    double thresholdMs;
-    PerfProbe(const char* lbl, double thresh = 100.0) : label(lbl), thresholdMs(thresh) {
-        QueryPerformanceCounter(&t0);
-    }
-    ~PerfProbe() {
-        LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
-        static LARGE_INTEGER freq = {}; if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-        double ms = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
-        if (ms > thresholdMs) {
-            wlog("[perf-warn] %s took %.1fms (threshold %.0f)\n", label, ms, thresholdMs);
-        }
-    }
-};
+// [perf-warn] macros — GetTickCount()-based inline timing. Uses no C++
+// destructors so it's compatible with __try/__except blocks (C2712).
+// Wrap: PERF_BEGIN; work; __try { ... } __except { ... } PERF_END("label", 50);
+#define PERF_BEGIN(name) DWORD _pt_##name = GetTickCount()
+#define PERF_END(name, label, thresh) do { DWORD _pe = GetTickCount() - _pt_##name; \
+    if (_pe > (thresh)) wlog("[perf-warn] %s took %lums (threshold %d)\n", (label), _pe, (int)(thresh)); \
+} while(0)
 
 static void safe_scan_tick(int scanCounter) {
     static DWORD s_cooldownUntil = 0;
     DWORD now = GetTickCount();
     if (now < s_cooldownUntil) return;
 
-    PerfProbe _ptTick("safe_scan_tick TOTAL", 250.0);
+    PERF_BEGIN(tick);
 
-    // scan_entities runs under the outer VEH umbrella (g_workerVehActive
-    // is true) so it can recover from any AV mid-walk. If it AVs, we set
-    // 3s cooldown but each of the apply_* mods below still runs
-    // independently on the NEXT tick they're due.
+    PERF_BEGIN(scanE);
     __try {
-        PerfProbe _p("scan_entities", 100.0);
         scan_entities();
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         // No cooldown — per-entity SEH (seh_process_one_entity) catches AVs
@@ -503,6 +487,7 @@ static void safe_scan_tick(int scanCounter) {
         g_entityCount.store(0);
         SwitchToThread();
     }
+    PERF_END(scanE, "scan_entities", 100);
 
     // Each apply_* runs in its OWN __try. Disable VEH catching around each
     // so local __try/__except handles any AV without jumping back to the
@@ -512,37 +497,49 @@ static void safe_scan_tick(int scanCounter) {
         bool prev = g_workerVehActive;
         g_workerVehActive = false;
         if (g_turretRapidFire.load() || g_turretNoRecoil.load()) {
-            __try { PerfProbe _p("apply_turret_mods", 50.0); apply_turret_mods(); }
+            PERF_BEGIN(turret);
+            __try { apply_turret_mods(); }
             __except(EXCEPTION_EXECUTE_HANDLER) {
                 wlog("[worker] SEH in apply_turret_mods: 0x%08lX\n", GetExceptionCode());
             }
+            PERF_END(turret, "apply_turret_mods", 50);
         }
         if (g_weaponModsEnabled.load()) {
-            __try { PerfProbe _p("apply_weapon_mods", 50.0); apply_weapon_mods(); }
+            PERF_BEGIN(weap);
+            __try { apply_weapon_mods(); }
             __except(EXCEPTION_EXECUTE_HANDLER) {
                 wlog("[worker] SEH in apply_weapon_mods: 0x%08lX\n", GetExceptionCode());
             }
+            PERF_END(weap, "apply_weapon_mods", 50);
         }
-        __try { PerfProbe _p("apply_player_mods", 50.0); apply_player_mods(); }
+        PERF_BEGIN(player);
+        __try { apply_player_mods(); }
         __except(EXCEPTION_EXECUTE_HANDLER) {
             wlog("[worker] SEH in apply_player_mods: 0x%08lX\n", GetExceptionCode());
         }
-        __try { PerfProbe _p("apply_world_mods", 50.0); apply_world_mods(); }
+        PERF_END(player, "apply_player_mods", 50);
+        PERF_BEGIN(world);
+        __try { apply_world_mods(); }
         __except(EXCEPTION_EXECUTE_HANDLER) {
             wlog("[worker] SEH in apply_world_mods: 0x%08lX\n", GetExceptionCode());
-            g_todInstance = 0;  // dead — never try again this session
+            g_todInstance = 0;
         }
-        __try { PerfProbe _p("scan_storm_entities", 50.0); scan_storm_entities((void*)g_gameContextModule); }
+        PERF_END(world, "apply_world_mods", 50);
+        PERF_BEGIN(storm);
+        __try { scan_storm_entities((void*)g_gameContextModule); }
         __except(EXCEPTION_EXECUTE_HANDLER) {
             wlog("[worker] SEH in scan_storm_entities: 0x%08lX\n", GetExceptionCode());
         }
+        PERF_END(storm, "scan_storm_entities", 50);
         g_workerVehActive = prev;
     }
 
-    __try { PerfProbe _p("apply_noclip_step", 20.0); apply_noclip_step(); }
+    PERF_BEGIN(noclip);
+    __try { apply_noclip_step(); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
         wlog("[worker] SEH in apply_noclip_step: 0x%08lX\n", GetExceptionCode());
     }
+    PERF_END(noclip, "apply_noclip_step", 20);
 
     if (g_dumpEntities.load()) {
         __try { dump_entities_to_file(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -550,6 +547,7 @@ static void safe_scan_tick(int scanCounter) {
     if (g_probeContext.load()) {
         __try { probe_context_to_file(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
+    PERF_END(tick, "safe_scan_tick TOTAL", 250);
 }
 
 // Dump every method of a klass — name, return type, param types, address —
