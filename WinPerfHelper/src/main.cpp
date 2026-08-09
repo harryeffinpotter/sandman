@@ -705,6 +705,20 @@ static DWORD WINAPI worker_thread(LPVOID) {
     ringlog::force_flush();
 
     g_workerThreadId = GetCurrentThreadId();
+
+    // Self-pin to the LAST logical CPU + BELOW_NORMAL priority. Moved out
+    // of DllMain because the loader-lock context is fragile for anything
+    // beyond a bare CreateThread. Doing it here — inside the worker thread
+    // itself, well after DLL init — is the safe pattern.
+    {
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        DWORD ncores = si.dwNumberOfProcessors;
+        if (ncores > 1) {
+            DWORD_PTR mask = ((DWORD_PTR)1) << (ncores - 1);
+            SetThreadAffinityMask(GetCurrentThread(), mask);
+        }
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
     ringlog::push("[worker] pre cache_isbadreadptr_range");
     ringlog::force_flush();
     cache_isbadreadptr_range();
@@ -2405,24 +2419,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
             srand((unsigned)GetTickCount() ^ (unsigned)GetCurrentProcessId());
             // Hide our module from PEB list walkers.
             hide_module_from_peb(hModule);
+            // Just spawn — thread pins itself and sets its own priority
+            // on entry (see worker_thread). Setting those FROM DllMain runs
+            // under the Windows loader lock, which is officially undefined
+            // behavior territory for anything more than a bare CreateThread.
+            // LO 2026-08-09: caused game to crash on launch (recoverable
+            // via relaunch) once combined with the recent DLL churn.
             HANDLE wth = CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
-            if (wth) {
-                // Pin worker to the LAST logical CPU so it never contends
-                // with the game's render thread (usually core 0 or the
-                // process's preferred core). Modern rigs have 8-32 cores;
-                // sacrificing the last one to ESP costs nothing.
-                SYSTEM_INFO si; GetSystemInfo(&si);
-                DWORD ncores = si.dwNumberOfProcessors;
-                if (ncores > 1) {
-                    DWORD_PTR mask = ((DWORD_PTR)1) << (ncores - 1);
-                    SetThreadAffinityMask(wth, mask);
-                }
-                // BELOW_NORMAL — if a normal-priority thread wants our core
-                // we yield instantly. In practice nothing else is pinned to
-                // the last core so this is belt-and-suspenders.
-                SetThreadPriority(wth, THREAD_PRIORITY_BELOW_NORMAL);
-                CloseHandle(wth);
-            }
+            if (wth) CloseHandle(wth);
         }
     }
     return TRUE;
