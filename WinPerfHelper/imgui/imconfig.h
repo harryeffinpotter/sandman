@@ -15,10 +15,13 @@
 #pragma once
 
 //---- Define assertion handler. Defaults to calling assert().
-// - If your macro uses multiple statements, make sure is enclosed in a 'do { .. } while (0)' block so it can be used as a single statement.
-// - Compiling with NDEBUG will usually strip out assert() to nothing, which is NOT recommended because we use asserts to notify of programmer mistakes.
-//#define IM_ASSERT(_EXPR)  MyAssert(_EXPR)
-//#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
+// WinPerfHelper: we're injected into a game — an ImGui assertion popping
+// the MSVC dialog kills the host process. Redirect to a log-only handler
+// (silently continue with the bad state instead of crashing the game).
+// LO 2026-08-09 hit ImVector out-of-bounds at imgui.h:2262 which took the
+// game down while playing. Log and press on.
+namespace ringlog { void push(const char*, ...); }
+#define IM_ASSERT(_EXPR) do { if (!(_EXPR)) ringlog::push("[imgui-assert] " #_EXPR " @ %s:%d", __FILE__, __LINE__); } while(0)
 
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
