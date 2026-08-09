@@ -1916,6 +1916,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bool isInOthersInv;
                     int  parentEntityId;
                     float healthNorm;   // -1 = unknown
+                    std::string parentName;   // "in <containerName>" for readable inv-child display
                 };
                 static std::vector<ItemRowSnap> rowSnaps;
                 rowSnaps.clear();
@@ -1998,6 +1999,17 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     rs.isInOthersInv = item.isInOthersInv;
                     rs.parentEntityId = item.parentEntityId;
                     rs.healthNorm = item.healthNorm;
+                    // Look up parent entity by ID and grab its displayName so
+                    // container contents show "in <containerName>" instead of
+                    // the meaningless "[inv 1888688]" numeric id.
+                    if (item.parentEntityId != 0) {
+                        for (auto& pit : g_items) {
+                            if (pit.entityId == item.parentEntityId) {
+                                rs.parentName = !pit.displayName.empty() ? pit.displayName : pit.name;
+                                break;
+                            }
+                        }
+                    }
                     rowSnaps.push_back(std::move(rs));
                 }
                 LeaveCriticalSection(&g_itemsLock);
@@ -2128,12 +2140,20 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             }
 
                             ImGui::TableSetColumnIndex(1);
-                            if (item.isHeldByPlayer)
+                            // Display priority:
+                            //  parent has readable name → "[in <containerName>] itemName"
+                            //  isInOthersInv (no parent name) → "[inv <id>] itemName"
+                            //  isHeldByPlayer → "itemName (held)"
+                            //  none → plain itemName
+                            if (!item.parentName.empty()) {
+                                ImGui::Text("[in %s] %s", item.parentName.c_str(), item.name.c_str());
+                            } else if (item.isHeldByPlayer) {
                                 ImGui::Text("%s (held)", item.name.c_str());
-                            else if (item.isInOthersInv)
+                            } else if (item.isInOthersInv) {
                                 ImGui::Text("[inv %d] %s", item.parentEntityId, item.name.c_str());
-                            else
+                            } else {
                                 ImGui::TextUnformatted(item.name.c_str());
+                            }
 
                             ImGui::TableSetColumnIndex(2);
                             if (item.distance >= 0)
