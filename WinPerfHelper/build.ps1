@@ -20,7 +20,7 @@ $sources = @(
     "imgui\imgui_impl_win32.cpp"
 )
 
-cl /EHa /O2 /MT /LD /std:c++17 /DWINPERFHELPER_DLL_BUILD @sources /Fe:RTSSHelper64.dll /link /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib dcomp.lib delayimp.lib /DELAYLOAD:dbghelp.dll /DELAYLOAD:dcomp.dll
+cl /EHa /O2 /MT /LD /std:c++17 @sources /Fe:RTSSHelper64.dll /link /OPT:REF /OPT:ICF user32.lib d3d11.lib dxgi.lib dwmapi.lib dxguid.lib dbghelp.lib dcomp.lib delayimp.lib /DELAYLOAD:dbghelp.dll /DELAYLOAD:dcomp.dll
 
 if ($LASTEXITCODE -eq 0) {
     Copy-Item -Force "RTSSHelper64.dll" "launcher\RTSSHelper64.dll"
