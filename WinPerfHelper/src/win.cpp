@@ -2321,7 +2321,16 @@ static void process_one_entity(
     }
     if (name == "Sun") return;
     if (name.rfind("LandingCutScene", 0) == 0) return;
-    if (name.rfind("Shot Projectile", 0) == 0) return;
+    // Drop every variant of bullet/round-in-flight entities.
+    // Case-insensitive substring match — catches "Shot Projectile",
+    // "shot_projectile", "ShotProjectile", "MobShotProjectileTrail", etc.
+    {
+        std::string _lower = name;
+        for (auto& c : _lower) if (c >= 'A' && c <= 'Z') c = c + 32;
+        if (_lower.find("shot")       != std::string::npos &&
+            _lower.find("projectile") != std::string::npos) return;
+        if (_lower.find("bullet")     != std::string::npos) return;
+    }
     (*pDbgPassFilter)++;
 
     void* posComp = get_component(entity, g_idx_position);
