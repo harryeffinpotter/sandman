@@ -1749,7 +1749,19 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             ImGui::TextDisabled("Remembers last-locked item name. When it disappears + reappears mid-dupe-cycle, re-locks automatically. No need to click again.");
                         }
                         // Always-visible: how long between full rounds
-                        ImGui::SliderInt("Time between rounds (ms)", &g_reequipRoundPauseMs, 100, 5000, "%d ms");
+                        ImGui::SliderInt("Time between rounds (ms)", &g_reequipRoundPauseMs, 20, 5000, "%d ms");
+                        // HYPER MODE preset — crank everything for insane speed
+                        if (ImGui::Button("HYPER (30ms rounds, 2x per round, 20ms gap)")) {
+                            g_reequipRoundPauseMs = 30;
+                            g_reequipBurstCount = 2;
+                            g_reequipBurstGapMs = 20;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("SAFE (500ms, 1x)")) {
+                            g_reequipRoundPauseMs = 500;
+                            g_reequipBurstCount = 1;
+                            g_reequipBurstGapMs = 30;
+                        }
                         // Double-pump: 2 quick re-equips per round instead of 1
                         static bool s_doublePump = (g_reequipBurstCount == 2);
                         // Keep the checkbox in sync if code somewhere else changed burst count
