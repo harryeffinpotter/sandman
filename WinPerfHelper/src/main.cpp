@@ -1757,6 +1757,113 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
         }
 
+        // ============================================================
+        // UserNamesHUD-based UCM repair (LO 2026-08-09)
+        // The heuristic UserContextModule discovery above catches the wrong
+        // pointer sometimes — audit worker found get_users() returned NULL
+        // on the captured instance. UserNamesHUD (the MonoBehaviour that
+        // draws player names above heads) holds the AUTHORITATIVE
+        // UserContextModule reference in its _usersModule field.
+        // Strategy: find UserNamesHUD klass, heap-scan for its instance,
+        // read _usersModule, overwrite g_userContextModuleInstance.
+        // ============================================================
+        if (api.il2cpp_domain_get && api.il2cpp_domain_get_assemblies
+            && api.il2cpp_assembly_get_image && api.il2cpp_image_get_class_count
+            && api.il2cpp_image_get_class && api.il2cpp_class_get_name
+            && api.il2cpp_class_get_fields && api.il2cpp_field_get_name
+            && api.il2cpp_field_get_offset && api.il2cpp_class_get_parent) {
+
+            void* unhKlass = nullptr;
+            {
+                size_t asmCountH = 0;
+                void* domH = api.il2cpp_domain_get();
+                void** assembliesH = api.il2cpp_domain_get_assemblies(domH, &asmCountH);
+                for (size_t i = 0; i < asmCountH && !unhKlass; i++) {
+                    void* img = api.il2cpp_assembly_get_image(assembliesH[i]);
+                    if (!img) continue;
+                    size_t classCount = api.il2cpp_image_get_class_count(img);
+                    for (size_t j = 0; j < classCount; j++) {
+                        void* klass = api.il2cpp_image_get_class(img, j);
+                        if (!klass) continue;
+                        const char* cn = api.il2cpp_class_get_name(klass);
+                        if (!cn) continue;
+                        // Exact name match only. Excludes UserNameHUDWidget,
+                        // UserNamesHUDUpdateSystem, and inner types.
+                        if (strcmp(cn, "UserNamesHUD") == 0) {
+                            unhKlass = klass;
+                            break;
+                        }
+                    }
+                }
+            }
+            wlog("[worker] UserNamesHUD klass = %p\n", unhKlass);
+
+            // Resolve field offsets for _usersModule (parent chain up to 6 deep).
+            int usersModuleOffset = -1;
+            if (unhKlass) {
+                void* cur = unhKlass;
+                for (int depth = 0; depth < 6 && usersModuleOffset < 0; depth++) {
+                    if (!cur) break;
+                    void* fit = nullptr;
+                    void* field;
+                    while ((field = api.il2cpp_class_get_fields(cur, &fit)) != nullptr) {
+                        const char* fname = api.il2cpp_field_get_name(field);
+                        if (fname && strcmp(fname, "_usersModule") == 0) {
+                            usersModuleOffset = (int)api.il2cpp_field_get_offset(field);
+                            break;
+                        }
+                    }
+                    cur = api.il2cpp_class_get_parent(cur);
+                }
+            }
+            wlog("[worker] UserNamesHUD._usersModule offset = 0x%X\n", usersModuleOffset);
+
+            // Heap scan for a UserNamesHUD instance.
+            void* unhInstance = nullptr;
+            if (unhKlass) {
+                MEMORY_BASIC_INFORMATION mbiH;
+                uintptr_t addrH = 0;
+                while (!unhInstance && addrH < 0x00007FFFFFFFFFFFULL
+                       && VirtualQuery((LPCVOID)addrH, &mbiH, sizeof(mbiH)) == sizeof(mbiH)) {
+                    uintptr_t base = (uintptr_t)mbiH.BaseAddress;
+                    SIZE_T sz = mbiH.RegionSize;
+                    bool scan = (mbiH.State == MEM_COMMIT)
+                        && (mbiH.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))
+                        && !(mbiH.Protect & PAGE_GUARD);
+                    // MonoBehaviours live in the managed heap — same 0x10000000-0x40000000 range.
+                    if (scan && sz <= 0x10000000ULL && base >= 0x10000000ULL && base < 0x40000000ULL) {
+                        __try {
+                            uintptr_t* p = (uintptr_t*)base;
+                            uintptr_t* end = (uintptr_t*)(base + sz - sizeof(uintptr_t));
+                            for (; p < end; p++) {
+                                if (*p == (uintptr_t)unhKlass) {
+                                    unhInstance = (void*)p;
+                                    break;
+                                }
+                            }
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    }
+                    if (sz == 0) break;
+                    addrH = base + sz;
+                }
+            }
+            wlog("[worker] UserNamesHUD instance = %p\n", unhInstance);
+
+            // Read _usersModule, overwrite g_userContextModuleInstance if valid.
+            if (unhInstance && usersModuleOffset > 0) {
+                __try {
+                    void* correctUCM = *(void**)((uintptr_t)unhInstance + usersModuleOffset);
+                    if (correctUCM) {
+                        void* oldUCM = g_userContextModuleInstance;
+                        g_userContextModuleInstance = correctUCM;
+                        wlog("[worker] UCM REPAIRED via UserNamesHUD: %p (was %p)\n", correctUCM, oldUCM);
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    wlog("[worker] SEH reading UserNamesHUD._usersModule\n");
+                }
+            }
+        }
+
         if (g_userNameKlass && api.il2cpp_class_get_type && api.il2cpp_type_get_object) {
             void* userNameIl2cppType = api.il2cpp_class_get_type(g_userNameKlass);
             if (userNameIl2cppType) {
