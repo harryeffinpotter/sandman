@@ -284,10 +284,16 @@ static void auto_reequip_tick() {
     if (s_lastFire != 0 && now - s_lastFire < burstGap) return;
     if (s_firedThisBurst == 0) s_burstStart = now;
 
-    // One scroll-bounce = one re-equip of current slot.
-    send_scroll(120);
-    Sleep(15);
-    send_scroll(-120);
+    // LO 2026-08-09: SendInput scroll and number keys don't work in this
+    // game (radial TAB menu). Dispatch the equip message internally via
+    // il2cpp_object_new + Publish — same path the game uses when you
+    // radial-select a slot. Alternates between two configurable slots so
+    // the equip fires as a swap (dupe race window).
+    static int s_toggle = 0;
+    int slotA = g_reequipSlotA.load();
+    int slotB = g_reequipSlotB.load();
+    dupelab_dispatch_equip_slot(s_toggle ? slotB : slotA);
+    s_toggle ^= 1;
     s_firedThisBurst++;
     s_lastFire = now;
 }
@@ -1720,6 +1726,18 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bool are = g_autoReequip.load();
                     if (ImGui::Checkbox("Auto re-equip (spam slot swap)", &are))
                         g_autoReequip.store(are);
+                    if (are) {
+                        // Slot targets — dispatched via EquipItemInInventorySlotHoloMessage
+                        // internally, no SendInput. Game uses radial menu so scroll/keys don't work.
+                        int a = g_reequipSlotA.load();
+                        int b = g_reequipSlotB.load();
+                        ImGui::PushItemWidth(80);
+                        if (ImGui::InputInt("Slot A##rea", &a)) g_reequipSlotA.store(a);
+                        ImGui::SameLine();
+                        if (ImGui::InputInt("Slot B##reb", &b)) g_reequipSlotB.store(b);
+                        ImGui::PopItemWidth();
+                        ImGui::TextDisabled("Alternates equip between A and B via internal message dispatch.");
+                    }
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(dupe non-weapons w/o manual swap)");
                     if (are) {
