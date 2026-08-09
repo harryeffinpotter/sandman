@@ -397,7 +397,11 @@ std::atomic<int> g_entityCount{0};
 std::string g_nameFilter;
 int g_scrollOffset = 0;
 std::unordered_set<std::string> g_hiddenNames;
-std::vector<std::string> g_hiddenPrefixes = { "Mob", "walker_", "EXPEDITION_WALKER" };
+// LO 2026-08-09: was defaulted to hiding Mob/walker_/EXPEDITION_WALKER
+// out of the box — that's the "why does mob_ / enemy tramplers keep
+// coming back after I remove them" bug. Start EMPTY. User chooses what
+// to hide, nothing is defaulted-hidden.
+std::vector<std::string> g_hiddenPrefixes = {};
 
 Hook g_executeHook;
 fn_execute g_original_execute = nullptr;
@@ -864,6 +868,8 @@ std::atomic<bool> g_espShowHealth{true};       // append [HP N%] to labels
 std::atomic<bool> g_espShowHealthBar{true};    // draw a colored bar above the box
 std::atomic<bool>  g_espShowSentinels{true};
 std::atomic<float> g_sentinelRadius{408.0f};    // detection radius, meters
+std::atomic<float> g_sentinelMountHeight{25.0f}; // mount pillar height (m) — subtract from entity Y to get ground
+std::atomic<bool>  g_espHideOwnWalkerParts{true}; // suppress walker_* entities that are children of YOUR trampler
 std::atomic<float> g_espLabelScale{1.0f};        // 0.5..2.0 label text size
 std::atomic<int>   g_espLabelPos{0};             // 0=center, 1=above, 2=below
 std::atomic<bool>  g_espShowDistance{true};      // append " [Nm]" to labels

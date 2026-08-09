@@ -530,6 +530,10 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
             if (isMob && !g_espShowMobs.load()) continue;
             if (isWalker && !g_espShowWalkers.load()) continue;
         }
+        // Hide walker_* child entities (legs, compartments, engines, etc)
+        // that belong to YOUR OWN trampler. Enemy walker_* still shows.
+        if (g_espHideOwnWalkerParts.load() && item.isAlly
+            && item.name.rfind("walker_", 0) == 0) continue;
         // Apply the right-click blacklist to ESP too (was only filtering Items list).
         if (g_hiddenNames.count(item.name)) continue;
         {
@@ -2683,8 +2687,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     float sr = g_sentinelRadius.load();
                     if (ImGui::SliderFloat("Sentinel radius##sen", &sr, 100.0f, 800.0f, "%.0f m"))
                         g_sentinelRadius.store(sr);
+                    float smh = g_sentinelMountHeight.load();
+                    if (ImGui::SliderFloat("Mount height##sen", &smh, 0.0f, 60.0f, "%.0f m"))
+                        g_sentinelMountHeight.store(smh);
                     ImGui::PopItemWidth();
-                    ImGui::TextDisabled("Red ring on radar around sentinel + red ring drawn on the sand in-world.");
+                    ImGui::TextDisabled("Mount height: how tall the pillar is. Ring anchors at (sentinel Y - mount height).");
+                }
+                {
+                    bool how = g_espHideOwnWalkerParts.load();
+                    if (ImGui::Checkbox("Hide own walker parts (legs / compartments / engines)", &how))
+                        g_espHideOwnWalkerParts.store(how);
                 }
 
                 ImGui::Separator();
@@ -3200,13 +3212,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 // whole screen when the ring wraps behind the camera.
                 if (e.isSentinel && g_espShowSentinels.load() && camera) {
                     float r = g_sentinelRadius.load();
-                    // GROUND-Y fix: sentinels are mounted on tall pillars, so
-                    // e.sentinelWorld.y is the TOWER TOP, not ground level.
-                    // Ring at that Y appears floating in the sky. Use PLAYER'S
-                    // Y as ground reference — puts ring under player's feet
-                    // extending around the sentinel. Not terrain-perfect but
-                    // it lands on the sand where the player is standing.
-                    float groundY = g_playerPos.y;
+                    // Ground anchoring: sentinels are mounted on tall pillars,
+                    // so e.sentinelWorld.y is the TOWER TOP. Subtracting the
+                    // mount-height slider gives an approximation of the base
+                    // ground level under the sentinel — anchored to the
+                    // sentinel's own terrain, not the player's (fixes the
+                    // "ring floats in air when I'm on a mountain" bug).
+                    // Real fix (physics raycast per point) is queued.
+                    float groundY = e.sentinelWorld.y - g_sentinelMountHeight.load();
                     if (e.dist > 0.0f && e.dist < r) {
                         // Inside — draw a small marker at the entity pos.
                         drawList->AddText(
