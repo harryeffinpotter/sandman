@@ -2095,24 +2095,47 @@ static DWORD WINAPI worker_thread(LPVOID) {
             // Hotkey rebind capture — UI sets g_hotkeyCaptureRequest to a
             // feature id when user clicks "Bind". Worker watches for next
             // key press and assigns it to the requested feature.
+            //
+            // CRASH-CAUSE FIX: after capturing, we must SUPPRESS all normal
+            // hotkey action polls until the captured key is RELEASED.
+            // Otherwise the same key press that bound the hotkey will
+            // trigger the action on the very next iteration — bind to
+            // Hard Kill and it kills the DLL mid-frame = CTD.
+            static int s_lastCapturedVk = 0;    // key that must be released before actions can fire
             {
                 int req = g_hotkeyCaptureRequest.load();
                 if (req != 0) {
                     for (int vk = 0x08; vk <= 0xFE; vk++) {
                         if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON) continue;
+                        if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) continue;   // don't bind bare modifiers
                         if (GetAsyncKeyState(vk) & 0x8000) {
                             switch (req) {
                                 case 1: g_hotkeyHardKill.store(vk); break;
                                 case 2: g_hotkeyDupeSuspend.store(vk); break;
                                 case 3: g_hotkeyDupeMaster.store(vk); break;
                                 case 4: g_hotkeyPlaybackFirst.store(vk); break;
+                                case 5: g_hotkeyRecordToggle.store(vk); break;
+                                case 6: g_hotkeyNoClipHold.store(vk); break;
+                                case 7: g_hotkeyNoClipToggle.store(vk); break;
                             }
                             g_hotkeyCaptureRequest.store(0);
-                            wlog("[worker] Hotkey %d rebound to VK 0x%02X\n", req, vk);
+                            s_lastCapturedVk = vk;    // suppress action polls until this releases
+                            wlog("[worker] Hotkey %d rebound to VK 0x%02X (suppressing until release)\n", req, vk);
                             break;
                         }
                     }
                 }
+            }
+            // If a hotkey was JUST rebound and its key is still held, skip
+            // every action poll below this iteration. Clears once the key
+            // is released. Prevents the "bind Hard Kill, DLL nukes itself
+            // on the same press" crash.
+            if (s_lastCapturedVk != 0) {
+                if (GetAsyncKeyState(s_lastCapturedVk) & 0x8000) {
+                    Sleep(0);
+                    continue;
+                }
+                s_lastCapturedVk = 0;
             }
             // F7 = playback the FIRST recorded action in Dupe Lab. Fires from
             // worker thread so game stays live (menu-triggered playback needs
