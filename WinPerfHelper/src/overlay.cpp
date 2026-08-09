@@ -3200,19 +3200,20 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 // whole screen when the ring wraps behind the camera.
                 if (e.isSentinel && g_espShowSentinels.load() && camera) {
                     float r = g_sentinelRadius.load();
-                    // e.dist is the distance from the player to the sentinel.
-                    // If we're inside the ring, skip drawing it.
+                    // GROUND-Y fix: sentinels are mounted on tall pillars, so
+                    // e.sentinelWorld.y is the TOWER TOP, not ground level.
+                    // Ring at that Y appears floating in the sky. Use PLAYER'S
+                    // Y as ground reference — puts ring under player's feet
+                    // extending around the sentinel. Not terrain-perfect but
+                    // it lands on the sand where the player is standing.
+                    float groundY = g_playerPos.y;
                     if (e.dist > 0.0f && e.dist < r) {
-                        // Inside — draw a small ⚠ marker at the entity pos
-                        // instead, so LO knows the danger zone is active.
+                        // Inside — draw a small marker at the entity pos.
                         drawList->AddText(
                             ImVec2(e.sx - 8, e.sy - 20),
                             IM_COL32(255, 40, 40, 240), "!IN RANGE!");
                     } else {
                         const int SEGMENTS = 24;
-                        // Viewport clip padding — allow up to 2x screen width
-                        // off-screen so the line stub still points toward
-                        // where the arc goes but doesn't paint edge-to-edge.
                         float clipMinX = -displaySize.x, clipMaxX = displaySize.x * 2;
                         float clipMinY = -displaySize.y, clipMaxY = displaySize.y * 2;
                         Vec3 prevScreen{0,0,0}; bool havePrev = false;
@@ -3220,7 +3221,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             float ang = (float)seg / (float)SEGMENTS * 6.28318531f;
                             Vec3 wp;
                             wp.x = e.sentinelWorld.x + cosf(ang) * r;
-                            wp.y = e.sentinelWorld.y;
+                            wp.y = groundY;
                             wp.z = e.sentinelWorld.z + sinf(ang) * r;
                             Vec3 sp;
                             g_cameraW2S(&sp, camera, &wp, nullptr);
