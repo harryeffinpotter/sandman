@@ -397,6 +397,11 @@ std::atomic<int> g_entityCount{0};
 std::string g_nameFilter;
 int g_scrollOffset = 0;
 std::unordered_set<std::string> g_hiddenNames;
+// LO 2026-08-09: separate hide list for Items panel ONLY — world ESP
+// still shows these. Kills phantom-item interference with auto-dupe
+// without globally hiding an item type you want visible on ESP.
+std::unordered_set<std::string> g_itemListHiddenNames;
+std::unordered_set<int> g_itemListHiddenEntityIds;   // hide specific entity instance
 // LO 2026-08-09: was defaulted to hiding Mob/walker_/EXPEDITION_WALKER
 // out of the box — that's the "why does mob_ / enemy tramplers keep
 // coming back after I remove them" bug. Start EMPTY. User chooses what

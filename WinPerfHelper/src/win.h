@@ -263,6 +263,8 @@ extern std::atomic<int> g_entityCount;
 extern std::string g_nameFilter;
 extern int g_scrollOffset;
 extern std::unordered_set<std::string> g_hiddenNames;
+extern std::unordered_set<std::string> g_itemListHiddenNames;
+extern std::unordered_set<int> g_itemListHiddenEntityIds;
 extern std::vector<std::string> g_hiddenPrefixes;
 
 extern Hook g_executeHook;

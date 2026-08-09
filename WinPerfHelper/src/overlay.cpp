@@ -1906,6 +1906,10 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     bool looksLikeInvChild = item.parentEntityId != 0 && !item.isHeldByPlayer
                                              && item.name.rfind("item_", 0) == 0;
                     if (!showChildren && looksLikeInvChild) continue;
+                    // Items-panel-only hides — kills phantom-item interference
+                    // with auto-dupe without hiding the item type from world ESP.
+                    if (g_itemListHiddenNames.count(item.name)) continue;
+                    if (g_itemListHiddenEntityIds.count(item.entityId)) continue;
                     if (nlen > 0) {
                         bool found = false;
                         // Match against BOTH raw name AND displayName so searches like
@@ -2056,6 +2060,15 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                                 }
                                 if (ImGui::MenuItem("Copy name to clipboard")) {
                                     ImGui::SetClipboardText(item.name.c_str());
+                                }
+                                ImGui::Separator();
+                                // List-only hides — for phantom items cluttering
+                                // your auto-dupe workflow. World ESP unaffected.
+                                if (ImGui::MenuItem("Hide THIS entity from list (id-specific)")) {
+                                    g_itemListHiddenEntityIds.insert(item.entityId);
+                                }
+                                if (ImGui::MenuItem("Hide all with this name from list only")) {
+                                    g_itemListHiddenNames.insert(item.name);
                                 }
                                 // Custom ESP color — inline ColorEdit4 in the popup.
                                 ImGui::Separator();
