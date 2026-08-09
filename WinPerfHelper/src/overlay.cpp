@@ -1920,6 +1920,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     int  parentEntityId;
                     float healthNorm;   // -1 = unknown
                     std::string parentName;   // "in <containerName>" for readable inv-child display
+                    int nestDepth = 0;        // visual indent for nested container contents
                 };
                 static std::vector<ItemRowSnap> rowSnaps;
                 rowSnaps.clear();
@@ -2034,6 +2035,45 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     int lockedId = g_lockedEntityId.load();
                     bool permaActive = g_permaLockActive.load();
 
+                    // Nested-sort pass: DFS emit — top-level items first,
+                    // then their children immediately after them, indented.
+                    // 'top-level' = item whose parentEntityId is 0 OR whose
+                    // parent isn't in the snap list (e.g. held box whose
+                    // parent is your PlayerAvatar which we exclude).
+                    {
+                        std::unordered_set<int> presentIds;
+                        presentIds.reserve(rowSnaps.size());
+                        for (auto& r : rowSnaps) presentIds.insert(r.entityId);
+                        std::unordered_map<int, std::vector<size_t>> childrenByParent;
+                        std::vector<size_t> topLevel;
+                        for (size_t i = 0; i < rowSnaps.size(); i++) {
+                            int pid = rowSnaps[i].parentEntityId;
+                            if (pid == 0 || presentIds.find(pid) == presentIds.end()) {
+                                topLevel.push_back(i);
+                            } else {
+                                childrenByParent[pid].push_back(i);
+                            }
+                        }
+                        std::vector<ItemRowSnap> nested;
+                        nested.reserve(rowSnaps.size());
+                        // Iterative DFS to avoid deep recursion on huge inventories.
+                        std::vector<std::pair<size_t,int>> stack;   // idx, depth
+                        for (auto it = topLevel.rbegin(); it != topLevel.rend(); ++it)
+                            stack.push_back({*it, 0});
+                        while (!stack.empty()) {
+                            auto [idx, depth] = stack.back();
+                            stack.pop_back();
+                            rowSnaps[idx].nestDepth = depth;
+                            nested.push_back(rowSnaps[idx]);
+                            auto cit = childrenByParent.find(rowSnaps[idx].entityId);
+                            if (cit != childrenByParent.end()) {
+                                for (auto rit = cit->second.rbegin(); rit != cit->second.rend(); ++rit)
+                                    stack.push_back({*rit, depth + 1});
+                            }
+                        }
+                        rowSnaps.swap(nested);
+                    }
+
                     ImGuiListClipper clipper;
                     clipper.Begin((int)rowSnaps.size());
                     while (clipper.Step()) {
@@ -2143,20 +2183,24 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             }
 
                             ImGui::TableSetColumnIndex(1);
-                            // Display priority:
-                            //  parent has readable name → "[in <containerName>] itemName"
-                            //  isInOthersInv (no parent name) → "[inv <id>] itemName"
-                            //  isHeldByPlayer → "itemName (held)"
-                            //  none → plain itemName
-                            if (!item.parentName.empty()) {
-                                ImGui::Text("[in %s] %s", item.parentName.c_str(), item.name.c_str());
-                            } else if (item.isHeldByPlayer) {
-                                ImGui::Text("%s (held)", item.name.c_str());
+                            // Indent by nestDepth so container contents appear
+                            // visually under their container. Tree-connector
+                            // glyph for children to make hierarchy obvious.
+                            char nameBuf[256];
+                            const char* indentPrefix = "";
+                            if (item.nestDepth == 1)      indentPrefix = "  \xe2\x94\x94 "; // "  └ "
+                            else if (item.nestDepth == 2) indentPrefix = "    \xe2\x94\x94 ";
+                            else if (item.nestDepth >= 3) indentPrefix = "      \xe2\x94\x94 ";
+                            if (item.isHeldByPlayer) {
+                                snprintf(nameBuf, sizeof(nameBuf), "%s%s (held)", indentPrefix, item.name.c_str());
+                            } else if (item.nestDepth > 0) {
+                                snprintf(nameBuf, sizeof(nameBuf), "%s%s", indentPrefix, item.name.c_str());
                             } else if (item.isInOthersInv) {
-                                ImGui::Text("[inv %d] %s", item.parentEntityId, item.name.c_str());
+                                snprintf(nameBuf, sizeof(nameBuf), "[inv %d] %s", item.parentEntityId, item.name.c_str());
                             } else {
-                                ImGui::TextUnformatted(item.name.c_str());
+                                snprintf(nameBuf, sizeof(nameBuf), "%s", item.name.c_str());
                             }
+                            ImGui::TextUnformatted(nameBuf);
 
                             ImGui::TableSetColumnIndex(2);
                             if (item.distance >= 0)
