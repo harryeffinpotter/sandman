@@ -2238,13 +2238,13 @@ static DWORD WINAPI worker_thread(LPVOID) {
                 }
                 s_f10WasDown = nowDown;
             }
-            // Worker is now pinned to the last logical core at BELOW_NORMAL
-            // priority (see DllMain), so it will NOT contend with the game's
-            // render thread. Yield with Sleep(0) so equal-priority threads
-            // on this core can run (there shouldn't be any), then loop again
-            // at full tilt. Scan cadence is bounded only by scan_entities
-            // wall time now — ~5ms typical, giving ~200 Hz ESP updates.
-            Sleep(0);
+            // Worker is pinned to the last logical core at BELOW_NORMAL
+            // priority (see DllMain) — no contention with the game's render
+            // thread. Sleep(0) full-tilt caused a load-time CTD (worker
+            // hammering scan_entities before game finished initializing
+            // entity structures), so keep a modest throttle. 20-30ms gives
+            // ~35-50 Hz ESP updates while letting the game breathe.
+            Sleep(20 + (rand() % 10));
         }
     }
 
