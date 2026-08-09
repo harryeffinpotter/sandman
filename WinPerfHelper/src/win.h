@@ -322,6 +322,7 @@ void dupelab_playback_cstr(const char* name);
 extern std::atomic<bool> g_dumpEntities;
 extern std::atomic<bool> g_probeContext;
 extern std::atomic<bool> g_dumpShopClasses;
+extern std::atomic<bool> g_dumpAllClasses;
 extern std::atomic<int> g_executeHookCalls;
 extern std::atomic<int> g_forceInteractWrites;
 extern std::atomic<int> g_turretEntitiesFound;

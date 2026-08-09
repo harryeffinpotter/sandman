@@ -821,6 +821,7 @@ HWBPHook g_hwbpHooks[4] = {};
 std::atomic<bool> g_dumpEntities{false};
 std::atomic<bool> g_probeContext{false};
 std::atomic<bool> g_dumpShopClasses{false};
+std::atomic<bool> g_dumpAllClasses{false};   // MEGA CLASS DUMP — off by default, causes 10-30s freeze
 std::atomic<int> g_executeHookCalls{0};
 std::atomic<int> g_forceInteractWrites{0};
 std::atomic<int> g_turretEntitiesFound{0};

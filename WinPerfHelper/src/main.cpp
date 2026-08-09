@@ -1155,11 +1155,18 @@ static DWORD WINAPI worker_thread(LPVOID) {
         }
 
         // ============================================================
-        // MEGA CLASS DUMP — every klass in every assembly, full parent
-        // chain, all fields, all methods with signatures. Zero pattern
-        // filter. One shot at boot. Overflow of data by design.
+        // MEGA CLASS DUMP — DISABLED BY DEFAULT (LO 2026-08-09)
+        // Cause of the once-per-session 10-30s freeze: enumerating every
+        // klass's fields + methods (37K+ klasses) triggers Unity IL2CPP
+        // to lazy-load metadata for each, which needs main-thread
+        // coordination. Plus Windows Defender scans the 38MB output.
+        // We already have historical dumps from prior sessions in
+        // %APPDATA%\Microsoft\PerfCache — no need to regenerate every
+        // launch. Toggle from UI (g_dumpAllClasses) if you actually need
+        // a fresh one after a game patch changed metadata.
         // ============================================================
-        if (api.il2cpp_domain_get && api.il2cpp_domain_get_assemblies
+        if (g_dumpAllClasses.load()
+            && api.il2cpp_domain_get && api.il2cpp_domain_get_assemblies
             && api.il2cpp_assembly_get_image && api.il2cpp_image_get_class_count
             && api.il2cpp_image_get_class && api.il2cpp_class_get_name) {
             FILE* af = nullptr;
