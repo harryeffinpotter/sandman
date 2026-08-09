@@ -531,6 +531,15 @@ static void safe_scan_tick(int scanCounter) {
             wlog("[worker] SEH in scan_storm_entities: 0x%08lX\n", GetExceptionCode());
         }
         PERF_END(storm, "scan_storm_entities", 50);
+        // User-name cache refresh — iterates UserContextModule's pool,
+        // maps accountId -> name for EVERY lobby user (including enemies).
+        // Cheap: typically <20 user entities per lobby.
+        PERF_BEGIN(unames);
+        __try { refresh_user_name_cache(); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            wlog("[worker] SEH in refresh_user_name_cache: 0x%08lX\n", GetExceptionCode());
+        }
+        PERF_END(unames, "refresh_user_name_cache", 50);
         g_workerVehActive = prev;
     }
 

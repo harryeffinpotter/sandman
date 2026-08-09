@@ -1649,6 +1649,131 @@ void apply_noclip_step() {
 }
 
 // ---------------------------------------------------------------------------
+// User name cache — iterate every UserEntity in the (REPAIRED)
+// UserContextModule and build accountId -> name. Populated once per
+// scan tick. Downstream resolver reads this cache instead of calling
+// GetEntityWithAccountId per player (which was failing silently for
+// non-friends before the singleton repair — and even after, the per-
+// player lookup filters by team/proximity while walking the whole
+// group returns EVERYONE in the lobby).
+// ---------------------------------------------------------------------------
+CRITICAL_SECTION g_userNameCacheLock;
+static bool g_userNameCacheLockInit = false;
+std::unordered_map<unsigned long long, std::string> g_userNameCache;
+
+// Plain-C inner walker — no C++ locals so we can use __try. Fills two
+// parallel arrays; caller copies into the std::unordered_map afterwards.
+struct UserCacheHit { unsigned long long acctId; char name[128]; };
+static int seh_walk_user_context(UserCacheHit* out, int outCap) {
+    __try {
+        void* ctx = *(void**)((uintptr_t)g_userContextModuleInstance + 0x10);
+        if (!is_readable(ctx, 0xA0)) return 0;
+        void* hashSet = *(void**)((uintptr_t)ctx + 0x58);
+        if (!is_readable(hashSet, 0x30)) return 0;
+        void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
+        int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
+        if (!slots_arr || lastIndex <= 0) return 0;
+        size_t slots_len = *(size_t*)((uintptr_t)slots_arr + 0x18);
+        uint8_t* slots = (uint8_t*)((uintptr_t)slots_arr + 0x20);
+        int limit = (lastIndex < (int)slots_len) ? lastIndex : (int)slots_len;
+        int written = 0;
+        for (int s = 0; s < limit && written < outCap; s++) {
+            int hc = *(int*)(slots + s * 16);
+            if (hc < 0) continue;
+            void* ent = *(void**)(slots + s * 16 + 8);
+            if (!ent || !is_readable(ent, 0x58)) continue;
+            void* dict = *(void**)((uintptr_t)ent + 0x50);
+            if (!is_readable(dict, 0x28)) continue;
+            void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
+            if (!is_readable(entries_arr, 0x28)) continue;
+            size_t entry_count = *(size_t*)((uintptr_t)entries_arr + 0x18);
+            if (entry_count == 0 || entry_count > 500000) continue;
+            uint8_t* entries = (uint8_t*)((uintptr_t)entries_arr + 0x20);
+
+            unsigned long long acctId = 0;
+            char nm[128] = {}; int nmLen = 0;
+            for (size_t i = 0; i < entry_count; i++) {
+                void* e_val = *(void**)(entries + i * 24 + 8);
+                if (!is_readable(e_val, 0x18)) continue;
+                void* e_klass = *(void**)e_val;
+                if (e_klass == g_userNameKlass) {
+                    int nameOff = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
+                    void* np = *(void**)((uintptr_t)e_val + nameOff);
+                    if (is_readable(np, 0x14)) {
+                        int len = *(int*)((uintptr_t)np + 0x10);
+                        if (len > 0 && len < 127) {
+                            wchar_t* wchars = (wchar_t*)((uintptr_t)np + 0x14);
+                            if (is_readable(wchars, len * 2)) {
+                                for (int c = 0; c < len; c++) nm[c] = (char)wchars[c];
+                                nm[len] = 0; nmLen = len;
+                            }
+                        }
+                    }
+                } else {
+                    unsigned long long v = *(unsigned long long*)((uintptr_t)e_val + 0x10);
+                    if (v >= 0x0110000100000000ULL && v < 0x0110000200000000ULL && acctId == 0) {
+                        acctId = v;
+                    }
+                }
+            }
+            if (acctId != 0 && nmLen > 0) {
+                out[written].acctId = acctId;
+                memcpy(out[written].name, nm, 128);
+                written++;
+            }
+        }
+        return written;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        wlog("[seh_walk_user_context] SEH 0x%08lX\n", GetExceptionCode());
+        return 0;
+    }
+}
+
+void refresh_user_name_cache() {
+    if (!g_userContextModuleInstance) return;
+    if (!g_userNameCacheLockInit) { InitializeCriticalSection(&g_userNameCacheLock); g_userNameCacheLockInit = true; }
+    static UserCacheHit hits[128];
+    int n = seh_walk_user_context(hits, 128);
+    std::unordered_map<unsigned long long, std::string> local;
+    for (int i = 0; i < n; i++) local[hits[i].acctId] = hits[i].name;
+    EnterCriticalSection(&g_userNameCacheLock);
+    g_userNameCache.swap(local);
+    size_t sz = g_userNameCache.size();
+    LeaveCriticalSection(&g_userNameCacheLock);
+    static int s_lastLoggedNamed = -1;
+    if (n != s_lastLoggedNamed) {
+        wlog("[user-cache] refresh: %d entries cached (total %zu)\n", n, sz);
+        s_lastLoggedNamed = n;
+    }
+}
+
+bool lookup_cached_username(unsigned long long acctId, std::string& out) {
+    if (!g_userNameCacheLockInit || acctId == 0) return false;
+    EnterCriticalSection(&g_userNameCacheLock);
+    auto it = g_userNameCache.find(acctId);
+    bool ok = (it != g_userNameCache.end());
+    if (ok) out = it->second;
+    LeaveCriticalSection(&g_userNameCacheLock);
+    return ok;
+}
+// C-buffer variant — safe to call from functions using __try.
+bool lookup_cached_username_c(unsigned long long acctId, char* outBuf, int bufSize) {
+    if (!g_userNameCacheLockInit || acctId == 0 || !outBuf || bufSize < 1) return false;
+    bool ok = false;
+    EnterCriticalSection(&g_userNameCacheLock);
+    auto it = g_userNameCache.find(acctId);
+    if (it != g_userNameCache.end()) {
+        int n = (int)it->second.size();
+        if (n >= bufSize) n = bufSize - 1;
+        memcpy(outBuf, it->second.data(), n);
+        outBuf[n] = 0;
+        ok = true;
+    }
+    LeaveCriticalSection(&g_userNameCacheLock);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // Storm circle scanner
 // ---------------------------------------------------------------------------
 CRITICAL_SECTION g_stormLock;
@@ -4273,16 +4398,30 @@ static bool seh_resolve_transform_pos(void* entity, Vec3* out) {
 // pointer whose klass matches g_userNameKlass — that pointer's +0x10 is
 // the name string. Free function because __try can't sit in
 // process_one_entity (which has std::string / std::vector destructors → C2712).
-static bool seh_resolve_username_via_usercontext(void* entity, char* outBuf, int bufSize) {
-    if (!outBuf || bufSize <= 0) return false;
-    outBuf[0] = 0;
-    if (!g_getUserEntityByAcctId || !g_userContextModuleInstance ||
-        g_idx_account_id < 0 || !g_userNameKlass) return false;
+// Helper — read account ID from entity via component index. Plain-C, __try-safe.
+static bool seh_read_account_id(void* entity, unsigned long long* out) {
     __try {
         void* aidComp = get_component(entity, g_idx_account_id);
         if (!is_readable(aidComp, 0x18)) return false;
-        unsigned long long aid = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
-        if (aid == 0) return false;
+        *out = *(unsigned long long*)((uintptr_t)aidComp + 0x10);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool seh_resolve_username_via_usercontext(void* entity, char* outBuf, int bufSize) {
+    if (!outBuf || bufSize <= 0) return false;
+    outBuf[0] = 0;
+    if (g_idx_account_id < 0) return false;
+    unsigned long long aid = 0;
+    if (!seh_read_account_id(entity, &aid) || aid == 0) return false;
+
+    // FAST PATH: user-name cache (populated by refresh_user_name_cache
+    // which iterates the entire UserContextModule pool). Covers all
+    // lobby users, doesn't depend on GetEntityWithAccountId team filter.
+    if (lookup_cached_username_c(aid, outBuf, bufSize)) return true;
+
+    if (!g_getUserEntityByAcctId || !g_userContextModuleInstance || !g_userNameKlass) return false;
+    __try {
 
         g_vehInnerActive = true;
         RtlCaptureContext(&g_vehInnerCtx);

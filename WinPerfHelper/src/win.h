@@ -512,6 +512,11 @@ extern std::atomic<int>  g_stormCirclesFound;
 void ensure_storm_lock();
 void scan_storm_entities(void* gameContextModule);
 
+// User name cache — populated from the UserContextModule's own entity pool.
+void refresh_user_name_cache();
+bool lookup_cached_username(unsigned long long acctId, std::string& out);
+bool lookup_cached_username_c(unsigned long long acctId, char* outBuf, int bufSize);
+
 extern int g_idx_extraction_point;
 extern int g_idx_final_extraction;
 extern int g_idx_extraction_box;
