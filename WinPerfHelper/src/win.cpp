@@ -2380,22 +2380,25 @@ static void process_one_entity(
     }
     if (name == "Sun") return;
     if (name.rfind("LandingCutScene", 0) == 0) return;
-    // Drop bullet trails, test entities, and invisible logic entities that
-    // clutter ESP. Case-insensitive so variants get caught too.
+    // Drop only bullets/projectile-trails at the classifier stage — those
+    // spam constantly during combat and have no ESP value. Everything else
+    // is now user-toggleable via ESP filter checkboxes rather than
+    // blanket-dropped here (LO 2026-08-09: 'you really shouldnt blanket
+    // filter entities, only for specific purposes').
     {
         std::string _lower = name;
         for (auto& c : _lower) if (c >= 'A' && c <= 'Z') c = c + 32;
-        // Bullet / projectile in flight
         if (_lower.find("shot")       != std::string::npos &&
             _lower.find("projectile") != std::string::npos) return;
         if (_lower.find("bullet")     != std::string::npos) return;
-        // Test / diagnostic entities (game_spawnerTestNavAgent, TestColdEmitter, etc)
-        if (_lower.rfind("test", 0)   == 0) return;
-        if (_lower.find("_test")      != std::string::npos) return;
-        // Invisible AI controllers / spawners (nests DO stay — user wants those)
-        if (_lower.find("aispawner")           != std::string::npos) return;
-        if (_lower.find("aiwavespawn")         != std::string::npos) return;
-        if (_lower.find("wavespawncontroller") != std::string::npos) return;
+        // LO 2026-08-09: kill everything with "trail" — projectile trails,
+        // flare gun trails, turret trails, none of it useful for ESP.
+        if (_lower.find("trail")      != std::string::npos) return;
+        // Same day: kill anything with "nest" (game_aiSpawnNest_ghoul etc)
+        // and "test" (TestColdEmitter, spawnerTestNavAgent, etc). LO
+        // reversed on nests — doesn't want them showing.
+        if (_lower.find("nest")       != std::string::npos) return;
+        if (_lower.find("test")       != std::string::npos) return;
     }
     (*pDbgPassFilter)++;
 
