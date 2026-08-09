@@ -297,18 +297,21 @@ static void auto_reequip_tick() {
     s_firedThisBurst++;
     s_lastFire = now;
 
-    // Full-auto pickup: fire the interact key (F) right after equip dispatch.
-    // The game listens for F to trigger 'take item' on whatever the client's
-    // ClientInputState.interactTargetId currently points to. Combined with
-    // our lock-target and the equip race, this closes the dupe loop with
-    // zero manual input.
+    // Full-auto pickup: fire the interact key after equip dispatch.
+    // BUT — skip if ImGui has a text input focused (search box, etc)
+    // OR if any of our menu-consumer widgets want the keyboard, so we
+    // don't spam F into text fields.
     if (g_autoInteract.load()) {
-        INPUT ki = {};
-        ki.type = INPUT_KEYBOARD;
-        ki.ki.wVk = (WORD)g_autoInteractKey.load();
-        SendInput(1, &ki, sizeof(ki));
-        ki.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &ki, sizeof(ki));
+        ImGuiIO& io = ImGui::GetIO();
+        bool imguiWantsKb = io.WantCaptureKeyboard || io.WantTextInput;
+        if (!imguiWantsKb) {
+            INPUT ki = {};
+            ki.type = INPUT_KEYBOARD;
+            ki.ki.wVk = (WORD)g_autoInteractKey.load();
+            SendInput(1, &ki, sizeof(ki));
+            ki.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &ki, sizeof(ki));
+        }
     }
 }
 
