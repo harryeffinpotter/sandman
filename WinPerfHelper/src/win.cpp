@@ -1595,16 +1595,23 @@ void apply_turret_mods() {
 // Hard-cap the per-frame delta so we can't blast past AntiCheatSpeedCap.
 // ---------------------------------------------------------------------------
 static DWORD g_noclipLastTick = 0;
+// Diagnostic counters — visible in UI to trace why noclip silently doesn't work.
+std::atomic<int> g_noclipDbgCalled{0};    // step called at all
+std::atomic<int> g_noclipDbgActive{0};    // enabled + key held/toggled
+std::atomic<int> g_noclipDbgNoEntity{0};  // returned because g_playerEntityPtr == 0
+std::atomic<int> g_noclipDbgWrote{0};     // wrote to PositionComponent
 void apply_noclip_step() {
+    g_noclipDbgCalled.fetch_add(1);
     if (!g_noClipEnabled.load()) return;
     // Activation: hold-key OR toggle-key latched by main loop into g_noClipActive.
     int holdKey = g_hotkeyNoClipHold.load();
     bool holding = (holdKey != 0) && (GetAsyncKeyState(holdKey) & 0x8000);
     bool toggled = g_noClipActive.load();
     if (!holding && !toggled) { g_noclipLastTick = 0; return; }
+    g_noclipDbgActive.fetch_add(1);
 
     uintptr_t pe = g_playerEntityPtr.load();
-    if (!pe) return;
+    if (!pe) { g_noclipDbgNoEntity.fetch_add(1); return; }
     __try {
         if (!is_readable((void*)pe, 0x68)) return;
         if (g_idx_position < 0) return;
@@ -1626,6 +1633,7 @@ void apply_noclip_step() {
         if (GetAsyncKeyState('S') & 0x8000) v.y -= step;
 
         *(WorldVector*)((uintptr_t)pos + 0x10) = v;
+        g_noclipDbgWrote.fetch_add(1);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         ringlog::push("[apply_noclip_step] SEH: 0x%08lX", GetExceptionCode());
     }

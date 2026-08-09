@@ -2227,6 +2227,14 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         }
                     }
                     ImGui::TextDisabled("RMB doubles as ADS — game still fires ADS. Toggle keys don't conflict.");
+                    // Diagnostic — reveals silently-failing noclip. Called
+                    // ticks up always; Active only when key held/toggled;
+                    // NoEntity if g_playerEntityPtr is 0 (scan hasn't cached
+                    // player yet); Wrote counts successful Position writes.
+                    ImGui::Text("noclip diag: called=%d active=%d noEnt=%d wrote=%d entPtr=%p",
+                        g_noclipDbgCalled.load(), g_noclipDbgActive.load(),
+                        g_noclipDbgNoEntity.load(), g_noclipDbgWrote.load(),
+                        (void*)g_playerEntityPtr.load());
                 }
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "World mods");

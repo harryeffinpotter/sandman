@@ -437,6 +437,10 @@ extern std::atomic<float> g_noClipSpeed;
 extern std::atomic<int>   g_hotkeyNoClipHold;
 extern std::atomic<int>   g_hotkeyNoClipToggle;
 extern std::atomic<uintptr_t> g_playerEntityPtr;
+extern std::atomic<int> g_noclipDbgCalled;
+extern std::atomic<int> g_noclipDbgActive;
+extern std::atomic<int> g_noclipDbgNoEntity;
+extern std::atomic<int> g_noclipDbgWrote;
 void apply_noclip_step();
 
 // Custom per-item ESP colors
