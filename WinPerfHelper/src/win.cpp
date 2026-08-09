@@ -2193,12 +2193,71 @@ static std::string get_display_name(const std::string& raw) {
         result = "Walker (" + type + ")";
     } else if (raw == "EXPEDITION_WALKER") {
         result = "Walker";
-    } else if (raw.rfind("Mob", 0) == 0) {
-        std::string stripped = raw.substr(3);
-        for (size_t i = 0; i < stripped.size(); i++) {
-            if (i > 0 && isupper(stripped[i]) && !isupper(stripped[i-1]))
-                result += ' ';
-            result += stripped[i];
+    } else if (raw.rfind("Mob", 0) == 0 || raw.rfind("mob_", 0) == 0 || raw.rfind("mob ", 0) == 0) {
+        // Clean rendering for mob names. Examples:
+        //   "mob_living_sand_jr_ship_grabeyard1" -> "Living Sand JR"
+        //   "MobGhoulLR_nest_variant1"           -> "Ghoul LR"
+        //   "mob_upior"                          -> "Upior"
+        // Strategy: strip prefix, replace _ with spaces, walk tokens and
+        //   stop when we hit a location/variant marker, title-case each
+        //   token (short 2-3-letter tokens like JR/SR/LR stay uppercase),
+        //   then split on internal caps too.
+        std::string s = raw;
+        if (s.rfind("Mob", 0) == 0) s = s.substr(3);
+        else if (s.rfind("mob_", 0) == 0 || s.rfind("mob ", 0) == 0) s = s.substr(4);
+        // Split any internal camelCase into spaces first.
+        std::string spaced;
+        for (size_t i = 0; i < s.size(); i++) {
+            if (i > 0 && isupper((unsigned char)s[i]) && !isupper((unsigned char)s[i-1]))
+                spaced += ' ';
+            spaced += (s[i] == '_') ? ' ' : s[i];
+        }
+        // Tokenize
+        std::vector<std::string> tokens;
+        {
+            std::string cur;
+            for (char c : spaced) {
+                if (c == ' ') { if (!cur.empty()) { tokens.push_back(cur); cur.clear(); } }
+                else cur += c;
+            }
+            if (!cur.empty()) tokens.push_back(cur);
+        }
+        // Drop everything from a location/variant marker onward.
+        static const char* stopWords[] = {
+            "ship","nest","grabeyard","graveyard","variant","biome",
+            "spawn","spawner","zone","site","location"
+        };
+        for (size_t i = 0; i < tokens.size(); i++) {
+            std::string t = tokens[i];
+            for (auto& c : t) if (c >= 'A' && c <= 'Z') c = c + 32;
+            // Strip trailing digits so "grabeyard1" -> "grabeyard".
+            while (!t.empty() && t.back() >= '0' && t.back() <= '9') t.pop_back();
+            bool stop = false;
+            for (auto* sw : stopWords) if (t == sw) { stop = true; break; }
+            if (stop) { tokens.resize(i); break; }
+        }
+        // Format each token: short 2-3-letter tokens stay UPPERCASE (JR,
+        // SR, LR, II, III), longer tokens are Title-cased.
+        for (auto& t : tokens) {
+            if (t.empty()) continue;
+            if (t.size() <= 3) {
+                for (auto& c : t) if (c >= 'a' && c <= 'z') c = c - 32;
+            } else {
+                for (size_t i = 0; i < t.size(); i++) {
+                    if (i == 0) { if (t[i] >= 'a' && t[i] <= 'z') t[i] -= 32; }
+                    else       { if (t[i] >= 'A' && t[i] <= 'Z') t[i] += 32; }
+                }
+            }
+        }
+        // Also drop the trailing digits on retained tokens (from e.g.
+        // "upior2" -> "upior")
+        for (auto& t : tokens)
+            while (!t.empty() && t.back() >= '0' && t.back() <= '9') t.pop_back();
+        result.clear();
+        for (size_t i = 0; i < tokens.size(); i++) {
+            if (tokens[i].empty()) continue;
+            if (!result.empty()) result += ' ';
+            result += tokens[i];
         }
     } else if (raw.rfind("Sentinel", 0) == 0 || raw.rfind("Trampler", 0) == 0) {
         for (size_t i = 0; i < raw.size(); i++) {
@@ -2321,15 +2380,22 @@ static void process_one_entity(
     }
     if (name == "Sun") return;
     if (name.rfind("LandingCutScene", 0) == 0) return;
-    // Drop every variant of bullet/round-in-flight entities.
-    // Case-insensitive substring match — catches "Shot Projectile",
-    // "shot_projectile", "ShotProjectile", "MobShotProjectileTrail", etc.
+    // Drop bullet trails, test entities, and invisible logic entities that
+    // clutter ESP. Case-insensitive so variants get caught too.
     {
         std::string _lower = name;
         for (auto& c : _lower) if (c >= 'A' && c <= 'Z') c = c + 32;
+        // Bullet / projectile in flight
         if (_lower.find("shot")       != std::string::npos &&
             _lower.find("projectile") != std::string::npos) return;
         if (_lower.find("bullet")     != std::string::npos) return;
+        // Test / diagnostic entities (game_spawnerTestNavAgent, TestColdEmitter, etc)
+        if (_lower.rfind("test", 0)   == 0) return;
+        if (_lower.find("_test")      != std::string::npos) return;
+        // Invisible AI controllers / spawners (nests DO stay — user wants those)
+        if (_lower.find("aispawner")           != std::string::npos) return;
+        if (_lower.find("aiwavespawn")         != std::string::npos) return;
+        if (_lower.find("wavespawncontroller") != std::string::npos) return;
     }
     (*pDbgPassFilter)++;
 

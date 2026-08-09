@@ -534,14 +534,25 @@ static void seh_project_entities_impl(std::vector<ESP3DEntry>& out, float maxDis
         // that belong to YOUR OWN trampler. Enemy walker_* still shows.
         if (g_espHideOwnWalkerParts.load() && item.isAlly
             && item.name.rfind("walker_", 0) == 0) continue;
-        // Apply the right-click blacklist to ESP too (was only filtering Items list).
-        if (g_hiddenNames.count(item.name)) continue;
+        // Case-insensitive filter check. Lowercase both sides so user can
+        // add "mob" and it matches "MobGhoul", "mob_upior", etc.
         {
-            bool prefHidden = false;
-            for (auto& p : g_hiddenPrefixes) {
-                if (item.name.rfind(p, 0) == 0) { prefHidden = true; break; }
+            std::string _lname = item.name;
+            for (auto& c : _lname) if (c >= 'A' && c <= 'Z') c = c + 32;
+            bool hidden = false;
+            for (auto& n : g_hiddenNames) {
+                std::string _ln = n;
+                for (auto& c : _ln) if (c >= 'A' && c <= 'Z') c = c + 32;
+                if (_ln == _lname) { hidden = true; break; }
             }
-            if (prefHidden) continue;
+            if (!hidden) {
+                for (auto& p : g_hiddenPrefixes) {
+                    std::string _lp = p;
+                    for (auto& c : _lp) if (c >= 'A' && c <= 'Z') c = c + 32;
+                    if (_lname.rfind(_lp, 0) == 0) { hidden = true; break; }
+                }
+            }
+            if (hidden) continue;
         }
         if (isLoot) {
             if (item.lootTier == 1 && !g_espShowLootT1.load()) continue;
@@ -1899,13 +1910,24 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         if (!found) continue;
                     }
 
-                    if (g_hiddenNames.count(item.name)) continue;
+                    // Case-insensitive filter check.
                     {
-                        bool prefixHidden = false;
-                        for (auto& p : g_hiddenPrefixes) {
-                            if (item.name.rfind(p, 0) == 0) { prefixHidden = true; break; }
+                        std::string _lname = item.name;
+                        for (auto& c : _lname) if (c >= 'A' && c <= 'Z') c = c + 32;
+                        bool hidden = false;
+                        for (auto& n : g_hiddenNames) {
+                            std::string _ln = n;
+                            for (auto& c : _ln) if (c >= 'A' && c <= 'Z') c = c + 32;
+                            if (_ln == _lname) { hidden = true; break; }
                         }
-                        if (prefixHidden) continue;
+                        if (!hidden) {
+                            for (auto& p : g_hiddenPrefixes) {
+                                std::string _lp = p;
+                                for (auto& c : _lp) if (c >= 'A' && c <= 'Z') c = c + 32;
+                                if (_lname.rfind(_lp, 0) == 0) { hidden = true; break; }
+                            }
+                        }
+                        if (hidden) continue;
                     }
 
                     ItemRowSnap rs;
