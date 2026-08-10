@@ -1666,19 +1666,45 @@ std::unordered_map<unsigned long long, std::string> g_userNameCache;
 // parallel arrays; caller copies into the std::unordered_map afterwards.
 struct UserCacheHit { unsigned long long acctId; char name[128]; };
 static int seh_walk_user_context(UserCacheHit* out, int outCap) {
-    // One-shot debug dump of first user entity's dict — every slot, klass,
-    // string preview if the value looks like a string. So LO can see EXACTLY
-    // what klasses are in there without us having to guess. Written to
-    // perf_userctx.dat on first call. Delete file to re-trigger.
     static volatile long s_dumped = 0;
+    static volatile long s_diagLogged = 0;
     __try {
+        // Full diagnostic log for the FIRST walk — reveals exactly which
+        // is_readable check kills us. Fires once per session.
         void* ctx = *(void**)((uintptr_t)g_userContextModuleInstance + 0x10);
-        if (!is_readable(ctx, 0xA0)) return 0;
+        void* ctxAt18 = is_readable((void*)((uintptr_t)g_userContextModuleInstance + 0x18), 8)
+            ? *(void**)((uintptr_t)g_userContextModuleInstance + 0x18) : nullptr;
+        void* ctxAt20 = is_readable((void*)((uintptr_t)g_userContextModuleInstance + 0x20), 8)
+            ? *(void**)((uintptr_t)g_userContextModuleInstance + 0x20) : nullptr;
+        bool ctxReadable = is_readable(ctx, 0xA0);
+        bool ctxReadableSmall = is_readable(ctx, 0x28);
+        if (_InterlockedCompareExchange(&s_diagLogged, 1, 0) == 0) {
+            wlog("[user-walk-diag] ucm=%p ctx(+0x10)=%p read0xA0=%d read0x28=%d\n",
+                 g_userContextModuleInstance, ctx, ctxReadable?1:0, ctxReadableSmall?1:0);
+            wlog("[user-walk-diag] +0x18=%p +0x20=%p\n", ctxAt18, ctxAt20);
+            if (ctxReadableSmall) {
+                for (int off = 0; off < 0x80; off += 8) {
+                    uintptr_t v = *(uintptr_t*)((uintptr_t)ctx + off);
+                    wlog("[user-walk-diag] ctx+0x%02X = %016llX\n", off, (unsigned long long)v);
+                }
+            }
+        }
+        if (!ctxReadable && !ctxReadableSmall) return 0;
         void* hashSet = *(void**)((uintptr_t)ctx + 0x58);
-        if (!is_readable(hashSet, 0x30)) return 0;
+        if (!is_readable(hashSet, 0x30)) {
+            static volatile long once = 0;
+            if (_InterlockedCompareExchange(&once, 1, 0) == 0)
+                wlog("[user-walk-diag] hashSet unreadable, ctx+0x58=%p\n", hashSet);
+            return 0;
+        }
         void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
         int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
-        if (!slots_arr || lastIndex <= 0) return 0;
+        if (!slots_arr || lastIndex <= 0) {
+            static volatile long once2 = 0;
+            if (_InterlockedCompareExchange(&once2, 1, 0) == 0)
+                wlog("[user-walk-diag] slots_arr=%p lastIndex=%d\n", slots_arr, lastIndex);
+            return 0;
+        }
         size_t slots_len = *(size_t*)((uintptr_t)slots_arr + 0x18);
         uint8_t* slots = (uint8_t*)((uintptr_t)slots_arr + 0x20);
         int limit = (lastIndex < (int)slots_len) ? lastIndex : (int)slots_len;
