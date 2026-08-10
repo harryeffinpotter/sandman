@@ -1666,6 +1666,11 @@ std::unordered_map<unsigned long long, std::string> g_userNameCache;
 // parallel arrays; caller copies into the std::unordered_map afterwards.
 struct UserCacheHit { unsigned long long acctId; char name[128]; };
 static int seh_walk_user_context(UserCacheHit* out, int outCap) {
+    // One-shot debug dump of first user entity's dict — every slot, klass,
+    // string preview if the value looks like a string. So LO can see EXACTLY
+    // what klasses are in there without us having to guess. Written to
+    // perf_userctx.dat on first call. Delete file to re-trigger.
+    static volatile long s_dumped = 0;
     __try {
         void* ctx = *(void**)((uintptr_t)g_userContextModuleInstance + 0x10);
         if (!is_readable(ctx, 0xA0)) return 0;
@@ -1677,6 +1682,76 @@ static int seh_walk_user_context(UserCacheHit* out, int outCap) {
         size_t slots_len = *(size_t*)((uintptr_t)slots_arr + 0x18);
         uint8_t* slots = (uint8_t*)((uintptr_t)slots_arr + 0x20);
         int limit = (lastIndex < (int)slots_len) ? lastIndex : (int)slots_len;
+
+        // One-shot heavy dump: first entity, all its dict entries.
+        if (_InterlockedCompareExchange(&s_dumped, 1, 0) == 0) {
+            char p[MAX_PATH]; char ad[MAX_PATH];
+            DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
+            if (n && n < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_userctx.dat", ad);
+            else strncpy_s(p, sizeof(p), "C:\\perf_userctx.dat", _TRUNCATE);
+            FILE* df = nullptr; fopen_s(&df, p, "w");
+            if (df) {
+                fprintf(df, "# UserContext walk diagnostic — LO 2026-08-10\n");
+                fprintf(df, "# g_userContextModuleInstance = %p\n", g_userContextModuleInstance);
+                fprintf(df, "# g_userNameKlass             = %p\n", g_userNameKlass);
+                fprintf(df, "# g_accountIdKlassUser        = %p\n", g_accountIdKlassUser);
+                fprintf(df, "# hashSet lastIndex=%d slots_len=%zu limit=%d\n\n", lastIndex, slots_len, limit);
+                int dumpedEnts = 0;
+                for (int s = 0; s < limit && dumpedEnts < 3; s++) {
+                    int hc = *(int*)(slots + s * 16);
+                    if (hc < 0) continue;
+                    void* ent = *(void**)(slots + s * 16 + 8);
+                    if (!ent || !is_readable(ent, 0x58)) continue;
+                    void* dict = *(void**)((uintptr_t)ent + 0x50);
+                    fprintf(df, "\n=== UserEntity #%d ptr=%p dict=%p ===\n", dumpedEnts, ent, dict);
+                    if (!is_readable(dict, 0x28)) { fprintf(df, "  dict unreadable\n"); dumpedEnts++; continue; }
+                    void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
+                    if (!is_readable(entries_arr, 0x28)) { fprintf(df, "  entries_arr unreadable\n"); dumpedEnts++; continue; }
+                    size_t entry_count = *(size_t*)((uintptr_t)entries_arr + 0x18);
+                    fprintf(df, "  entry_count=%zu\n", entry_count);
+                    if (entry_count == 0 || entry_count > 500000) { dumpedEnts++; continue; }
+                    uint8_t* entries = (uint8_t*)((uintptr_t)entries_arr + 0x20);
+                    for (size_t i = 0; i < entry_count && i < 50; i++) {
+                        int e_key = *(int*)(entries + i * 24 + 4);
+                        void* e_val = *(void**)(entries + i * 24 + 8);
+                        fprintf(df, "  [slot=%d] val=%p", e_key, e_val);
+                        if (is_readable(e_val, 0x18)) {
+                            void* e_klass = *(void**)e_val;
+                            fprintf(df, " klass=%p", e_klass);
+                            const char* tag = "";
+                            if (e_klass == g_userNameKlass) tag = " <== UserNameKlass";
+                            else if (e_klass == g_accountIdKlassUser) tag = " <== AccountIdKlass";
+                            fprintf(df, "%s", tag);
+                            // Try read val+0x10 as a pointer to a string
+                            void* fld10 = *(void**)((uintptr_t)e_val + 0x10);
+                            fprintf(df, " field+0x10=%p", fld10);
+                            if (is_readable(fld10, 0x14)) {
+                                int slen = *(int*)((uintptr_t)fld10 + 0x10);
+                                if (slen > 0 && slen < 64) {
+                                    wchar_t* ws = (wchar_t*)((uintptr_t)fld10 + 0x14);
+                                    if (is_readable(ws, slen * 2)) {
+                                        char nb[65] = {}; bool ok = true;
+                                        for (int c = 0; c < slen; c++) {
+                                            nb[c] = (char)ws[c];
+                                            if (nb[c] < 0x20 || nb[c] > 0x7E) { ok = false; break; }
+                                        }
+                                        if (ok) fprintf(df, " STRING=\"%s\"", nb);
+                                    }
+                                }
+                            }
+                            // Also read as uint64 in case it's an accountId
+                            unsigned long long u = *(unsigned long long*)((uintptr_t)e_val + 0x10);
+                            fprintf(df, " u64=0x%llX", u);
+                        }
+                        fprintf(df, "\n");
+                    }
+                    dumpedEnts++;
+                }
+                fclose(df);
+                wlog("[user-cache] one-shot dump written to perf_userctx.dat (%d entities)\n", dumpedEnts);
+            }
+        }
+
         int written = 0;
         for (int s = 0; s < limit && written < outCap; s++) {
             int hc = *(int*)(slots + s * 16);
@@ -1697,7 +1772,28 @@ static int seh_walk_user_context(UserCacheHit* out, int outCap) {
                 void* e_val = *(void**)(entries + i * 24 + 8);
                 if (!is_readable(e_val, 0x18)) continue;
                 void* e_klass = *(void**)e_val;
-                if (e_klass == g_userNameKlass) {
+                // FALLBACK: if klass matches OR field+0x10 looks like a
+                // readable UTF-16 string (probably the name), capture it.
+                bool isNameMatch = (e_klass == g_userNameKlass);
+                if (!isNameMatch && nmLen == 0) {
+                    void* np = *(void**)((uintptr_t)e_val + 0x10);
+                    if (is_readable(np, 0x14)) {
+                        int len = *(int*)((uintptr_t)np + 0x10);
+                        if (len > 2 && len < 32) {
+                            wchar_t* ws = (wchar_t*)((uintptr_t)np + 0x14);
+                            if (is_readable(ws, len * 2)) {
+                                bool looksLikeName = true;
+                                for (int c = 0; c < len; c++) {
+                                    wchar_t wc = ws[c];
+                                    // Printable ASCII or common name chars
+                                    if (wc < 0x20 || wc > 0x7E) { looksLikeName = false; break; }
+                                }
+                                if (looksLikeName) isNameMatch = true;
+                            }
+                        }
+                    }
+                }
+                if (isNameMatch && nmLen == 0) {
                     int nameOff = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
                     void* np = *(void**)((uintptr_t)e_val + nameOff);
                     if (is_readable(np, 0x14)) {
@@ -1710,12 +1806,16 @@ static int seh_walk_user_context(UserCacheHit* out, int outCap) {
                             }
                         }
                     }
-                } else if (e_klass == g_accountIdKlassUser && acctId == 0) {
-                    // AccountIdComponent (User context) — value: UInt64 at +0x10.
-                    // Klass match is precise regardless of ID format (Steam,
-                    // non-Steam, etc). Was previously a SteamID heuristic that
-                    // filtered non-Steam users out.
+                }
+                if (e_klass == g_accountIdKlassUser && acctId == 0) {
                     acctId = *(unsigned long long*)((uintptr_t)e_val + 0x10);
+                } else if (acctId == 0) {
+                    // Fallback: any uint64 that's >= 10000 (not a small entity id).
+                    unsigned long long v = *(unsigned long long*)((uintptr_t)e_val + 0x10);
+                    if (v >= 10000ULL && v <= 0x0FFFFFFFFFFFFFFFULL) {
+                        // Take the FIRST such value seen — will be adjusted per dump results
+                        if (acctId == 0) acctId = v;
+                    }
                 }
             }
             if (acctId != 0 && nmLen > 0) {
