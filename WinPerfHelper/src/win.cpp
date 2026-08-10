@@ -872,7 +872,7 @@ std::atomic<bool> g_espShowSkeleton{true};    // default ON — creature-fix bui
 std::atomic<bool> g_espShowBox{true};          // per-entity outlined box
 std::atomic<bool> g_espShowHealth{true};       // append [HP N%] to labels
 std::atomic<bool> g_espShowHealthBar{true};    // draw a colored bar above the box
-std::atomic<bool>  g_espShowSentinels{true};
+std::atomic<bool>  g_espShowSentinels{false};   // default OFF — was causing GPU driver TDR / hard reboots
 std::atomic<float> g_sentinelRadius{408.0f};    // detection radius, meters
 std::atomic<float> g_sentinelMountHeight{25.0f}; // mount pillar height (m) — subtract from entity Y to get ground
 std::atomic<bool>  g_espHideOwnWalkerParts{true}; // suppress walker_* entities that are children of YOUR trampler

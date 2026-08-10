@@ -3407,6 +3407,11 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 // whole screen when the ring wraps behind the camera.
                 if (e.isSentinel && g_espShowSentinels.load() && camera) {
                     float r = g_sentinelRadius.load();
+                    // Distance gate per LO — only draw when you're within
+                    // 100m of the ring boundary (about to cross into range).
+                    // Skips distant sentinels whose rings would waste GPU
+                    // pipeline (was causing GPU driver TDR / hard reboots).
+                    if (e.dist > r + 100.0f) continue;
                     // Ground anchoring: sentinels are mounted on tall pillars,
                     // so e.sentinelWorld.y is the TOWER TOP. Subtracting the
                     // mount-height slider gives an approximation of the base
@@ -3421,7 +3426,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                             ImVec2(e.sx - 8, e.sy - 20),
                             IM_COL32(255, 40, 40, 240), "!IN RANGE!");
                     } else {
-                        const int SEGMENTS = 24;
+                        const int SEGMENTS = 8;    // was 24 — GPU driver TDR
                         float clipMinX = -displaySize.x, clipMaxX = displaySize.x * 2;
                         float clipMinY = -displaySize.y, clipMaxY = displaySize.y * 2;
                         Vec3 prevScreen{0,0,0}; bool havePrev = false;
