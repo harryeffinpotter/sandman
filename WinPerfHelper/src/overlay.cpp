@@ -1562,6 +1562,10 @@ static bool seh_imgui_newframes() {
 static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     // Update render-thread heartbeat FIRST — worker checks gap for freeze detect.
     g_lastPresentTick.store(GetTickCount64());
+    // Time OUR work inside present — separate from game's own render time.
+    // If our internal time is small but the present GAP is huge, freeze is
+    // game-side (Unity GC etc). If our time balloons, freeze is us.
+    DWORD _presentT0 = GetTickCount();
     static bool s_logged = false;
     if (!s_logged) { dbglog("[hooked_present] FIRST CALL swapchain=%p\n", pSwapChain); s_logged = true; }
 
@@ -3740,6 +3744,15 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
     }
 
     safe_imgui_render_and_present_overlay();
+
+    // Log if OUR work inside present exceeded 30ms — nails whether the
+    // stall is our code (ImGui / DirectX / SEH) or game-side (Unity GC).
+    {
+        DWORD ourMs = GetTickCount() - _presentT0;
+        if (ourMs > 30) {
+            dbglog("[perf-warn] hooked_present OUR code took %lums\n", ourMs);
+        }
+    }
 
     if (s_frameCount < 5) { dbglog("[frame %d] calling original present\n", s_frameCount); }
     HRESULT hr = g_originalPresent(pSwapChain, SyncInterval, Flags);
