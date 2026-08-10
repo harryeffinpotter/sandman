@@ -2035,11 +2035,11 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     int lockedId = g_lockedEntityId.load();
                     bool permaActive = g_permaLockActive.load();
 
-                    // Nested-sort pass: DFS emit — top-level items first,
-                    // then their children immediately after them, indented.
-                    // 'top-level' = item whose parentEntityId is 0 OR whose
-                    // parent isn't in the snap list (e.g. held box whose
-                    // parent is your PlayerAvatar which we exclude).
+                    // Nested-sort pass: DFS emit with CYCLE GUARD — top-level
+                    // items first, then their children indented. Cycle guard
+                    // prevents an entity that appears in a parent-loop from
+                    // being emitted twice (LO reported items showing under
+                    // themselves + duplication).
                     {
                         std::unordered_set<int> presentIds;
                         presentIds.reserve(rowSnaps.size());
@@ -2048,6 +2048,8 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         std::vector<size_t> topLevel;
                         for (size_t i = 0; i < rowSnaps.size(); i++) {
                             int pid = rowSnaps[i].parentEntityId;
+                            // Self-parent is nonsense — treat as top-level.
+                            if (pid == rowSnaps[i].entityId) pid = 0;
                             if (pid == 0 || presentIds.find(pid) == presentIds.end()) {
                                 topLevel.push_back(i);
                             } else {
@@ -2056,19 +2058,30 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         }
                         std::vector<ItemRowSnap> nested;
                         nested.reserve(rowSnaps.size());
-                        // Iterative DFS to avoid deep recursion on huge inventories.
+                        std::unordered_set<int> emittedIds;   // cycle guard
+                        emittedIds.reserve(rowSnaps.size());
                         std::vector<std::pair<size_t,int>> stack;   // idx, depth
                         for (auto it = topLevel.rbegin(); it != topLevel.rend(); ++it)
                             stack.push_back({*it, 0});
                         while (!stack.empty()) {
                             auto [idx, depth] = stack.back();
                             stack.pop_back();
+                            int eid = rowSnaps[idx].entityId;
+                            if (!emittedIds.insert(eid).second) continue;   // already emitted
                             rowSnaps[idx].nestDepth = depth;
                             nested.push_back(rowSnaps[idx]);
-                            auto cit = childrenByParent.find(rowSnaps[idx].entityId);
+                            auto cit = childrenByParent.find(eid);
                             if (cit != childrenByParent.end()) {
                                 for (auto rit = cit->second.rbegin(); rit != cit->second.rend(); ++rit)
                                     stack.push_back({*rit, depth + 1});
+                            }
+                        }
+                        // Append any items that never got emitted (orphans in a
+                        // parent chain that all pointed at missing entities).
+                        for (size_t i = 0; i < rowSnaps.size(); i++) {
+                            if (emittedIds.insert(rowSnaps[i].entityId).second) {
+                                rowSnaps[i].nestDepth = 0;
+                                nested.push_back(rowSnaps[i]);
                             }
                         }
                         rowSnaps.swap(nested);

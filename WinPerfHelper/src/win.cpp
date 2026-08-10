@@ -386,6 +386,7 @@ std::atomic<bool> g_running{true};
 WorldVector g_playerPos = {};
 void* g_userNameKlass = nullptr;
 void* g_userNameHUDKlass = nullptr;
+void* g_accountIdKlassUser = nullptr;   // HoloNet.Shared.Users.Components.AccountIdComponent
 void* g_userNameHUDType  = nullptr;
 void* g_userContextModuleInstance = nullptr;
 fn_getEntByAcctId g_getUserEntityByAcctId = nullptr;
@@ -1709,11 +1710,12 @@ static int seh_walk_user_context(UserCacheHit* out, int outCap) {
                             }
                         }
                     }
-                } else {
-                    unsigned long long v = *(unsigned long long*)((uintptr_t)e_val + 0x10);
-                    if (v >= 0x0110000100000000ULL && v < 0x0110000200000000ULL && acctId == 0) {
-                        acctId = v;
-                    }
+                } else if (e_klass == g_accountIdKlassUser && acctId == 0) {
+                    // AccountIdComponent (User context) — value: UInt64 at +0x10.
+                    // Klass match is precise regardless of ID format (Steam,
+                    // non-Steam, etc). Was previously a SteamID heuristic that
+                    // filtered non-Steam users out.
+                    acctId = *(unsigned long long*)((uintptr_t)e_val + 0x10);
                 }
             }
             if (acctId != 0 && nmLen > 0) {

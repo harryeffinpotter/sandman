@@ -1031,6 +1031,33 @@ static DWORD WINAPI worker_thread(LPVOID) {
             }
             g_userNameKlass = bestKlass;
 
+            // Also find AccountIdComponent (User context version). Full name:
+            // Hologryph.HoloNet.Shared.Users.Components.AccountIdComponent
+            // Used by the user-name cache walker to identify the accountId
+            // slot in each UserEntity by klass match instead of a Steam-ID
+            // upper-bits heuristic that was too restrictive.
+            for (size_t i = 0; i < asmCount3; i++) {
+                if (g_accountIdKlassUser) break;
+                void* img = api.il2cpp_assembly_get_image(assemblies3[i]);
+                if (!img) continue;
+                size_t classCount = api.il2cpp_image_get_class_count(img);
+                for (size_t j = 0; j < classCount; j++) {
+                    void* klass = api.il2cpp_image_get_class(img, j);
+                    if (!klass) continue;
+                    const char* cn = api.il2cpp_class_get_name(klass);
+                    if (!cn || strcmp(cn, "AccountIdComponent") != 0) continue;
+                    const char* ns = api.il2cpp_class_get_namespace ? api.il2cpp_class_get_namespace(klass) : "";
+                    if (!ns) continue;
+                    // The USER-context AccountIdComponent lives in HoloNet.Shared.Users.
+                    // The GAME-context one lives in Sand.Shared.Game.Components — skip that.
+                    if (strstr(ns, "HoloNet") && strstr(ns, "Users") && strstr(ns, "Components")) {
+                        g_accountIdKlassUser = klass;
+                        break;
+                    }
+                }
+            }
+            wlog("[worker] AccountIdComponent (User ctx) klass = %p\n", g_accountIdKlassUser);
+
             // Second pass: also grab the HUD-side class (UserNamesHUDUpdateSystem
             // etc. — anything with UserName in name, most-fields-wins). This
             // becomes the type we hand to Component.GetComponentInChildren in
