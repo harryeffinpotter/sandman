@@ -1612,6 +1612,36 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
     // the game loses focus or our wndproc hook got clobbered by a freeze.
     // Effect: force menu visible, kill stream-proof (menu-hiding fullscreen
     // case), bring overlay window back to topmost.
+    // F8 edge-trigger — one-shot dump of UserContextModule._users (+0x38)
+    // raw bytes to ringlog under "[user-diag]". Goal: identify what
+    // collection type _users actually is (HashSet, List, IGroup wrapper).
+    // The walker currently assumes HashSet<T> layout as a documented
+    // conjecture; F8 tells us if that's right.
+    {
+        static bool s_f8_prev = false;
+        bool s_f8_now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+        if (s_f8_now && !s_f8_prev) {
+            g_userDiagRequested.store(true);
+            dbglog("[F8] user-diag requested — next walker tick dumps _users layout\n");
+        }
+        s_f8_prev = s_f8_now;
+    }
+
+    // F6 edge-trigger — one-shot dump of InventoryData / InventorySlotData /
+    // InventoryItemId components for a few sample entities to ringlog under
+    // "[inv-diag]". Goal: see the actual container-contents data model so
+    // we can stop misusing Parent-tree as inventory. F7 is already claimed
+    // by dupelab playback so this uses F6.
+    {
+        static bool s_f6_prev = false;
+        bool s_f6_now = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+        if (s_f6_now && !s_f6_prev) {
+            g_inventoryDiagRequested.store(true);
+            dbglog("[F6] inv-diag requested — next scan_entities dumps inventory components\n");
+        }
+        s_f6_prev = s_f6_now;
+    }
+
     {
         static bool s_f1_prev = false;
         bool s_f1_now = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
@@ -1908,30 +1938,42 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                 ImGui::InputText("Search", searchBuf, sizeof(searchBuf));
                 g_nameFilter = searchBuf;
 
+                // Pause list — freezes rowSnaps at its last built value so LO
+                // can actually read the panel without it flying around. When
+                // paused the whole rebuild+lock is skipped and rendering uses
+                // the previous snapshot. Uncheck to resume live updates.
+                static bool s_itemsPaused = false;
+                ImGui::Checkbox("Pause list", &s_itemsPaused);
+                if (s_itemsPaused) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "(frozen)");
+                }
+
                 ImGui::Text("Items");
                 ImGui::BeginChild("ItemList", ImVec2(0, 0), true);
 
                 struct ItemRowSnap {
                     std::string name;
                     float distance;
-                    int entityId;
-                    int serverId;
+                    int entityId;          // ECS internal index (+0x48) — display / dupelab
+                    int serverId;          // Id-component value — canonical Id domain used by Parent refs
                     void* entityPtr;
                     bool isWeapon;
                     bool isHeavy;
                     bool isHeldByPlayer;
                     bool isInOthersInv;
-                    int  parentEntityId;
+                    int  parentEntityId;   // Id-component domain: compare against serverId, NOT entityId
                     float healthNorm;   // -1 = unknown
                     std::string parentName;   // "in <containerName>" for readable inv-child display
                     int nestDepth = 0;        // visual indent for nested container contents
                 };
                 static std::vector<ItemRowSnap> rowSnaps;
-                rowSnaps.clear();
 
                 bool wf = g_weaponFilter.load();
                 size_t nlen = strlen(searchBuf);
 
+                if (!s_itemsPaused) {
+                rowSnaps.clear();
                 EnterCriticalSection(&g_itemsLock);
                 rowSnaps.reserve(g_items.size());
                 bool showChildren = g_showContainerContents.load();
@@ -1945,7 +1987,13 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     // Now: only hide items whose NAME starts with "item_" —
                     // that's actual inventory clutter. PlayerAvatars/mobs/
                     // walkers stay visible regardless.
-                    bool looksLikeInvChild = item.parentEntityId != 0 && !item.isHeldByPlayer
+                    // "Show container contents" gate — now also applies to
+                    // items held by any player. Previously the `!isHeldByPlayer`
+                    // clause here exempted held items, which meant every
+                    // player's inventory flooded the panel even with the
+                    // checkbox off (LO 2026-08-10: 30x of same stackable per
+                    // held container made the panel unusable).
+                    bool looksLikeInvChild = item.parentEntityId != 0
                                              && item.name.rfind("item_", 0) == 0;
                     if (!showChildren && looksLikeInvChild) continue;
                     // Items-panel-only hides — kills phantom-item interference
@@ -2007,12 +2055,16 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     rs.isInOthersInv = item.isInOthersInv;
                     rs.parentEntityId = item.parentEntityId;
                     rs.healthNorm = item.healthNorm;
-                    // Look up parent entity by ID and grab its displayName so
-                    // container contents show "in <containerName>" instead of
-                    // the meaningless "[inv 1888688]" numeric id.
+                    // Look up parent entity by Id-component value and grab its
+                    // displayName. Previously compared parentEntityId against
+                    // pit.entityId — but parentEntityId comes from the Parent
+                    // component (Id-component domain) while pit.entityId is the
+                    // ECS internal index (+0x48). Different number spaces;
+                    // matches were coincidental. Now compares against
+                    // pit.serverId which IS the Id-component value.
                     if (item.parentEntityId != 0) {
                         for (auto& pit : g_items) {
-                            if (pit.entityId == item.parentEntityId) {
+                            if (pit.serverId > 0 && pit.serverId == item.parentEntityId) {
                                 rs.parentName = !pit.displayName.empty() ? pit.displayName : pit.name;
                                 break;
                             }
@@ -2021,6 +2073,7 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     rowSnaps.push_back(std::move(rs));
                 }
                 LeaveCriticalSection(&g_itemsLock);
+                }  // end if (!s_itemsPaused)
 
                 if (ImGui::BeginTable("Items", 7,
                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter |
@@ -2039,22 +2092,26 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                     int lockedId = g_lockedEntityId.load();
                     bool permaActive = g_permaLockActive.load();
 
-                    // Nested-sort pass: DFS emit with CYCLE GUARD — top-level
-                    // items first, then their children indented. Cycle guard
-                    // prevents an entity that appears in a parent-loop from
-                    // being emitted twice (LO reported items showing under
-                    // themselves + duplication).
+                    // Nested-sort pass: DFS emit with cycle guard — top-level
+                    // items first, then their children indented.
+                    // FIXED 2026-08-10: previously keyed by entityId (ECS
+                    // internal index +0x48) but parentEntityId lives in the
+                    // Id-component domain. Different number spaces → tree
+                    // relationships were coincidental. Now uses serverId
+                    // (Id-component value) as the canonical parent-link key.
+                    // Fallback: rows with serverId <= 0 can't participate in
+                    // parent linking — emit them as top-level.
                     {
-                        std::unordered_set<int> presentIds;
-                        presentIds.reserve(rowSnaps.size());
-                        for (auto& r : rowSnaps) presentIds.insert(r.entityId);
+                        std::unordered_set<int> presentSids;
+                        presentSids.reserve(rowSnaps.size());
+                        for (auto& r : rowSnaps) if (r.serverId > 0) presentSids.insert(r.serverId);
                         std::unordered_map<int, std::vector<size_t>> childrenByParent;
                         std::vector<size_t> topLevel;
                         for (size_t i = 0; i < rowSnaps.size(); i++) {
                             int pid = rowSnaps[i].parentEntityId;
                             // Self-parent is nonsense — treat as top-level.
-                            if (pid == rowSnaps[i].entityId) pid = 0;
-                            if (pid == 0 || presentIds.find(pid) == presentIds.end()) {
+                            if (pid > 0 && pid == rowSnaps[i].serverId) pid = 0;
+                            if (pid == 0 || presentSids.find(pid) == presentSids.end()) {
                                 topLevel.push_back(i);
                             } else {
                                 childrenByParent[pid].push_back(i);
@@ -2062,28 +2119,30 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* pSwapChain, UINT
                         }
                         std::vector<ItemRowSnap> nested;
                         nested.reserve(rowSnaps.size());
-                        std::unordered_set<int> emittedIds;   // cycle guard
-                        emittedIds.reserve(rowSnaps.size());
+                        std::unordered_set<int> emittedRowIdx;   // cycle guard by row index (no ID collisions possible)
+                        emittedRowIdx.reserve(rowSnaps.size());
                         std::vector<std::pair<size_t,int>> stack;   // idx, depth
                         for (auto it = topLevel.rbegin(); it != topLevel.rend(); ++it)
                             stack.push_back({*it, 0});
                         while (!stack.empty()) {
                             auto [idx, depth] = stack.back();
                             stack.pop_back();
-                            int eid = rowSnaps[idx].entityId;
-                            if (!emittedIds.insert(eid).second) continue;   // already emitted
+                            if (!emittedRowIdx.insert((int)idx).second) continue;
                             rowSnaps[idx].nestDepth = depth;
                             nested.push_back(rowSnaps[idx]);
-                            auto cit = childrenByParent.find(eid);
-                            if (cit != childrenByParent.end()) {
-                                for (auto rit = cit->second.rbegin(); rit != cit->second.rend(); ++rit)
-                                    stack.push_back({*rit, depth + 1});
+                            int sid = rowSnaps[idx].serverId;
+                            if (sid > 0) {
+                                auto cit = childrenByParent.find(sid);
+                                if (cit != childrenByParent.end()) {
+                                    for (auto rit = cit->second.rbegin(); rit != cit->second.rend(); ++rit)
+                                        stack.push_back({*rit, depth + 1});
+                                }
                             }
                         }
-                        // Append any items that never got emitted (orphans in a
-                        // parent chain that all pointed at missing entities).
+                        // Append any rows never emitted (orphans in a chain
+                        // whose ancestors are missing from the current scan).
                         for (size_t i = 0; i < rowSnaps.size(); i++) {
-                            if (emittedIds.insert(rowSnaps[i].entityId).second) {
+                            if (emittedRowIdx.insert((int)i).second) {
                                 rowSnaps[i].nestDepth = 0;
                                 nested.push_back(rowSnaps[i]);
                             }

@@ -247,6 +247,16 @@ extern std::atomic<bool> g_running;
 extern volatile DWORD g_workerThreadId;
 extern volatile DWORD g_renderThreadId;
 extern volatile bool g_workerVehActive;
+// F8 one-shot: dumps UserContextModule._users (+0x38) layout to ringlog so
+// we can identify the collection type (HashSet / List / IGroup) that holds
+// UserEntity. Overlay F8 handler sets true; seh_walk_user_context consumes
+// it via exchange() on next call.
+extern std::atomic<bool> g_userDiagRequested;
+// F6 one-shot: dumps InventoryData / InventorySlotData / InventoryItemId
+// component bytes for a few sample entities to ringlog under "[inv-diag]",
+// so we can see the actual inventory model instead of guessing via Parent
+// tree. Overlay F6 handler sets true; scan_entities consumes via exchange().
+extern std::atomic<bool> g_inventoryDiagRequested;
 extern CONTEXT g_vehSavedCtx;
 extern volatile bool g_vehCrashRecovered;
 extern CONTEXT g_vehInnerCtx;

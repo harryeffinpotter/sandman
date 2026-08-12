@@ -111,6 +111,19 @@ std::atomic<int> g_hotkeyHardKill{VK_F12};
 std::atomic<int> g_hotkeyDupeSuspend{VK_F9};
 std::atomic<int> g_hotkeyDupeMaster{VK_F10};
 std::atomic<int> g_hotkeyPlaybackFirst{VK_F7};
+
+// F8 one-shot: dump UserContextModule._users (+0x38) raw bytes to ringlog so
+// we can identify what collection type actually holds UserEntity records
+// (HashSet, List, IGroup wrapper?). Overlay F8 handler sets true;
+// seh_walk_user_context consumes via exchange() on its next call.
+std::atomic<bool> g_userDiagRequested{false};
+
+// F7 one-shot: dumps InventoryData / InventorySlotData / InventoryItemId
+// component raw bytes for sample entities to ringlog under "[inv-diag]" so
+// we can see how the game actually models container contents (instead of
+// misusing the Parent tree). Overlay F7 handler sets true; scan_entities
+// snapshots and calls dump_inventory_diag() once per press.
+std::atomic<bool> g_inventoryDiagRequested{false};
 std::atomic<int> g_hotkeyCaptureRequest{0};  // set to feature index when UI asks user to press a key
 
 // Countdown scheduler — every Dupe Lab button can be "armed" for delayed
@@ -1666,117 +1679,60 @@ std::unordered_map<unsigned long long, std::string> g_userNameCache;
 // parallel arrays; caller copies into the std::unordered_map afterwards.
 struct UserCacheHit { unsigned long long acctId; char name[128]; };
 static int seh_walk_user_context(UserCacheHit* out, int outCap) {
-    static volatile long s_dumped = 0;
-    static volatile long s_diagLogged = 0;
+    // F8 one-shot: dump the raw _users field bytes so we can identify the
+    // collection type without needing another rebuild. Compare exchange
+    // consumes the flag atomically.
+    bool doDiag = g_userDiagRequested.exchange(false);
     __try {
-        // Full diagnostic log for the FIRST walk — reveals exactly which
-        // is_readable check kills us. Fires once per session.
-        void* ctx = *(void**)((uintptr_t)g_userContextModuleInstance + 0x10);
-        void* ctxAt18 = is_readable((void*)((uintptr_t)g_userContextModuleInstance + 0x18), 8)
-            ? *(void**)((uintptr_t)g_userContextModuleInstance + 0x18) : nullptr;
-        void* ctxAt20 = is_readable((void*)((uintptr_t)g_userContextModuleInstance + 0x20), 8)
-            ? *(void**)((uintptr_t)g_userContextModuleInstance + 0x20) : nullptr;
-        bool ctxReadable = is_readable(ctx, 0xA0);
-        bool ctxReadableSmall = is_readable(ctx, 0x28);
-        if (_InterlockedCompareExchange(&s_diagLogged, 1, 0) == 0) {
-            wlog("[user-walk-diag] ucm=%p ctx(+0x10)=%p read0xA0=%d read0x28=%d\n",
-                 g_userContextModuleInstance, ctx, ctxReadable?1:0, ctxReadableSmall?1:0);
-            wlog("[user-walk-diag] +0x18=%p +0x20=%p\n", ctxAt18, ctxAt20);
-            if (ctxReadableSmall) {
-                for (int off = 0; off < 0x80; off += 8) {
-                    uintptr_t v = *(uintptr_t*)((uintptr_t)ctx + off);
-                    wlog("[user-walk-diag] ctx+0x%02X = %016llX\n", off, (unsigned long long)v);
+        if (!g_userContextModuleInstance) return 0;
+
+        // Codex 2026-08-10 analysis: ManagerDump.txt declares
+        // UserContextModule._users at +0x38, not +0x10. Reading +0x10 gave
+        // us the wrong pointer that decoded as raw ASCII bytes ("Small…"),
+        // confirming it isn't a collection at all. Switching to +0x38.
+        void* users = *(void**)((uintptr_t)g_userContextModuleInstance + 0x38);
+
+        if (doDiag) {
+            ringlog::push("[user-diag] === UCM=%p  _users(+0x38)=%p ===",
+                          g_userContextModuleInstance, users);
+            // Klass name of the _users object (first qword is always the klass ptr).
+            if (is_readable(users, 0x40)) {
+                void* klass = *(void**)users;
+                const char* kname = "?";
+                IL2CPP_API* api = get_il2cpp_api();
+                if (api && api->il2cpp_class_get_name && is_readable(klass, 0x40)) {
+                    __try {
+                        const char* nm = api->il2cpp_class_get_name(klass);
+                        if (nm) kname = nm;
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 }
+                ringlog::push("[user-diag]   _users klass=%p name='%s'", klass, kname);
+                for (int off = 0; off < 0x80; off += 8) {
+                    if (!is_readable((void*)((uintptr_t)users + off), 8)) break;
+                    unsigned long long v = *(unsigned long long*)((uintptr_t)users + off);
+                    ringlog::push("[user-diag]   _users+0x%02X = %016llX", off, v);
+                }
+            } else {
+                ringlog::push("[user-diag]   _users unreadable at %p", users);
             }
         }
-        if (!ctxReadable && !ctxReadableSmall) return 0;
-        void* hashSet = *(void**)((uintptr_t)ctx + 0x58);
-        if (!is_readable(hashSet, 0x30)) {
-            static volatile long once = 0;
-            if (_InterlockedCompareExchange(&once, 1, 0) == 0)
-                wlog("[user-walk-diag] hashSet unreadable, ctx+0x58=%p\n", hashSet);
-            return 0;
-        }
-        void* slots_arr = *(void**)((uintptr_t)hashSet + 0x18);
-        int lastIndex = *(int*)((uintptr_t)hashSet + 0x24);
-        if (!slots_arr || lastIndex <= 0) {
-            static volatile long once2 = 0;
-            if (_InterlockedCompareExchange(&once2, 1, 0) == 0)
-                wlog("[user-walk-diag] slots_arr=%p lastIndex=%d\n", slots_arr, lastIndex);
-            return 0;
-        }
+
+        if (!is_readable(users, 0x30)) return 0;
+
+        // Tentative walk: assume _users is a HashSet<UserEntity> with the
+        // Entitas hash-set layout the old (wrong) walker also assumed —
+        // slots-array pointer at +0x18, lastIndex at +0x24. If _users is
+        // actually a List<T> or a custom IGroup wrapper this returns 0
+        // entries and the F8 diag above surfaces the real layout for a
+        // follow-up patch. Not a heuristic; a documented conjecture that
+        // testing will confirm or reject.
+        void* slots_arr = *(void**)((uintptr_t)users + 0x18);
+        int lastIndex = *(int*)((uintptr_t)users + 0x24);
+        if (!slots_arr || lastIndex <= 0) return 0;
+        if (!is_readable(slots_arr, 0x20)) return 0;
         size_t slots_len = *(size_t*)((uintptr_t)slots_arr + 0x18);
         uint8_t* slots = (uint8_t*)((uintptr_t)slots_arr + 0x20);
         int limit = (lastIndex < (int)slots_len) ? lastIndex : (int)slots_len;
-
-        // One-shot heavy dump: first entity, all its dict entries.
-        if (_InterlockedCompareExchange(&s_dumped, 1, 0) == 0) {
-            char p[MAX_PATH]; char ad[MAX_PATH];
-            DWORD n = GetEnvironmentVariableA("APPDATA", ad, MAX_PATH);
-            if (n && n < MAX_PATH) snprintf(p, sizeof(p), "%s\\Microsoft\\PerfCache\\perf_userctx.dat", ad);
-            else strncpy_s(p, sizeof(p), "C:\\perf_userctx.dat", _TRUNCATE);
-            FILE* df = nullptr; fopen_s(&df, p, "w");
-            if (df) {
-                fprintf(df, "# UserContext walk diagnostic — LO 2026-08-10\n");
-                fprintf(df, "# g_userContextModuleInstance = %p\n", g_userContextModuleInstance);
-                fprintf(df, "# g_userNameKlass             = %p\n", g_userNameKlass);
-                fprintf(df, "# g_accountIdKlassUser        = %p\n", g_accountIdKlassUser);
-                fprintf(df, "# hashSet lastIndex=%d slots_len=%zu limit=%d\n\n", lastIndex, slots_len, limit);
-                int dumpedEnts = 0;
-                for (int s = 0; s < limit && dumpedEnts < 3; s++) {
-                    int hc = *(int*)(slots + s * 16);
-                    if (hc < 0) continue;
-                    void* ent = *(void**)(slots + s * 16 + 8);
-                    if (!ent || !is_readable(ent, 0x58)) continue;
-                    void* dict = *(void**)((uintptr_t)ent + 0x50);
-                    fprintf(df, "\n=== UserEntity #%d ptr=%p dict=%p ===\n", dumpedEnts, ent, dict);
-                    if (!is_readable(dict, 0x28)) { fprintf(df, "  dict unreadable\n"); dumpedEnts++; continue; }
-                    void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
-                    if (!is_readable(entries_arr, 0x28)) { fprintf(df, "  entries_arr unreadable\n"); dumpedEnts++; continue; }
-                    size_t entry_count = *(size_t*)((uintptr_t)entries_arr + 0x18);
-                    fprintf(df, "  entry_count=%zu\n", entry_count);
-                    if (entry_count == 0 || entry_count > 500000) { dumpedEnts++; continue; }
-                    uint8_t* entries = (uint8_t*)((uintptr_t)entries_arr + 0x20);
-                    for (size_t i = 0; i < entry_count && i < 50; i++) {
-                        int e_key = *(int*)(entries + i * 24 + 4);
-                        void* e_val = *(void**)(entries + i * 24 + 8);
-                        fprintf(df, "  [slot=%d] val=%p", e_key, e_val);
-                        if (is_readable(e_val, 0x18)) {
-                            void* e_klass = *(void**)e_val;
-                            fprintf(df, " klass=%p", e_klass);
-                            const char* tag = "";
-                            if (e_klass == g_userNameKlass) tag = " <== UserNameKlass";
-                            else if (e_klass == g_accountIdKlassUser) tag = " <== AccountIdKlass";
-                            fprintf(df, "%s", tag);
-                            // Try read val+0x10 as a pointer to a string
-                            void* fld10 = *(void**)((uintptr_t)e_val + 0x10);
-                            fprintf(df, " field+0x10=%p", fld10);
-                            if (is_readable(fld10, 0x14)) {
-                                int slen = *(int*)((uintptr_t)fld10 + 0x10);
-                                if (slen > 0 && slen < 64) {
-                                    wchar_t* ws = (wchar_t*)((uintptr_t)fld10 + 0x14);
-                                    if (is_readable(ws, slen * 2)) {
-                                        char nb[65] = {}; bool ok = true;
-                                        for (int c = 0; c < slen; c++) {
-                                            nb[c] = (char)ws[c];
-                                            if (nb[c] < 0x20 || nb[c] > 0x7E) { ok = false; break; }
-                                        }
-                                        if (ok) fprintf(df, " STRING=\"%s\"", nb);
-                                    }
-                                }
-                            }
-                            // Also read as uint64 in case it's an accountId
-                            unsigned long long u = *(unsigned long long*)((uintptr_t)e_val + 0x10);
-                            fprintf(df, " u64=0x%llX", u);
-                        }
-                        fprintf(df, "\n");
-                    }
-                    dumpedEnts++;
-                }
-                fclose(df);
-                wlog("[user-cache] one-shot dump written to perf_userctx.dat (%d entities)\n", dumpedEnts);
-            }
-        }
 
         int written = 0;
         for (int s = 0; s < limit && written < outCap; s++) {
@@ -1784,6 +1740,8 @@ static int seh_walk_user_context(UserCacheHit* out, int outCap) {
             if (hc < 0) continue;
             void* ent = *(void**)(slots + s * 16 + 8);
             if (!ent || !is_readable(ent, 0x58)) continue;
+
+            // Entitas entity: component dict at +0x50.
             void* dict = *(void**)((uintptr_t)ent + 0x50);
             if (!is_readable(dict, 0x28)) continue;
             void* entries_arr = *(void**)((uintptr_t)dict + 0x18);
@@ -1798,55 +1756,37 @@ static int seh_walk_user_context(UserCacheHit* out, int outCap) {
                 void* e_val = *(void**)(entries + i * 24 + 8);
                 if (!is_readable(e_val, 0x18)) continue;
                 void* e_klass = *(void**)e_val;
-                // FALLBACK: if klass matches OR field+0x10 looks like a
-                // readable UTF-16 string (probably the name), capture it.
-                bool isNameMatch = (e_klass == g_userNameKlass);
-                if (!isNameMatch && nmLen == 0) {
-                    void* np = *(void**)((uintptr_t)e_val + 0x10);
-                    if (is_readable(np, 0x14)) {
-                        int len = *(int*)((uintptr_t)np + 0x10);
-                        if (len > 2 && len < 32) {
-                            wchar_t* ws = (wchar_t*)((uintptr_t)np + 0x14);
-                            if (is_readable(ws, len * 2)) {
-                                bool looksLikeName = true;
-                                for (int c = 0; c < len; c++) {
-                                    wchar_t wc = ws[c];
-                                    // Printable ASCII or common name chars
-                                    if (wc < 0x20 || wc > 0x7E) { looksLikeName = false; break; }
-                                }
-                                if (looksLikeName) isNameMatch = true;
-                            }
-                        }
-                    }
-                }
-                if (isNameMatch && nmLen == 0) {
+
+                // EXACT klass match only. The old heuristics (any printable
+                // ASCII string as a name, first uint64 >= 10000 as accountId)
+                // paired unrelated values from unrelated components. Gone.
+                if (e_klass == g_userNameKlass && nmLen == 0) {
                     int nameOff = (g_userNameFieldOffset > 0) ? g_userNameFieldOffset : 0x10;
                     void* np = *(void**)((uintptr_t)e_val + nameOff);
                     if (is_readable(np, 0x14)) {
                         int len = *(int*)((uintptr_t)np + 0x10);
-                        if (len > 0 && len < 127) {
+                        if (len > 0 && len < 127 &&
+                            is_readable((void*)((uintptr_t)np + 0x14), (size_t)len * 2)) {
+                            // Proper UTF-16LE -> UTF-8. The old code cast each
+                            // wchar_t to char, which corrupted non-ASCII names.
                             wchar_t* wchars = (wchar_t*)((uintptr_t)np + 0x14);
-                            if (is_readable(wchars, len * 2)) {
-                                for (int c = 0; c < len; c++) nm[c] = (char)wchars[c];
-                                nm[len] = 0; nmLen = len;
+                            int u8len = WideCharToMultiByte(
+                                CP_UTF8, 0, wchars, len,
+                                nm, (int)sizeof(nm) - 1,
+                                nullptr, nullptr);
+                            if (u8len > 0 && u8len < (int)sizeof(nm)) {
+                                nm[u8len] = 0;
+                                nmLen = u8len;
                             }
                         }
                     }
-                }
-                if (e_klass == g_accountIdKlassUser && acctId == 0) {
+                } else if (e_klass == g_accountIdKlassUser && acctId == 0) {
                     acctId = *(unsigned long long*)((uintptr_t)e_val + 0x10);
-                } else if (acctId == 0) {
-                    // Fallback: any uint64 that's >= 10000 (not a small entity id).
-                    unsigned long long v = *(unsigned long long*)((uintptr_t)e_val + 0x10);
-                    if (v >= 10000ULL && v <= 0x0FFFFFFFFFFFFFFFULL) {
-                        // Take the FIRST such value seen — will be adjusted per dump results
-                        if (acctId == 0) acctId = v;
-                    }
                 }
             }
             if (acctId != 0 && nmLen > 0) {
                 out[written].acctId = acctId;
-                memcpy(out[written].name, nm, 128);
+                memcpy(out[written].name, nm, sizeof(out[written].name));
                 written++;
             }
         }
@@ -1862,15 +1802,20 @@ void refresh_user_name_cache() {
     if (!g_userNameCacheLockInit) { InitializeCriticalSection(&g_userNameCacheLock); g_userNameCacheLockInit = true; }
     static UserCacheHit hits[128];
     int n = seh_walk_user_context(hits, 128);
-    std::unordered_map<unsigned long long, std::string> local;
-    for (int i = 0; i < n; i++) local[hits[i].acctId] = hits[i].name;
+    // MERGE, don't replace. Previous swap() wiped every already-resolved name
+    // on any tick where the walker returned zero (transient failures during
+    // group mutation, brief empty state, etc.), making names flicker in/out.
+    // Now: only ADD entries; existing names persist across empty ticks.
+    // (Codex 2026-08-10 audit finding.)
     EnterCriticalSection(&g_userNameCacheLock);
-    g_userNameCache.swap(local);
+    for (int i = 0; i < n; i++) {
+        g_userNameCache[hits[i].acctId] = hits[i].name;
+    }
     size_t sz = g_userNameCache.size();
     LeaveCriticalSection(&g_userNameCacheLock);
     static int s_lastLoggedNamed = -1;
     if (n != s_lastLoggedNamed) {
-        wlog("[user-cache] refresh: %d entries cached (total %zu)\n", n, sz);
+        wlog("[user-cache] refresh: %d new hits (total cached %zu)\n", n, sz);
         s_lastLoggedNamed = n;
     }
 }
@@ -3424,6 +3369,133 @@ static void dump_all_entities_full(void** entityPtrs, int entityCount) {
 }
 
 // ---------------------------------------------------------------------------
+// dump_inventory_diag — F7 one-shot, ringlog only. Walks the entity list,
+// finds up to N entities that have InventoryData / InventorySlotData /
+// InventoryItemId components, and dumps their component raw bytes + klass
+// name + any pointer targets. Goal: figure out how the game actually models
+// a container's contents so we can stop treating Parent-tree as inventory.
+// Plain-C body (no std::string locals) so __try / SEH is legal.
+// ---------------------------------------------------------------------------
+static void dump_one_inv_component(const char* label, void* comp) {
+    if (!is_readable(comp, 0x40)) {
+        ringlog::push("[inv-diag]     %s: unreadable @ %p", label, comp);
+        return;
+    }
+    void* klass = *(void**)comp;
+    const char* kname = "?";
+    IL2CPP_API* api = get_il2cpp_api();
+    if (api && api->il2cpp_class_get_name && is_readable(klass, 0x40)) {
+        __try {
+            const char* n = api->il2cpp_class_get_name(klass);
+            if (n) kname = n;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    ringlog::push("[inv-diag]     %s klass=%p '%s' @%p", label, klass, kname, comp);
+    for (int off = 0; off < 0x40; off += 8) {
+        if (!is_readable((void*)((uintptr_t)comp + off), 8)) break;
+        unsigned long long v = *(unsigned long long*)((uintptr_t)comp + off);
+        ringlog::push("[inv-diag]       +0x%02X = %016llX", off, v);
+    }
+}
+
+static void dump_inventory_diag(void** entityPtrs, int entityCount) {
+    __try {
+        ringlog::push("[inv-diag] === F7 pressed — scanning %d entities for inventory components ===",
+                      entityCount);
+        ringlog::push("[inv-diag]   g_idx_inventory_data=%d slot=%d item_id=%d item_count=%d slot_index=%d entity_id=%d",
+                      g_idx_inventory_data, g_idx_inventory_slot_data,
+                      g_idx_inventory_item_id, g_idx_inventory_item_count,
+                      g_idx_inventory_item_slot_index, g_idx_inventory_entity_id);
+
+        // Pass 1 — dump up to 3 containers (entities with InventoryData).
+        int containersDumped = 0;
+        if (g_idx_inventory_data >= 0) {
+            for (int e = 0; e < entityCount && containersDumped < 3; e++) {
+                void* ent = entityPtrs[e];
+                if (!is_readable(ent, 0x58)) continue;
+                void* invData = get_component(ent, g_idx_inventory_data);
+                if (!invData) continue;
+
+                int eid = *(int*)((uintptr_t)ent + 0x48);
+                int sid = -1;
+                if (g_idx_id >= 0) {
+                    void* idc = get_component(ent, g_idx_id);
+                    if (is_readable(idc, 0x18)) sid = *(int*)((uintptr_t)idc + 0x10);
+                }
+                const char* bpName = "?";
+                char bpBuf[128] = {};
+                if (g_idx_blueprint >= 0) {
+                    void* bpc = get_component(ent, g_idx_blueprint);
+                    if (is_readable(bpc, 0x18)) {
+                        void* nameStr = *(void**)((uintptr_t)bpc + 0x10);
+                        if (is_readable(nameStr, 0x14)) {
+                            int nlen = *(int*)((uintptr_t)nameStr + 0x10);
+                            if (nlen > 0 && nlen < 127 && is_readable((void*)((uintptr_t)nameStr + 0x14), (size_t)nlen * 2)) {
+                                wchar_t* wc = (wchar_t*)((uintptr_t)nameStr + 0x14);
+                                for (int c = 0; c < nlen && c < 127; c++) bpBuf[c] = (char)wc[c];
+                                bpBuf[(nlen < 127) ? nlen : 127] = 0;
+                                bpName = bpBuf;
+                            }
+                        }
+                    }
+                }
+                ringlog::push("[inv-diag] --- CONTAINER #%d ent=%p eid=%d sid=%d bp=%s ---",
+                              containersDumped, ent, eid, sid, bpName);
+                dump_one_inv_component("InventoryData", invData);
+                if (g_idx_inventory_entity_id >= 0) {
+                    void* c = get_component(ent, g_idx_inventory_entity_id);
+                    if (c) dump_one_inv_component("InventoryEntityId (same-entity)", c);
+                }
+                if (g_idx_inventory_slot_data >= 0) {
+                    void* c = get_component(ent, g_idx_inventory_slot_data);
+                    if (c) dump_one_inv_component("InventorySlotData (same-entity)", c);
+                }
+                containersDumped++;
+            }
+        }
+        ringlog::push("[inv-diag]   containers dumped: %d", containersDumped);
+
+        // Pass 2 — dump up to 5 items (entities with InventoryItemId component).
+        int itemsDumped = 0;
+        if (g_idx_inventory_item_id >= 0) {
+            for (int e = 0; e < entityCount && itemsDumped < 5; e++) {
+                void* ent = entityPtrs[e];
+                if (!is_readable(ent, 0x58)) continue;
+                void* iiid = get_component(ent, g_idx_inventory_item_id);
+                if (!iiid) continue;
+
+                int eid = *(int*)((uintptr_t)ent + 0x48);
+                int sid = -1;
+                if (g_idx_id >= 0) {
+                    void* idc = get_component(ent, g_idx_id);
+                    if (is_readable(idc, 0x18)) sid = *(int*)((uintptr_t)idc + 0x10);
+                }
+                ringlog::push("[inv-diag] --- ITEM #%d ent=%p eid=%d sid=%d ---",
+                              itemsDumped, ent, eid, sid);
+                dump_one_inv_component("InventoryItemId", iiid);
+                if (g_idx_inventory_item_count >= 0) {
+                    void* c = get_component(ent, g_idx_inventory_item_count);
+                    if (c) dump_one_inv_component("InventoryItemCount", c);
+                }
+                if (g_idx_inventory_item_slot_index >= 0) {
+                    void* c = get_component(ent, g_idx_inventory_item_slot_index);
+                    if (c) dump_one_inv_component("InventoryItemSlotIndex", c);
+                }
+                if (g_idx_inventory_entity_id >= 0) {
+                    void* c = get_component(ent, g_idx_inventory_entity_id);
+                    if (c) dump_one_inv_component("InventoryEntityId", c);
+                }
+                itemsDumped++;
+            }
+        }
+        ringlog::push("[inv-diag]   items dumped: %d", itemsDumped);
+        ringlog::push("[inv-diag] === end ===");
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ringlog::push("[inv-diag]   SEH 0x%08lX during dump", GetExceptionCode());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // scan_entities
 // ---------------------------------------------------------------------------
 // Free helper — __try can't live in scan_entities() because that function
@@ -3503,6 +3575,15 @@ void scan_entities() {
         if (doLog) wlog("[scan] entityCount=%d source=%s cache=%p context=%p\n",
                         entityCount, is_readable(cache, 0x20) ? "cache+0x98" : "hashSet+0x58",
                         cache, context);
+
+        // F6 one-shot: dump inventory-model components for a few sample
+        // containers + items so we can see the actual data model instead of
+        // guessing via Parent tree. dump_inventory_diag has its own inner
+        // __try (this scope can't have one — scan_entities holds C++
+        // objects with destructors → C2712).
+        if (g_inventoryDiagRequested.exchange(false)) {
+            dump_inventory_diag(entityPtrs, entityCount);
+        }
 
 #if 0
         static bool s_diagDone = false;
